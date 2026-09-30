@@ -239,9 +239,11 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 | `risk-unmitigated` | error | No mitigation controls a risk. |
 | `mitigation-unimplemented` | error | No requirement implements a mitigation. |
 | `risk-unacceptable` | warning | The residual risk score exceeds `acceptable_risk_score`. |
-| `unknown-field` | error | A document or entity has a key the model does not know — usually a typo (`satisfes:`) that would silently drop a trace. |
+| `unknown-field` | error | A document, entity, note or `verified_by` item has a key the model does not know — usually a typo (`satisfes:`) that would silently drop a trace. |
 
-Like every rule, `unknown-field` findings are issues returned by
+Projects that deliberately carry extra keys (a `jira:` link, a note's
+`priority:`) set the rule to `warning` or `off`; the tools keep such keys
+intact, including the web editor. Like every rule, `unknown-field` findings are issues returned by
 {py:func}`rules_requirements.validate.validate` (and shown by `rr validate`,
 including `--format json`); `--strict` promotes them to errors when the rule is
 a warning. A key repeated within one mapping is always an error: YAML would

@@ -83,3 +83,28 @@ with open("report.html", "w", encoding="utf-8") as fh:
 .. automodule:: rules_requirements.bazel
    :members: run_generated_main, run_tests, golden
 ```
+
+## Editing, versioning and agents
+
+```{eval-rst}
+.. automodule:: rules_requirements.edit
+   :members: entity_to_dict, dict_to_entity, render_entity, render_field, locate, update_entity, insert_entity, delete_entity, render_file
+
+.. automodule:: rules_requirements.diff
+   :members: EntityChange, diff_models, summarize, render_text
+
+.. automodule:: rules_requirements.server.workspace
+   :members: Workspace, WorkspaceError, entity_payload
+
+.. automodule:: rules_requirements.server.app
+   :members: Api, serve
+
+.. automodule:: rules_requirements.agents
+   :members: Finding, Workflow, Job, JobManager
+
+.. automodule:: rules_requirements.agents.llm
+   :members: LLM, ClaudeLLM, LLMError, LLMUnavailable, default_llm
+
+.. automodule:: rules_requirements.agents.workflows
+   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant
+```

@@ -25,6 +25,7 @@ source files carry `@rr(...)` annotations tying code to requirements.
 bazel test //...        # unit tests + model validation + annotation check + golden report
 bazel build //:report   # bazel-bin/report.html / .json / .md
 bazel run //:thermostat_cli -- --setpoint 21 19.0 20.8 21.7
+bazel run //:editor     # the web editor on this model (http://localhost:8080/)
 ```
 
 `//:report` runs every test inside a build action (`rr_evidence`), adds the

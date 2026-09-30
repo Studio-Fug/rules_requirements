@@ -12,7 +12,7 @@ package(default_visibility = ["//visibility:public"])
 py_library(
     name = "python",
     srcs = glob(["rules_requirements/**/*.py"]),
-    data = ["rules_requirements/_vendor/yaml/LICENSE"],
+    data = ["rules_requirements/_vendor/yaml/LICENSE"] + glob(["rules_requirements/server/static/**"]),
     imports = ["."],
 )
 

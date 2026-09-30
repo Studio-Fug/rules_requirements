@@ -45,6 +45,11 @@ repos:
 
   - repo: local
     hooks:
+      - id: js-syntax
+        name: JavaScript syntax (node --check)
+        entry: node --check
+        language: system
+        types: [javascript]
       - id: spdx-header
         name: SPDX license header
         entry: python3 tools/check_spdx.py

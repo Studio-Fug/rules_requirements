@@ -105,7 +105,8 @@
                 "enum": [
                   "error",
                   "warning",
-                  "off"
+                  "off",
+                  false
                 ]
               }
             },

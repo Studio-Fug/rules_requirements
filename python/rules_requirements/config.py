@@ -305,6 +305,8 @@ def parse_config(raw: Mapping[str, Any] | None, errors: list[str]) -> Config:
     if "rules" in raw:
         rules = dict(DEFAULT_RULES)
         for name, sev in (raw["rules"] or {}).items():
+            if sev is False:  # YAML 1.1 reads an unquoted `off` (and `no`) as false
+                sev = "off"
             if name not in DEFAULT_RULES:
                 errors.append(f"config.rules: unknown rule {name!r}")
             elif sev not in RULE_SEVERITIES:

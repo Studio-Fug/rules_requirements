@@ -3,7 +3,9 @@
 ```starlark
 load(
     "@rules_requirements//rr:defs.bzl",
+    "rr_annotations_check",
     "rr_annotations_test",
+    "rr_editor",
     "rr_evidence",
     "rr_golden_test",
     "rr_model",
@@ -67,6 +69,43 @@ rr_annotations_test(
 Fails if an annotation in `srcs` names an id the model does not define
 ({doc}`annotations`). Only the listed files are scanned, so the test is
 hermetic and cached.
+
+### `rr_annotations_check`
+
+```starlark
+rr_annotations_check(
+    name = "check_annotations",
+    model = ":model",
+)
+```
+
+The non-hermetic counterpart for annotations that span many packages:
+`bazel run :check_annotations` scans the whole source tree `bazel run` was
+invoked in (git-aware, so ignored files are skipped) and fails on any
+annotation naming an unknown id. Extra `rr scan` flags go after `--`
+(`-- --list`, `-- --exclude 'third_party/*'`).
+
+### `rr_editor`
+
+```starlark
+rr_editor(
+    name = "editor",
+    model = ":model",
+    paths = ["requirements"],  # optional: open the directory (one-object-per-file layouts)
+)
+```
+
+`bazel run :editor` starts the web editor ({doc}`web-editor`) on the model.
+Model and evidence paths are relative to the workspace root, so the editor edits
+the real files, never runfiles copies.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `model` | required | The `rr_model` target. |
+| `paths` | the model's files | Workspace-relative files or directories to open instead. |
+| `evidence` | `["bazel-testlogs"]` | Workspace-relative evidence paths. |
+| `args` | `[]` | Extra `rr serve` flags (`--port=9000`, `--no-llm`, ...). |
+| `deps` | `[]` | Extra Python dependencies: your pip hub's `anthropic` (e.g. `@pypi//anthropic`) enables the LLM-backed agent workflows. |
 
 ## Test hooks
 

@@ -61,6 +61,9 @@ class Note:
     author: str = ""
     created: str = ""  # ISO date
     id: str = ""  # stable within its object, e.g. "n1"
+    # Keys this model does not define, kept so that rewriting a note list never
+    # loses them (they are also reported under the ``unknown-field`` rule).
+    extra: tuple[tuple[str, Any], ...] = ()
 
 
 NOTE_KINDS = ("comment", "gap", "question", "todo")
@@ -74,6 +77,7 @@ class VerifiedBy:
 
     target: str
     level: str = ""  # "" -> config.default_provided_level
+    extra: tuple[tuple[str, Any], ...] = ()  # unknown keys, kept for round-trips
 
 
 @dataclass(frozen=True)
@@ -306,7 +310,36 @@ class _LineDict(dict):  # type: ignore[type-arg]
 
 
 class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
-    pass
+    # Aliases are fine, but not a document that expands into an absurd number
+    # of values through them ("billion laughs"): everything downstream walks
+    # the expanded values.
+    MAX_EXPANDED_VALUES = 1_000_000
+
+    def construct_document(self, node: Any) -> Any:
+        if _expanded_size(node, {}) > self.MAX_EXPANDED_VALUES:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                f"the document expands to over {self.MAX_EXPANDED_VALUES:,} values through aliases",
+                node.start_mark,
+            )
+        return super().construct_document(node)
+
+
+def _expanded_size(node: Any, memo: dict[int, int]) -> int:
+    """How many nodes ``node`` stands for once aliases are expanded (linear:
+    each distinct node is sized once; a recursive alias counts once)."""
+    key = id(node)
+    if key in memo:
+        return memo[key]
+    memo[key] = 1
+    size = 1
+    if isinstance(node, yaml.SequenceNode):
+        size += sum(_expanded_size(child, memo) for child in node.value)
+    elif isinstance(node, yaml.MappingNode):
+        size += sum(_expanded_size(k, memo) + _expanded_size(v, memo) for k, v in node.value)
+    memo[key] = size
+    return size
 
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
@@ -342,7 +375,13 @@ _LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _con
 
 def _load_documents(path: str) -> list[Any]:
     with open(path, encoding="utf-8") as fh:
-        return [d for d in yaml.load_all(fh, Loader=_LineLoader) if d is not None]
+        return load_text(fh.read())
+
+
+def load_text(text: str) -> list[Any]:
+    """The documents of one model file's text, loaded the way model files are
+    (line numbers, duplicate-key check, alias expansion limit)."""
+    return [d for d in yaml.load_all(text, Loader=_LineLoader) if d is not None]
 
 
 def model_files(paths: str | Iterable[str]) -> list[str]:
@@ -374,12 +413,21 @@ def _as_tuple(value: Any) -> tuple[str, ...]:
     return (str(value),)
 
 
-def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
+_NOTE_KEYS = ("id", "text", "kind", "status", "author", "created")
+
+
+def _parse_notes(raw: Any, where: str, errors: list[str], unknown: list[str] | None = None) -> tuple[Note, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
         errors.append(f"{where}: notes must be a list")
         return ()
+    # Explicit ids are kept; a note without one gets the first free "n<k>",
+    # never one another note of the same entity already uses.
+    explicit = [str(item.get("id", "")) for item in raw if isinstance(item, Mapping) and item.get("id")]
+    for dup in sorted({i for i in explicit if explicit.count(i) > 1}):
+        errors.append(f"{where}: note id {dup!r} is used more than once")
+    used = set(explicit)
     notes = []
     for i, item in enumerate(raw):
         if isinstance(item, str):
@@ -393,6 +441,17 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
             errors.append(f"{where}: notes[{i}].kind must be one of {NOTE_KINDS}")
         if status not in NOTE_STATUSES:
             errors.append(f"{where}: notes[{i}].status must be one of {NOTE_STATUSES}")
+        extra = tuple((str(k), v) for k, v in item.items() if k not in _NOTE_KEYS)
+        for key, _ in extra:
+            if unknown is not None:
+                unknown.append(f"{where}: notes[{i}]: unknown field {key!r}")
+        nid = str(item.get("id", "") or "")
+        if not nid:
+            k = i + 1
+            while f"n{k}" in used:
+                k += 1
+            nid = f"n{k}"
+            used.add(nid)
         notes.append(
             Note(
                 text=str(item["text"]),
@@ -400,32 +459,47 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
                 status=status,
                 author=str(item.get("author", "")),
                 created=str(item.get("created", "")),
-                id=str(item.get("id", "") or f"n{i + 1}"),
+                id=nid,
+                extra=extra,
             )
         )
     return tuple(notes)
 
 
-def _parse_verified_by(raw: Any, where: str, errors: list[str]) -> tuple[VerifiedBy, ...]:
+def _parse_verified_by(
+    raw: Any, where: str, errors: list[str], unknown: list[str] | None = None
+) -> tuple[VerifiedBy, ...]:
     if raw is None:
         return ()
     items = raw if isinstance(raw, list) else [raw]
     out = []
-    for item in items:
+    for i, item in enumerate(items):
         if isinstance(item, str):
             out.append(VerifiedBy(target=item))
         elif isinstance(item, Mapping) and item.get("target"):
-            out.append(VerifiedBy(target=str(item["target"]), level=str(item.get("level", ""))))
+            extra = tuple((str(k), v) for k, v in item.items() if k not in ("target", "level"))
+            for key, _ in extra:
+                if unknown is not None:
+                    unknown.append(f"{where}: verified_by[{i}]: unknown field {key!r}")
+            out.append(VerifiedBy(target=str(item["target"]), level=str(item.get("level", "")), extra=extra))
         else:
             errors.append(f"{where}: verified_by items must be a label or {{target, level}}")
     return tuple(out)
 
 
 def parse_entity(
-    kind: str, raw: Mapping[str, Any], location: Location, errors: list[str], unknown: list[str]
+    kind: str,
+    raw: Mapping[str, Any],
+    location: Location,
+    errors: list[str],
+    unknown: list[str],
+    nested: list[str] | None = None,
 ) -> Entity | None:
     """Build one entity from its YAML mapping. Shape errors go to ``errors``,
-    unknown keys to ``unknown`` (reported under the ``unknown-field`` rule)."""
+    unknown keys to ``unknown`` (reported under the ``unknown-field`` rule);
+    unknown keys inside notes and ``verified_by`` items go to ``nested`` if
+    given, else to ``unknown`` (they are kept on the item either way)."""
+    nested = unknown if nested is None else nested
     where = f"{location}"
     if not isinstance(raw, Mapping):
         errors.append(f"{where}: {cfg.SECTIONS[kind]} entries must be mappings")
@@ -448,7 +522,7 @@ def parse_entity(
         status=str(raw.get("status", "") or "").strip(),
         owner=str(raw.get("owner", "") or "").strip(),
         tags=_as_tuple(raw.get("tags")),
-        notes=_parse_notes(raw.get("notes"), where, errors),
+        notes=_parse_notes(raw.get("notes"), where, errors, nested),
         location=location,
     )
 
@@ -465,7 +539,7 @@ def parse_entity(
             satisfies=_as_tuple(raw.get("satisfies")),
             refines=_as_tuple(raw.get("refines")),
             method=text("method"),
-            verified_by=_parse_verified_by(raw.get("verified_by"), where, errors),
+            verified_by=_parse_verified_by(raw.get("verified_by"), where, errors, nested),
             modules=_as_tuple(raw.get("modules")),
         )
     if kind == cfg.RISK:

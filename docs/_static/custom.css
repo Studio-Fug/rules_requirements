@@ -18,3 +18,10 @@
   font-weight: 700;
   white-space: nowrap;
 }
+/* Sidebar brand: a compact logo, and a title that fits on one line. */
+.sidebar-logo {
+  max-width: 7rem;
+}
+.sidebar-brand-text {
+  font-size: 1.25rem;
+}
