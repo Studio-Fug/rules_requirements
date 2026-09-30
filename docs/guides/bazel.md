@@ -137,8 +137,15 @@ pass the `rust_test` rule as `rule`.
 | --------- | ------- | - |
 | `rule` | required | The `rust_test` rule. |
 | `level` | `""` | Level for cases that do not declare one. |
-| `tags`, `size`, `timeout`, `flaky` | | Applied to the wrapper test. |
+| `tags`, `size`, `timeout`, `flaky`, `visibility` | | Applied to the wrapper test. |
+| `args` | `[]` | Arguments for the test binary (after `--`), e.g. `--test-threads=1`. |
+| `env`, `env_inherit` | | Environment of the wrapper, inherited by the test binary. |
 | `**kwargs` | | Forwarded to the `rust_test` (`srcs`, `crate`, `deps`, `edition`, ...). |
+
+The wrapper also turns a crash into evidence: a test that recorded traces but
+never reported a result (an abort mid-run) becomes an `error` case carrying its
+ids, and a binary that exits non-zero after every test passed gets an
+`exit-status` error case.
 
 googletest needs no macro: a `cc_test` depending on
 `@rules_requirements//cc:gtest` writes traced JUnit by itself.
@@ -172,11 +179,18 @@ Each test runs with its runfiles directory (`<exe>.runfiles/<workspace>`) as
 working directory and an environment modelled on `bazel test`: `TEST_SRCDIR`,
 `RUNFILES_DIR`, `TEST_WORKSPACE`, `TEST_TARGET`, `XML_OUTPUT_FILE`,
 `TEST_TMPDIR` (also `HOME` and `TMPDIR`), `TEST_UNDECLARED_OUTPUTS_DIR`,
-`PATH` and `LANG`. A test that writes no JUnit gets one synthetic test case
-carrying its exit status, as under `bazel test`.
+`PATH` and `LANG`, plus the test's own `env` attribute. A test that writes no
+JUnit gets one synthetic test case carrying its exit status, as under
+`bazel test`; a test that exits non-zero although its report shows no failure
+gets an extra `exit-status` error case. A test's `args` attribute is not
+available to other rules, which is why the macros in this module bake their
+arguments into a generated `main` instead.
 
 The tests are built in the **exec** configuration, because the action runs them
-on the build machine. Tests that need the network, devices, or anything else
+on the build machine. (Using the target configuration would reuse the binaries
+`bazel test` builds, but with Bazel 7's test-configuration trimming a non-test
+rule that depends on tests conflicts with the tests' own actions.) The cost is a
+second build of the tests. Tests that need the network, devices, or anything else
 the sandbox does not provide — hardware-in-the-loop suites, typically — do not
 belong in `rr_evidence`: run them with `bazel test` and aggregate the real
 `bazel-testlogs` with the CLI (see {doc}`integration`). The target provides

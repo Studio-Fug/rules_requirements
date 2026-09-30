@@ -84,13 +84,12 @@ if __name__ == "__main__":
     raise SystemExit(main(__file__))  # pytest over this file's directory
 ```
 
-```{note}
-Tests skipped *by a marker* (`@pytest.mark.skip`, `@pytest.mark.skipif`) are
-currently written without their traces: pytest skips them before the plugin
-records the properties. A skipped test never counts as passing evidence, but it
-then does not appear in the report under its requirement either. Calling
-`pytest.skip()` inside the test keeps the traces.
-```
+The properties are recorded when the test is collected, so they reach the
+JUnit case however the test ends — including tests skipped by
+`@pytest.mark.skip` / `skipif` (a skipped test never counts as passing evidence,
+but it is listed under its requirement). The nearest declaration naming a
+`level` wins: a method's own marker or `@rr.verifies` beats its class's, which
+beats a module-level `pytestmark`.
 
 ## unittest
 
@@ -141,8 +140,10 @@ TEST(Interlock, TripsAtLimit) {
 }
 ```
 
-In Bazel, depend on `@rules_requirements//cc:gtest` (which brings in
-`@googletest//:gtest`). googletest writes JUnit to `$XML_OUTPUT_FILE` under
+In Bazel, add `@rules_requirements//cc:gtest` to the `cc_test`'s `deps` next to
+your own googletest (the library is header-only and deliberately does not
+depend on googletest, so it never adds googletest to your module graph).
+googletest writes JUnit to `$XML_OUTPUT_FILE` under
 `bazel test`, so a plain `cc_test` needs no wrapper; elsewhere run the binary
 with `--gtest_output=xml:results.xml`.
 

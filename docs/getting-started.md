@@ -24,8 +24,9 @@ git_override(
 Use `local_path_override(module_name = "rules_requirements", path = "...")`
 instead to build against a local checkout.
 
-The module declares `rules_python`, `rules_cc`, `rules_rust` and `googletest` as
-dependencies (for the Python toolkit and the C++/Rust hooks). Their versions are
+The module declares `rules_python`, `rules_cc` and `rules_rust` as dependencies
+(for the Python toolkit and the C++/Rust hooks); googletest is only a development
+dependency — the googletest hook is header-only and uses your own googletest. Their versions are
 *floors* — Bazel's minimal version selection keeps whatever newer versions your
 workspace already uses — and nothing is fetched unless a target that needs it is
 built. The Python library itself uses only the standard library, so it runs on

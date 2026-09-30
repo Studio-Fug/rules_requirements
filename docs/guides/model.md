@@ -156,7 +156,7 @@ model document). Omitted keys keep their defaults.
 | Key | Default | Meaning |
 | --- | ------- | ------- |
 | `prefixes` | `{user_need: UN, requirement: REQ, risk: RISK, mitigation: MIT, test_method: TM}` | Id prefix per kind (keys may also be the section names). Prefixes must be distinct. |
-| `id_pattern` | `{prefix}-\d+` | Regular expression for ids; `{prefix}` is substituted and the whole id must match. The substitution uses Python's `str.format`, so literal braces are doubled: `'{prefix}-\d{{4}}'` for exactly four digits. |
+| `id_pattern` | `{prefix}-\d+` | Regular expression for ids; `{prefix}` is substituted literally and the whole id must match, so `'{prefix}-\d{4}'` means exactly four digits. Groups are allowed. |
 | `levels` | `analysis`, `simulation`, `sil`, `hil`, `hitl`, `inspection` (unordered) | The verification ladder, lowest first. Items are names or `{name, ordered, description}`; `ordered: false` makes a level incomparable. |
 | `default_level` | `simulation` | Demanded by requirements without a `method`. |
 | `default_provided_level` | `simulation` | Provided by evidence without a `level`. |
@@ -241,9 +241,11 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 | `risk-unacceptable` | warning | The residual risk score exceeds `acceptable_risk_score`. |
 | `unknown-field` | error | A document or entity has a key the model does not know — usually a typo (`satisfes:`) that would silently drop a trace. |
 
-When `unknown-field` is set to `warning`, the findings are printed by the CLI
-as `warning: [unknown-field] ...` lines rather than returned by
-{py:func}`rules_requirements.validate.validate`.
+Like every rule, `unknown-field` findings are issues returned by
+{py:func}`rules_requirements.validate.validate` (and shown by `rr validate`,
+including `--format json`); `--strict` promotes them to errors when the rule is
+a warning. A key repeated within one mapping is always an error: YAML would
+otherwise silently keep only the last value.
 
 ## JSON Schema and editor support
 

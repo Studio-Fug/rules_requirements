@@ -28,8 +28,11 @@ directories (walked recursively, following symlinks) and globs (`**` allowed).
 Each file goes to the first registered ingestor that recognises it; files no
 ingestor recognises — the `test.log` next to each `test.xml` in
 `bazel-testlogs`, for example — are skipped. The result also rolls cases up per
-target (the most severe status wins: `error` > `failed` > `skipped` > `passed`)
-for [`verified_by`](../concepts.md#evidence) traces.
+target for [`verified_by`](../concepts.md#evidence) traces: `error` if any case
+errored, else `failed` if any failed, else `passed` if any passed, else
+`skipped`. A binary that exits non-zero although every case in its report
+passed (a sanitizer, a crash after writing the report) gets an extra
+`exit-status` error case — from `rr_evidence` and from the libtest wrapper.
 
 ## Built-in ingestors
 
@@ -62,14 +65,19 @@ target's label is recovered from the path:
 
 That label is what `verified_by` entries match.
 
-```{warning}
+```{note}
 For tests that Bazel retried (`--flaky_test_attempts`, `flaky = True`), the logs
-of the earlier attempts are kept under `<name>/test_attempts/attempt_N.xml`.
-Walking the whole `bazel-testlogs` directory ingests those too — under a wrong
-label — and a failed earlier attempt then marks its requirements FAILED even
-though the final run passed. Pass a glob that selects only the final results:
+of the earlier attempts are kept under `<name>/test_attempts/attempt_N.xml` and
+map to the same label. Walking the whole `bazel-testlogs` directory therefore
+counts a failed earlier attempt as a failure — deliberately: a test that only
+passes on retry is not dependable evidence. To judge only the final attempt,
+pass a glob that selects the final results:
 `--evidence "$(bazel info bazel-testlogs)/**/test.xml"`.
 ```
+
+An unreadable report (malformed XML) is not skipped: it becomes one `error`
+case for its target, so a crashed or corrupted run shows up as a failure rather
+than vanishing.
 
 ### Records
 
@@ -81,7 +89,7 @@ measurement recorded by hand — write a records file:
 evidence:
   - name: panel-shows-setpoint-unit
     classname: inspection.TM-2
-    status: passed                 # default: passed
+    status: passed                 # required: passed | failed | skipped | error
     requirements: [REQ-7]          # a list or a single id
     level: inspection
     artifact: {board_rev: C}       # optional identity, for staleness
@@ -92,7 +100,8 @@ evidence:
 ```
 
 Entries may also give `message`, `duration` and `target`; a missing `name`
-becomes `record-<n>`, and an unknown `status` becomes `error`. The top level may
+becomes `record-<n>`. A missing or unknown `status` becomes `error`: a planned
+but unsigned record must never count as passed. The top level may
 be `{evidence: [...]}` or a bare list; JSON works the same way. Records are
 evidence like any other: in Bazel, list the file in `rr_report(evidence = ...)`.
 

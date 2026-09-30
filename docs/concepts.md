@@ -125,11 +125,14 @@ roll up into it:
 - the children's rollup is FAILED if any child failed, VERIFIED if all are
   verified, PARTIAL if at least one is verified, under-verified or partial, and
   UNVERIFIED otherwise;
-- a parent without evidence of its own takes the children's rollup;
-- a parent with its own evidence is FAILED if it or the children failed,
-  VERIFIED only if both it and the children are verified, and
-  <span class="rr-status">PARTIAL</span> if it is verified but the children are
-  not (an under-verified parent stays under-verified).
+- the parent is FAILED if it or any child failed;
+- when every child is VERIFIED, the parent is VERIFIED only if its *own* demand
+  is met — by its own evidence, or because every child's best evidence is at
+  least as rigorous as the parent demands. A `hitl` system requirement is not
+  proven by simulation-verified software requirements: it stays
+  UNDER-VERIFIED until system-level evidence at `hitl` exists;
+- otherwise a parent with any passing evidence of its own, or with partly
+  verified children, is PARTIAL; a parent with neither stays UNVERIFIED.
 
 ### Rollups
 
@@ -175,9 +178,11 @@ reports show a `STALE` badge), and the gap queue carries a `stale` item for it.
 
 Physical verification is expensive; cheap verification should back it rather
 than be skipped. A requirement that demands at least `pyramid_min_level`
-(default `hil`) and has passing evidence, none of which is at one of the
+(default `hil`) and has passing *physical* evidence (at `pyramid_min_level` or
+above), none of which is backed by evidence at one of the
 `pyramid_cheap_levels` (default `analysis`, `simulation`), is a **cost-pyramid
-violation**: a physical result nobody sanity-checked cheaply. Violations are
+violation**: a physical result nobody sanity-checked cheaply. (Evidence below
+the demand without any physical result is simply under-verified.) Violations are
 listed in the reports and as `pyramid` gaps; `rr report --pyramid-policy`
 decides whether they only warn (default), fail the command, or are ignored.
 
@@ -199,7 +204,7 @@ writes as a machine-readable work queue:
 
 | Gap kind | Raised for | Route |
 | -------- | ---------- | ----- |
-| `failed` | a requirement with failing evidence | autonomous |
+| `failed` | a requirement with failing evidence (also a user need or mitigation with failing direct evidence) | by demanded level — reproducing a bench failure needs the bench |
 | `stale` | a requirement whose only passing evidence is stale | by demanded level |
 | `unverified` | a requirement with no evidence | by demanded level |
 | `under-verified` | a requirement whose evidence is below its demand | by demanded level |
@@ -208,6 +213,9 @@ writes as a machine-readable work queue:
 | `no-implementation` | a requirement (without refinements) that no source annotation implements — only when sources were scanned | autonomous |
 | `high-risk-open` | a high-severity risk that is not MITIGATED | human-gate |
 | `unknown-id` | evidence tagged with an id the model does not define | autonomous |
+| `misdirected-evidence` | evidence tagged with a risk or test-method id (they are not verified by tests — tag the requirement) | autonomous |
+| `untraced-failure` | a failing test case that traces to no requirement (and whose target no `verified_by` names) | autonomous |
+| `note:gap`, `note:todo`, `note:question` | an open note of that kind on any entity (questions route to a human) | by demanded level |
 
 **Routing** splits the work between agents and people. A gap whose
 requirement demands a level at or below `autonomous_max_level` (default `sil`)
