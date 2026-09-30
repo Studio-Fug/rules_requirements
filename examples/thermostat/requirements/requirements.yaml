@@ -1,0 +1,56 @@
+requirements:
+  - id: REQ-1
+    title: Heat when the room is below the setpoint band
+    description: >-
+      The heater shall turn on when the measured temperature is below
+      setpoint - 0.5 °C.
+    satisfies: [UN-1]
+    modules: [thermostat]
+
+  - id: REQ-2
+    title: Stop heating above the band; hold state inside it
+    description: >-
+      The heater shall turn off when the measured temperature is above
+      setpoint + 0.5 °C, and keep its previous state inside the band
+      (hysteresis), so it does not cycle rapidly.
+    satisfies: [UN-1]
+    modules: [thermostat]
+
+  - id: REQ-3
+    title: Parse setpoints in °C and °F
+    description: >-
+      The panel shall accept "<number>C" and "<number>F" (case-insensitive,
+      optional whitespace) and convert to °C.
+    satisfies: [UN-2]
+    modules: [setpoint]
+
+  - id: REQ-4
+    title: Reject setpoints outside 5-30 °C
+    description: The panel shall reject any setpoint that converts to below 5 °C or above 30 °C.
+    satisfies: [UN-2]
+    category: safety
+    modules: [setpoint, thermostat]
+
+  - id: REQ-5
+    title: Independent over-temperature cutoff
+    description: >-
+      The interlock shall force the heater off at or above 35 °C regardless of
+      the controller, and keep it off until the temperature falls below 30 °C.
+    category: safety
+    method: TM-1
+    modules: [interlock]
+
+  - id: REQ-6
+    title: Fail safe on an invalid sensor reading
+    description: >-
+      The controller shall turn the heater off when the reading is not a
+      number or outside the sensor's -40..85 °C range.
+    category: safety
+    modules: [thermostat]
+
+  - id: REQ-7
+    title: Show the setpoint with its unit
+    description: The panel shall display the active setpoint with its unit, e.g. "21.5 °C".
+    satisfies: [UN-2]
+    method: TM-2
+    modules: [thermostat]

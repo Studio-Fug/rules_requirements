@@ -1,0 +1,7 @@
+common --enable_bzlmod
+common --noenable_workspace
+startup --host_jvm_args=-XX:+IgnoreUnrecognizedVMOptions
+startup --host_jvm_args=-XX:UseSVE=0
+build --incompatible_strict_action_env
+test --test_output=errors
+try-import %workspace%/user.bazelrc

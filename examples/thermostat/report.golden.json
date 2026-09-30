@@ -1,0 +1,650 @@
+{
+  "schema": "rules_requirements/report/v1",
+  "title": "Thermostat",
+  "project": {
+    "description": "A room thermostat: a Python controller, a C++ over-temperature interlock and a Rust setpoint parser, developed against user needs, requirements and a risk analysis, and traced to tests.",
+    "name": "Thermostat",
+    "software_safety_class": "B"
+  },
+  "summary": {
+    "user_needs": 2,
+    "user_needs_validated": 2,
+    "requirements": 7,
+    "requirements_verified": 7,
+    "requirements_under_verified": 0,
+    "requirements_partial": 0,
+    "requirements_failed": 0,
+    "requirements_unverified": 0,
+    "risks": 2,
+    "risks_mitigated": 2,
+    "mitigations": 2,
+    "mitigations_verified": 2,
+    "test_cases": 17,
+    "gaps": 0
+  },
+  "levels": [
+    {
+      "name": "analysis",
+      "rank": 1
+    },
+    {
+      "name": "simulation",
+      "rank": 2
+    },
+    {
+      "name": "sil",
+      "rank": 3
+    },
+    {
+      "name": "hil",
+      "rank": 4
+    },
+    {
+      "name": "hitl",
+      "rank": 5
+    },
+    {
+      "name": "inspection",
+      "rank": null
+    }
+  ],
+  "user_needs": [
+    {
+      "id": "UN-1",
+      "title": "Keep the room at a comfortable temperature",
+      "status": "VALIDATED",
+      "description": "Once a target temperature is set, the room should settle near it without the heater cycling rapidly.",
+      "requirements": [
+        "REQ-1",
+        "REQ-2"
+      ]
+    },
+    {
+      "id": "UN-2",
+      "title": "Set the target temperature in Celsius or Fahrenheit",
+      "status": "VALIDATED",
+      "description": "Occupants enter a target like \"21.5C\" or \"70F\" on the wall panel and can read back what they set.",
+      "requirements": [
+        "REQ-3",
+        "REQ-4",
+        "REQ-7"
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "title": "Heat when the room is below the setpoint band",
+      "status": "VERIFIED",
+      "description": "The heater shall turn on when the measured temperature is below setpoint - 0.5 \u00b0C.",
+      "evidence": [
+        {
+          "name": "tests.test_controller::test_heats_below_band",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [],
+      "modules": [
+        "thermostat"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-1",
+            "REQ-2"
+          ],
+          "relation": "implements",
+          "path": "thermostat/controller.py",
+          "line": 27,
+          "text": "Bang-bang control with a \u00b10.5 \u00b0C hysteresis band.",
+          "symbol": "class Controller"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-1"
+          ],
+          "relation": "verifies",
+          "path": "tests/test_controller.py",
+          "line": 9,
+          "symbol": "def test_heats_below_band"
+        }
+      ]
+    },
+    {
+      "id": "REQ-2",
+      "title": "Stop heating above the band; hold state inside it",
+      "status": "VERIFIED",
+      "description": "The heater shall turn off when the measured temperature is above setpoint + 0.5 \u00b0C, and keep its previous state inside the band (hysteresis), so it does not cycle rapidly.",
+      "evidence": [
+        {
+          "name": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [],
+      "modules": [
+        "thermostat"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-1",
+            "REQ-2"
+          ],
+          "relation": "implements",
+          "path": "thermostat/controller.py",
+          "line": 27,
+          "text": "Bang-bang control with a \u00b10.5 \u00b0C hysteresis band.",
+          "symbol": "class Controller"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-2"
+          ],
+          "relation": "verifies",
+          "path": "tests/test_controller.py",
+          "line": 15,
+          "symbol": "def test_stops_above_band_and_holds_inside_it"
+        }
+      ]
+    },
+    {
+      "id": "REQ-3",
+      "title": "Parse setpoints in \u00b0C and \u00b0F",
+      "status": "VERIFIED",
+      "description": "The panel shall accept \"<number>C\" and \"<number>F\" (case-insensitive, optional whitespace) and convert to \u00b0C.",
+      "evidence": [
+        {
+          "name": "tests::parses_celsius_and_fahrenheit",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
+        },
+        {
+          "name": "tests::requires_a_unit",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-2"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-2"
+      ],
+      "modules": [
+        "setpoint"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-3",
+            "REQ-4"
+          ],
+          "relation": "implements",
+          "path": "setpoint/src/lib.rs",
+          "line": 24,
+          "text": "Explicit unit required; the result is range-checked in \u00b0C.",
+          "symbol": "fn parse"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-3"
+          ],
+          "relation": "verifies",
+          "path": "setpoint/src/lib.rs",
+          "line": 46,
+          "symbol": "fn parses_celsius_and_fahrenheit"
+        },
+        {
+          "ids": [
+            "REQ-3",
+            "REQ-4"
+          ],
+          "relation": "verifies",
+          "path": "setpoint/src/lib.rs",
+          "line": 54,
+          "symbol": "fn requires_a_unit"
+        }
+      ]
+    },
+    {
+      "id": "REQ-4",
+      "title": "Reject setpoints outside 5-30 \u00b0C",
+      "status": "VERIFIED",
+      "description": "The panel shall reject any setpoint that converts to below 5 \u00b0C or above 30 \u00b0C.",
+      "category": "safety",
+      "evidence": [
+        {
+          "name": "tests.test_controller::test_accepts_range_limits",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests::rejects_out_of_range",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
+        },
+        {
+          "name": "tests::requires_a_unit",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-2"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-2"
+      ],
+      "modules": [
+        "setpoint",
+        "thermostat"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-3",
+            "REQ-4"
+          ],
+          "relation": "implements",
+          "path": "setpoint/src/lib.rs",
+          "line": 24,
+          "text": "Explicit unit required; the result is range-checked in \u00b0C.",
+          "symbol": "fn parse"
+        },
+        {
+          "ids": [
+            "REQ-4"
+          ],
+          "relation": "implements",
+          "path": "thermostat/controller.py",
+          "line": 20,
+          "text": "Setpoints outside the comfort range are refused, whatever their source.",
+          "symbol": "def check_setpoint"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-3",
+            "REQ-4"
+          ],
+          "relation": "verifies",
+          "path": "setpoint/src/lib.rs",
+          "line": 54,
+          "symbol": "fn requires_a_unit"
+        },
+        {
+          "ids": [
+            "REQ-4"
+          ],
+          "relation": "verifies",
+          "path": "setpoint/src/lib.rs",
+          "line": 62,
+          "symbol": "fn rejects_out_of_range"
+        },
+        {
+          "ids": [
+            "REQ-4"
+          ],
+          "relation": "verifies",
+          "path": "tests/test_controller.py",
+          "line": 24,
+          "symbol": "def test_rejects_setpoints_outside_range"
+        },
+        {
+          "ids": [
+            "REQ-4"
+          ],
+          "relation": "verifies",
+          "path": "tests/test_controller.py",
+          "line": 31,
+          "symbol": "def test_accepts_range_limits"
+        }
+      ]
+    },
+    {
+      "id": "REQ-5",
+      "title": "Independent over-temperature cutoff",
+      "status": "VERIFIED",
+      "description": "The interlock shall force the heater off at or above 35 \u00b0C regardless of the controller, and keep it off until the temperature falls below 30 \u00b0C.",
+      "category": "safety",
+      "evidence": [
+        {
+          "name": "Interlock::NanReadingTrips",
+          "status": "passed",
+          "level": "sil",
+          "target": "//:interlock_test"
+        },
+        {
+          "name": "Interlock::StaysTrippedUntilBelowReset",
+          "status": "passed",
+          "level": "sil",
+          "target": "//:interlock_test"
+        },
+        {
+          "name": "Interlock::TripsAtLimit",
+          "status": "passed",
+          "level": "sil",
+          "target": "//:interlock_test"
+        }
+      ],
+      "demanded_level": "sil",
+      "provided_level": "sil",
+      "satisfies": [],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ],
+      "method": "TM-1",
+      "modules": [
+        "interlock"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-5"
+          ],
+          "relation": "implements",
+          "path": "interlock/interlock.h",
+          "line": 7,
+          "text": "Over-temperature interlock, independent of the controller.",
+          "symbol": "class Interlock"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-5"
+          ],
+          "relation": "verifies",
+          "path": "interlock/interlock_test.cc",
+          "line": 13,
+          "symbol": "Interlock.TripsAtLimit"
+        },
+        {
+          "ids": [
+            "REQ-5"
+          ],
+          "relation": "verifies",
+          "path": "interlock/interlock_test.cc",
+          "line": 22,
+          "symbol": "Interlock.StaysTrippedUntilBelowReset"
+        },
+        {
+          "ids": [
+            "REQ-5"
+          ],
+          "relation": "verifies",
+          "path": "interlock/interlock_test.cc",
+          "line": 33,
+          "symbol": "Interlock.NanReadingTrips"
+        }
+      ]
+    },
+    {
+      "id": "REQ-6",
+      "title": "Fail safe on an invalid sensor reading",
+      "status": "VERIFIED",
+      "description": "The controller shall turn the heater off when the reading is not a number or outside the sensor's -40..85 \u00b0C range.",
+      "category": "safety",
+      "evidence": [
+        {
+          "name": "tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        },
+        {
+          "name": "tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:controller_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ],
+      "modules": [
+        "thermostat"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-6"
+          ],
+          "relation": "implements",
+          "path": "thermostat/controller.py",
+          "line": 14,
+          "text": "A reading the sensor cannot produce means the sensor is broken.",
+          "symbol": "def plausible"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-6"
+          ],
+          "relation": "verifies",
+          "path": "tests/test_controller.py",
+          "line": 37,
+          "symbol": "def test_invalid_reading_turns_heater_off"
+        }
+      ]
+    },
+    {
+      "id": "REQ-7",
+      "title": "Show the setpoint with its unit",
+      "status": "VERIFIED",
+      "description": "The panel shall display the active setpoint with its unit, e.g. \"21.5 \u00b0C\".",
+      "evidence": [
+        {
+          "name": "inspection.TM-2::panel-shows-setpoint-unit",
+          "status": "passed",
+          "level": "inspection"
+        },
+        {
+          "name": "display_test.DisplayTest::test_setpoint_shows_unit",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:display_test"
+        }
+      ],
+      "demanded_level": "inspection",
+      "provided_level": "inspection",
+      "satisfies": [
+        "UN-2"
+      ],
+      "refines": [],
+      "implements": [],
+      "method": "TM-2",
+      "modules": [
+        "thermostat"
+      ],
+      "implemented_in": [
+        {
+          "ids": [
+            "REQ-7"
+          ],
+          "relation": "implements",
+          "path": "thermostat/display.py",
+          "line": 5,
+          "text": "The unit is always shown next to the number.",
+          "symbol": "def format_setpoint"
+        }
+      ],
+      "verified_in": [
+        {
+          "ids": [
+            "REQ-7"
+          ],
+          "relation": "verifies",
+          "path": "tests/display_test.py",
+          "line": 11,
+          "symbol": "def test_setpoint_shows_unit"
+        }
+      ]
+    }
+  ],
+  "mitigations": [
+    {
+      "id": "MIT-1",
+      "title": "Independent over-temperature protection",
+      "status": "VERIFIED",
+      "description": "A hardware-near interlock and a sensor plausibility check, each able to de-energise the heater on its own.",
+      "type": "protective",
+      "mitigates": [
+        "RISK-1"
+      ],
+      "implemented_by": [
+        "REQ-5",
+        "REQ-6"
+      ],
+      "implemented_in": [],
+      "verified_in": []
+    },
+    {
+      "id": "MIT-2",
+      "title": "Validate setpoints at entry",
+      "status": "VERIFIED",
+      "description": "Require an explicit unit and a bounded range for every setpoint.",
+      "type": "inherent",
+      "mitigates": [
+        "RISK-2"
+      ],
+      "implemented_by": [
+        "REQ-3",
+        "REQ-4"
+      ],
+      "implemented_in": [],
+      "verified_in": []
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-1",
+      "title": "Room overheats",
+      "status": "MITIGATED",
+      "hazard": "Heater energised continuously",
+      "hazardous_situation": "A control fault or a sensor reading stuck low keeps the heater on while the room is occupied.",
+      "harm": "Heat stress; burns from surfaces near the heater",
+      "residual": "Two independent controls (interlock + sensor plausibility) must both fail. Accepted.",
+      "severity": "high",
+      "likelihood": "possible",
+      "residual_severity": "high",
+      "residual_likelihood": "rare",
+      "mitigations": [
+        "MIT-1"
+      ],
+      "score": 12,
+      "residual_score": 4
+    },
+    {
+      "id": "RISK-2",
+      "title": "Implausible setpoint accepted",
+      "status": "MITIGATED",
+      "hazard": "Setpoint far above comfort range",
+      "hazardous_situation": "\"80\" meant as \u00b0F is taken as \u00b0C, or a typo like \"250C\", and the controller drives the room towards it.",
+      "harm": "Heat stress",
+      "severity": "medium",
+      "likelihood": "likely",
+      "residual_severity": null,
+      "residual_likelihood": "unlikely",
+      "mitigations": [
+        "MIT-2"
+      ],
+      "score": 12,
+      "residual_score": 6
+    }
+  ],
+  "test_methods": [
+    {
+      "id": "TM-1",
+      "title": "Interlock software-in-the-loop test",
+      "status": "VERIFIED",
+      "level": "sil",
+      "used_by": [
+        "REQ-5"
+      ]
+    },
+    {
+      "id": "TM-2",
+      "title": "Visual inspection of the panel",
+      "status": "VERIFIED",
+      "level": "inspection",
+      "used_by": [
+        "REQ-7"
+      ]
+    }
+  ],
+  "modules": {
+    "interlock": "VERIFIED",
+    "setpoint": "VERIFIED",
+    "thermostat": "VERIFIED"
+  },
+  "high_open_risks": [],
+  "pyramid_violations": [],
+  "unknown_evidence": {},
+  "gaps": []
+}

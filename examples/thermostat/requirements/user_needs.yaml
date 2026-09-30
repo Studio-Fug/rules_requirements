@@ -1,0 +1,11 @@
+user_needs:
+  - id: UN-1
+    title: Keep the room at a comfortable temperature
+    description: >-
+      Once a target temperature is set, the room should settle near it without
+      the heater cycling rapidly.
+  - id: UN-2
+    title: Set the target temperature in Celsius or Fahrenheit
+    description: >-
+      Occupants enter a target like "21.5C" or "70F" on the wall panel and can
+      read back what they set.

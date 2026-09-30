@@ -1,0 +1,13 @@
+# Manual verification record (TM-2). Records like this are evidence exactly
+# like test results: they name what they verify and at which level.
+evidence:
+  - name: panel-shows-setpoint-unit
+    classname: inspection.TM-2
+    status: passed
+    requirements: [REQ-7]
+    level: inspection
+    properties:
+      procedure: TM-2
+      inspector: QA reviewer
+      date: "2026-09-30"
+      record: "Panel photo shows '21.5 °C' after entering 21.5C and '21.1 °C' after 70F."

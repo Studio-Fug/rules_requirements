@@ -1,5 +1,5 @@
 /bazel-*
-/user.bazelrc
+user.bazelrc
 
 __pycache__/
 *.py[cod]

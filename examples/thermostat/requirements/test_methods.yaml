@@ -1,0 +1,11 @@
+test_methods:
+  - id: TM-1
+    title: Interlock software-in-the-loop test
+    level: sil
+    procedure: >-
+      Drive the interlock state machine through temperature ramps that cross
+      the trip and reset thresholds, checking the heater enable at each step.
+  - id: TM-2
+    title: Visual inspection of the panel
+    level: inspection
+    procedure: A reviewer checks the rendered panel text and signs the record.

@@ -82,6 +82,33 @@ jobs:
           name: testlogs-${{ matrix.os }}-${{ matrix.bazel }}
           path: bazel-testlogs/**/test.log
 
+  example:
+    name: Example (thermostat, Bazel ${{ matrix.bazel }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: ["7.7.1", "8.8.1"]
+    env:
+      USE_BAZEL_VERSION: ${{ matrix.bazel }}
+    defaults:
+      run:
+        working-directory: examples/thermostat
+    steps:
+      - uses: actions/checkout@v7
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        with:
+          bazelisk-cache: true
+          disk-cache: example-${{ matrix.bazel }}
+          repository-cache: true
+      - run: bazel test //...
+      - run: bazel build //:report
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.bazel == '8.8.1'
+        with:
+          name: thermostat-report
+          path: examples/thermostat/bazel-bin/report.*
+
   package:
     name: Python package
     runs-on: ubuntu-latest

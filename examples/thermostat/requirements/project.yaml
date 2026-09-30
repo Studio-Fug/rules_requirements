@@ -1,0 +1,16 @@
+# The thermostat's requirements model. Files in this directory are merged;
+# this one holds project metadata and configuration, the others one entity
+# kind each. Validate with `bazel test //:model_test`.
+project:
+  name: Thermostat
+  description: >-
+    A room thermostat: a Python controller, a C++ over-temperature interlock
+    and a Rust setpoint parser, developed against user needs, requirements and
+    a risk analysis, and traced to tests.
+  software_safety_class: B  # IEC 62304 §4.3 (illustrative)
+
+config:
+  # Risk evaluation (ISO 14971 §5.5 / §7.3): score = (severity index + 1) x
+  # (likelihood index + 1) on the default five-point scales. Residual risk
+  # above this is flagged.
+  acceptable_risk_score: 6
