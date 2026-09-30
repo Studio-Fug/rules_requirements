@@ -380,6 +380,12 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
     if not isinstance(raw, list):
         errors.append(f"{where}: notes must be a list")
         return ()
+    # Explicit ids are kept; a note without one gets the first free "n<k>",
+    # never one another note of the same entity already uses.
+    explicit = [str(item.get("id", "")) for item in raw if isinstance(item, Mapping) and item.get("id")]
+    for dup in sorted({i for i in explicit if explicit.count(i) > 1}):
+        errors.append(f"{where}: note id {dup!r} is used more than once")
+    used = set(explicit)
     notes = []
     for i, item in enumerate(raw):
         if isinstance(item, str):
@@ -393,6 +399,13 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
             errors.append(f"{where}: notes[{i}].kind must be one of {NOTE_KINDS}")
         if status not in NOTE_STATUSES:
             errors.append(f"{where}: notes[{i}].status must be one of {NOTE_STATUSES}")
+        nid = str(item.get("id", "") or "")
+        if not nid:
+            k = i + 1
+            while f"n{k}" in used:
+                k += 1
+            nid = f"n{k}"
+            used.add(nid)
         notes.append(
             Note(
                 text=str(item["text"]),
@@ -400,7 +413,7 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
                 status=status,
                 author=str(item.get("author", "")),
                 created=str(item.get("created", "")),
-                id=str(item.get("id", "") or f"n{i + 1}"),
+                id=nid,
             )
         )
     return tuple(notes)

@@ -168,3 +168,117 @@ def test_not_a_git_repo(tmp_path):
     assert ws.refs() == {"branches": [], "tags": [], "head": ""}
     assert ws.log() == []
     assert ws.file_for_new("risk") == "m.yaml"
+
+
+# --- adversarial-review regressions ------------------------------------------------
+
+
+def test_create_into_emptied_section_and_json_files_are_refused(repo):
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    ws.delete("REQ-3", force=True)
+    ws.delete("REQ-2", force=True)
+    ws.delete("REQ-1", force=True)  # leaves `requirements:` with no items
+    rid = ws.create("requirement", {"title": "again", "satisfies": ["UN-1"]})
+    assert rid == "REQ-1" and sorted(ws.model.ids()) == ["MIT-1", "REQ-1", "RISK-1", "TM-1", "UN-1", "UN-2"]
+    write(repo, "req/gen.json", '{"requirements": [{"id": "REQ-9", "title": "j", "satisfies": ["UN-1"]}]}')
+    with pytest.raises(WorkspaceError, match="JSON"):
+        ws.update("REQ-9", {"title": "k", "satisfies": ["UN-1"]})
+    assert "REQ-9" in (repo / "req/gen.json").read_text()
+
+
+def test_stale_save_is_a_conflict_and_notes_survive(repo):
+    from rules_requirements.server.workspace import entity_payload
+
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    loaded = entity_payload(ws, "REQ-2")
+    ws.add_note("REQ-2", "added elsewhere", "question")
+    with pytest.raises(WorkspaceError) as exc:
+        ws.update("REQ-2", {**loaded["data"], "title": "stale"}, version=loaded["version"])
+    assert exc.value.status == 409
+    # a save without notes (the form editor) keeps them
+    ws.update("REQ-2", {"title": "fresh", "satisfies": ["UN-2"]})
+    assert [n.text for n in ws.model.get("REQ-2").notes] == ["added elsewhere"]
+
+
+def test_crlf_and_mode_are_preserved_and_noops_do_not_write(repo):
+    path = repo / "req" / "model.yaml"
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    os.chmod(path, 0o644)
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    before = os.stat(path).st_mtime_ns
+    ws.update("REQ-1", edit_dict(ws, "REQ-1"))  # no change
+    assert os.stat(path).st_mtime_ns == before
+    ws.update("REQ-1", {**edit_dict(ws, "REQ-1"), "owner": "ops"})
+    raw = path.read_bytes()
+    assert b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    assert oct(os.stat(path).st_mode & 0o777) == "0o644"
+    assert ws.model.get("REQ-1").owner == "ops"
+
+
+def edit_dict(ws, eid):
+    from rules_requirements.edit import entity_to_dict
+
+    return entity_to_dict(ws.model.get(eid))
+
+
+def test_rename_is_transactional_and_keeps_everything(repo):
+    path = repo / "req" / "model.yaml"
+    text = path.read_text().replace(
+        "    title: Cut the heater at 35 C\n", "    title: Cut the heater at 35 C\n    # keep me\n    jira: ABC-1\n"
+    )
+    path.write_text("config: {rules: {unknown-field: warning}}\n" + text)
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    ws.rename("REQ-3", "REQ-30")
+    new = path.read_text()
+    assert "# keep me\n    jira: ABC-1" in new and "id: REQ-30" in new
+    assert ws.model.mitigations["MIT-1"].implemented_by == ("REQ-30",)
+    # a failing part leaves every file untouched
+    write(repo, "req/flow.yaml", "requirements: [{id: REQ-7, title: f, refines: [REQ-30]}]\n")
+    snapshot = {p: (repo / "req" / p).read_text() for p in ("model.yaml", "flow.yaml")}
+    with pytest.raises(WorkspaceError, match="flow style"):
+        ws.rename("REQ-30", "REQ-31")
+    assert {p: (repo / "req" / p).read_text() for p in snapshot} == snapshot
+
+
+def test_commit_only_includes_model_files(repo):
+    ws = Workspace(root=str(repo), model_paths=["req"], author="Ada <ada@x>")
+    ws.create("user_need", {"title": "N"})
+    write(repo, "req/BUILD.bazel", "# unfinished\n")
+    write(repo, "req/scratch.txt", "notes\n")
+    assert ws.git_status()["changed"] == ["req/model.yaml"]
+    ws.commit("Add UN-3")
+    committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert committed == ["req/model.yaml"]
+    assert "req/BUILD.bazel" in git(repo, "status", "--porcelain")
+
+
+def test_history_from_a_subdirectory_root_and_unicode_names(tmp_path):
+    outer = tmp_path / "outer"
+    write(outer, "proj/req/sécurité.yaml", MODEL)
+    git(outer, "init", "-q", "-b", "main")
+    git(outer, "add", "-A")
+    git(outer, "commit", "-qm", "init")
+    ws = Workspace(root=str(outer / "proj"), model_paths=["req"], scan=False)
+    assert ws.diff("HEAD") == []
+    assert len(ws.model_at("HEAD").ids()) == 8
+    log = ws.log()
+    assert log[0]["parent"] == "" and ws.diff("EMPTY", log[0]["sha"])[0].change == "added"
+
+
+def test_source_refuses_nested_git_dirs(repo):
+    write(repo, "vendor/sub/.git/config", "[core]\n")
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    with pytest.raises(WorkspaceError):
+        ws.source("vendor/sub/.git/config")
+
+
+def test_next_id_keeps_the_number_width(tmp_path):
+    write(
+        tmp_path,
+        "m.yaml",
+        "config: {prefixes: {requirement: SW-REQ}}\nuser_needs: [{id: UN-1, title: n}]\n"
+        "requirements:\n  - {id: SW-REQ-001, title: a, satisfies: [UN-1]}\n  - {id: SW-REQ-002, title: b, satisfies: [UN-1]}\n",
+    )
+    ws = Workspace(root=str(tmp_path), model_paths=["m.yaml"], scan=False)
+    assert ws.next_id("requirement") == "SW-REQ-003"
+    assert ws.next_id("risk") == "RISK-1"

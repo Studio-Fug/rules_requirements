@@ -149,7 +149,9 @@ class JobManager:
             job.finished = time.time()
 
     def finding(self, finding_id: str) -> tuple[Job, Finding]:
-        for job in self.jobs.values():
+        with self._lock:
+            jobs = list(self.jobs.values())
+        for job in jobs:
             for f in job.findings:
                 if f.id == finding_id:
                     return job, f

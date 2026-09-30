@@ -307,15 +307,24 @@ def cmd_serve(args: argparse.Namespace) -> int:
         + (status["name"] if status["available"] else f"deterministic only ({status['reason']})"),
         file=sys.stderr,
     )
+    token = args.token
+    from rules_requirements.server.app import needs_token
+
+    if needs_token(args.host) and not token:
+        import secrets
+
+        token = secrets.token_urlsafe(24)
+        print(
+            f"rr serve: binding to {args.host} exposes the editor beyond this machine; generated a token",
+            file=sys.stderr,
+        )
     httpd = serve(
         api,
         host=args.host,
         port=args.port,
-        token=args.token,
+        token=token,
         allowed_hosts=set(args.allow_host or ()),
-        ready=lambda url: print(
-            f"rr serve: open {url}" + (f"#token={args.token}" if args.token else ""), file=sys.stderr
-        ),
+        ready=lambda url: print(f"rr serve: open {url}" + (f"#token={token}" if token else ""), file=sys.stderr),
     )
     try:
         while True:

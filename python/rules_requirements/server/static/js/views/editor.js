@@ -298,7 +298,10 @@ export async function renderEditor({ kind, id, query }) {
     existing = await get(`/api/entities/${enc(id)}`);
     kind = existing.kind;
     base = { ...existing.data };
-    if (draft) base = { ...base, ...draft.data, id, notes: existing.data.notes };
+    if (draft) base = { ...base, ...draft.data, id };
+    // Notes are edited on the entity page, never through this form: the server
+    // keeps them when `notes` is absent, so a stale form cannot drop a note.
+    delete base.notes;
   } else if (draft) {
     base = { ...draft.data };
   }
@@ -380,6 +383,7 @@ export async function renderEditor({ kind, id, query }) {
     ev.preventDefault();
     errorBox.hidden = true;
     const data = { ...base };
+    delete data.notes;
     for (const [field, el] of fields) {
       const v = el.read();
       if (v === "" || v === null || v === undefined || (Array.isArray(v) && !v.length)) delete data[field.key];
@@ -401,10 +405,12 @@ export async function renderEditor({ kind, id, query }) {
             action: "update",
             entity: existing.id,
             data,
+            version: existing.version,
             author: settings.author || undefined,
           });
         } else {
-          await put(`/api/entities/${enc(existing.id)}`, { data });
+          // `version` makes a concurrent change a 409 instead of a silent overwrite.
+          await put(`/api/entities/${enc(existing.id)}`, { data, version: existing.version });
         }
         savedId = existing.id;
       } else {

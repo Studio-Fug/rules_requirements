@@ -135,3 +135,83 @@ def test_entity_dict_roundtrip_on_full_model():
         back, problems = edit.dict_to_entity(ent.kind, edit.entity_to_dict(ent))
         assert not problems and edit.entity_to_dict(back) == edit.entity_to_dict(ent)
     assert edit.verified_by_from(["a", {"target": "b", "level": "hil"}])[1].level == "hil"
+
+
+# --- adversarial-review regressions ------------------------------------------------
+
+
+def test_insert_into_empty_or_null_section():
+    for body in ("requirements:\n", "requirements: []\n", "requirements: ~\n"):
+        text = "user_needs:\n  - id: UN-1\n    title: n\n" + body
+        out = edit.insert_entity(text, "requirement", {"id": "REQ-1", "title": "r", "satisfies": ["UN-1"]})
+        edit.verify(text, out, {"REQ-1": {"id": "REQ-1", "title": "r", "satisfies": ["UN-1"]}})
+        assert parse(out).get("REQ-1").satisfies == ("UN-1",)
+
+
+def test_flow_containers_and_json_are_refused_not_rewritten():
+    flow = "requirements: [{id: REQ-1, title: a}, {id: REQ-2, title: b}]\n"
+    for fn in (
+        lambda: edit.update_entity(flow, "REQ-2", {"id": "REQ-2", "title": "B"}),
+        lambda: edit.delete_entity(flow, "REQ-2"),
+    ):
+        with pytest.raises(edit.EditError, match="flow style"):
+            fn()
+    with pytest.raises(edit.EditError):
+        edit.insert_entity(flow, "requirement", {"id": "REQ-3", "title": "c"})
+    doc = '{"kind": "requirement", "id": "REQ-1", "title": "a"}\n'
+    with pytest.raises(edit.EditError, match="flow style"):
+        edit.update_entity(doc, "REQ-1", {"id": "REQ-1", "title": "b"})
+    # a flow mapping alone on its line inside a block list is fine
+    ok = "requirements:\n  - {id: REQ-1, title: a}\n  - id: REQ-2\n    title: b\n"
+    out = edit.update_entity(ok, "REQ-1", {"id": "REQ-1", "title": "A"})
+    assert parse(out).get("REQ-1").title == "A" and parse(out).get("REQ-2").title == "b"
+
+
+def test_merge_keys_never_leak_into_other_entities():
+    text = "base: &b\n  owner: alice\nrequirements:\n  - id: REQ-1\n    <<: *b\n    title: one\n  - id: REQ-2\n    <<: *b\n    title: two\n"
+    out = edit.update_entity(text, "REQ-2", {"id": "REQ-2", "title": "two", "owner": "bob"})
+    m = parse(out)
+    assert m.get("REQ-1").owner == "alice" and m.get("REQ-2").owner == "bob"
+    anchored = "requirements:\n  - &r1\n    id: REQ-1\n    title: one\n    owner: alice\n  - <<: *r1\n    id: REQ-2\n    title: two\n"
+    out = edit.update_entity(anchored, "REQ-1", {"id": "REQ-1", "title": "one", "owner": "bob"})
+    with pytest.raises(edit.EditError, match="also change REQ-2"):
+        edit.verify(anchored, out, {"REQ-1": {"id": "REQ-1", "title": "one", "owner": "bob"}})
+
+
+@pytest.mark.parametrize(
+    "value",
+    [".NaN", "0b1010", "0x_1F", "1_000", "yes", "~", "null", "2026-09-30", "12:30", "a\x85b", "a b", "tab\there",
+     "  leading", "trailing  ", "line1\n  indented", "ends with newline\n", "#hash", "- dash", ": colon", "@at", "`tick`",
+     "quote's", 'dq"', "back\\slash", "ümlaut ✓", "x" * 200, "word " * 30 + "\ttab"],
+)  # fmt: skip
+def test_rendered_scalars_round_trip(value):
+    # Text fields are stripped by the model loader, so that is the contract.
+    for key in ("title", "description", "owner"):
+        data = {"id": "REQ-1", "title": "t", key: value}
+        rendered = edit.render_entity("requirement", data, indent=2)
+        back = parse("requirements:\n" + rendered).get("REQ-1")
+        assert getattr(back, key) == value.strip(), (key, rendered)
+
+
+def test_other_key_indentations_and_missing_trailing_newline():
+    odd = "requirements:\n-   id: REQ-1\n    title: one\n-   id: REQ-2\n    title: two"  # no final newline
+    out = edit.update_entity(odd, "REQ-2", {"id": "REQ-2", "title": "two", "owner": "x"})
+    assert parse(out).get("REQ-2").owner == "x"
+    out = edit.insert_entity(odd, "requirement", {"id": "REQ-3", "title": "three"})
+    assert out.endswith("-   id: REQ-3\n    title: three\n") and sorted(parse(out).ids()) == ["REQ-1", "REQ-2", "REQ-3"]
+
+
+def test_verify_catches_collateral_changes_and_tolerates_line_shifts():
+    text = "requirements:\n  - id: REQ-1\n    title: one\n  - id: REQ-2\n    title: two\n    colour: red\n"
+    grown = edit.update_entity(text, "REQ-1", {"id": "REQ-1", "title": "one", "description": "a\nb\nc"})
+    edit.verify(
+        text, grown, {"REQ-1": {"id": "REQ-1", "title": "one", "description": "a\nb\nc"}}
+    )  # unknown field moved lines: fine
+    with pytest.raises(edit.EditError, match="also change REQ-2"):
+        edit.verify(text, text.replace("two", "TWO"), {})
+    with pytest.raises(edit.EditError, match="introduce model errors"):
+        edit.verify(text, text + "  - id: REQ-1\n    title: dup\n", {})
+    with pytest.raises(edit.EditError, match="unknown fields"):
+        edit.verify(text, text.replace("title: one", "title: one\n    flavour: x"), {})
+    with pytest.raises(edit.EditError, match="not be valid YAML"):
+        edit.verify(text, "requirements: [\n", {})

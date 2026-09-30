@@ -362,14 +362,14 @@ export async function renderVersions(query) {
         ? h(
             "ol",
             { class: "history" },
-            commits.map((c, i) =>
+            commits.map((c) =>
               h(
                 "li",
                 null,
                 h("code", null, c.short),
                 h(
                   "a",
-                  { href: hashOf("versions", { from: i === commits.length - 1 ? c.sha : `${c.sha}~1`, to: c.sha }) },
+                  { href: hashOf("versions", { from: c.parent || "EMPTY", to: c.sha }) },
                   c.subject,
                 ),
                 h("span", { class: "muted" }, `${c.author}, ${c.date}`),

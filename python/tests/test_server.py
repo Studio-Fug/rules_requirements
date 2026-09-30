@@ -243,3 +243,71 @@ def test_ui_assets_are_packaged():
     with open(os.path.join(app.STATIC, "index.html"), encoding="utf-8") as fh:
         html = fh.read()
     assert 'type="module"' in html and "<script>" not in html  # no inline scripts (CSP)
+
+
+def test_findings_apply_once_and_updates_merge(api):
+    job = call(api, "POST", "/api/agents/run", {"workflow": "completeness", "params": {}, "wait": True})
+    f = next(x for x in job["findings"] if x["entity"])
+    call(api, "POST", f"/api/findings/{f['id']}/apply", {"action": "note"})
+    with pytest.raises(HttpError) as exc:
+        call(api, "POST", f"/api/findings/{f['id']}/apply", {"action": "note"})
+    assert exc.value.status == 409
+    # an update proposal only carries some fields: the rest are kept
+    from rules_requirements.agents import Finding
+
+    finding = Finding(
+        "assistant",
+        "info",
+        "assistant:update",
+        "t",
+        entity="REQ-1",
+        proposal={"kind": "requirement", "op": "update", "data": {"title": "Heat faster"}},
+    )
+    finding.id = "x-1"
+    api.jobs.jobs[job["id"]].findings.append(finding)
+    r = call(api, "POST", "/api/findings/x-1/apply", {"action": "update"})
+    assert (
+        r["entity"]["data"]["title"] == "Heat faster"
+        and r["entity"]["data"]["satisfies"] == ["UN-1"]
+        and r["entity"]["data"]["modules"] == ["controller"]
+    )
+
+
+def test_off_loopback_needs_a_token_and_ipv6_binds(api):
+    from rules_requirements.server.app import needs_token
+
+    assert (
+        needs_token("0.0.0.0")
+        and needs_token("192.168.1.5")
+        and not needs_token("127.0.0.1")
+        and not needs_token("::1")
+    )
+    with pytest.raises(ValueError, match="token"):
+        serve(api, host="0.0.0.0", port=0)
+    try:
+        httpd = serve(api, host="::1", port=0)
+    except OSError:
+        pytest.skip("no IPv6 loopback here")
+    httpd.shutdown()
+
+
+def test_bad_content_length_is_rejected(api):
+    import socket
+
+    httpd = serve(api, port=0)
+    try:
+        s = socket.create_connection(("127.0.0.1", httpd.server_address[1]))
+        s.sendall(b"POST /api/reload HTTP/1.1\r\nHost: localhost\r\nX-RR-Request: 1\r\nContent-Length: -1\r\n\r\n")
+        assert b" 400 " in s.recv(4096).split(b"\r\n")[0]
+        s.close()
+    finally:
+        httpd.shutdown()
+
+
+def test_allow_host_is_case_insensitive(api):
+    httpd = serve(api, port=0, allowed_hosts={"RR.Example"})
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        assert http(base, "GET", "/api/state", headers={"Host": "rr.example"})[0] == 200
+    finally:
+        httpd.shutdown()

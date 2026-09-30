@@ -83,7 +83,9 @@ class ClaudeLLM:
             raise LLMError(f"the model declined this request (refusal category: {category})")
         if message.stop_reason == "max_tokens":
             raise LLMError("the answer was truncated (max_tokens)")
-        text = next((b.text for b in message.content if getattr(b, "type", "") == "text"), "")
+        # A mid-stream refusal rescued by a server-side fallback returns
+        # [text (partial), fallback, text (continuation)]: join every text block.
+        text = "".join(b.text for b in message.content if getattr(b, "type", "") == "text")
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:

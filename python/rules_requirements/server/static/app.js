@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // rr serve — requirements workbench. Entry point: shell, router, search.
 
-import { captureToken, post, settings } from "./js/api.js";
+import { captureToken, get, post, settings } from "./js/api.js";
 import { button, clearSourceCache, glyph, icon, idTag, openDialog, reportError, toast } from "./js/components.js";
 import { h, mount, plural, swap } from "./js/dom.js";
 import { KIND, KIND_BY_ROUTE, KINDS, refresh, store } from "./js/store.js";
@@ -136,7 +136,29 @@ function drawRail() {
       { class: "rail-foot" },
       "rules_requirements",
       h("br"),
-      h("a", { href: "/api/report", target: "_blank", rel: "noopener" }, "Report JSON"),
+      h(
+        "a",
+        {
+          href: "/api/report",
+          target: "_blank",
+          rel: "noopener",
+          // With a token the plain link would be refused (it cannot carry the
+          // Authorization header): fetch it and show the JSON from a blob.
+          onclick: async (ev) => {
+            if (!settings.token) return;
+            ev.preventDefault();
+            try {
+              const report = await get("/api/report");
+              const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+              window.open(url, "_blank", "noopener");
+              setTimeout(() => URL.revokeObjectURL(url), 60_000);
+            } catch (err) {
+              reportError(err);
+            }
+          },
+        },
+        "Report JSON",
+      ),
     ),
   );
 }

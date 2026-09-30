@@ -9,6 +9,8 @@ resolving outside it (or into ``.git``) is refused.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -77,7 +79,7 @@ class Workspace:
 
     def abspath(self, rel: str) -> str:
         rel = self._rel(rel)
-        if rel == ".git" or rel.startswith(".git/"):
+        if ".git" in rel.split("/"):
             raise WorkspaceError("refusing to touch .git", 403)
         return os.path.join(self.root, rel)
 
@@ -121,43 +123,61 @@ class Workspace:
 
     # ------------------------------------------------------------------ edits
 
-    def _read(self, rel: str) -> str:
+    def _load(self, rel: str) -> tuple[str, bool]:
+        """(LF-normalised text, whether the file uses CRLF); "" for a new file."""
         try:
-            with open(self.abspath(rel), encoding="utf-8") as fh:
-                return fh.read()
+            with open(self.abspath(rel), encoding="utf-8", newline="") as fh:
+                raw = fh.read()
         except FileNotFoundError:
-            return ""
+            return "", False
+        return raw.replace("\r\n", "\n"), "\r\n" in raw
 
-    def _write(self, rel: str, text: str) -> None:
+    def _read(self, rel: str) -> str:
+        return self._load(rel)[0]
+
+    def _write(self, rel: str, text: str, crlf: bool = False) -> None:
+        """Atomically replace ``rel`` (keeping its mode and line endings)."""
         path = self.abspath(rel)
+        data = text.replace("\n", "\r\n") if crlf else text
+        try:
+            with open(path, encoding="utf-8", newline="") as fh:
+                if fh.read() == data:
+                    return  # unchanged: leave the file (and its mtime) alone
+            mode: int | None = os.stat(path).st_mode & 0o7777
+        except FileNotFoundError:
+            mode = None
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rr-", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(text)
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(data)
+            if mode is None:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(tmp, mode)
             os.replace(tmp, path)
         except BaseException:
             if os.path.exists(tmp):
                 os.remove(tmp)
             raise
 
-    def _check(self, rel: str, text: str) -> None:
-        """Refuse an edit that makes the file unparsable."""
-        try:
-            docs = [d for d in yaml.safe_load_all(text) if d is not None]
-        except yaml.YAMLError as exc:  # pragma: no cover - render_entity emits valid YAML
-            raise WorkspaceError(f"edit would corrupt {rel}: {exc}", 500) from exc
-        _, _ = parse_documents([(rel, d) for d in docs])
+    def _txn(self) -> _Transaction:
+        return _Transaction(self)
+
+    @staticmethod
+    def version(ent: Any) -> str:
+        """A short fingerprint of an entity's content (optimistic concurrency)."""
+        blob = json.dumps(edit.entity_to_dict(ent), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:12]  # noqa: S324 — not security relevant
 
     def next_id(self, kind: str) -> str:
         model = self.model
         prefix = model.config.prefix(kind)
-        existing = [e.id for e in model.section(kind).values()]
-        nums = [int(m.group(1)) for i in existing if (m := re.match(re.escape(prefix) + r"-(\d+)$", i))]
-        width = max(
-            (len(i.split("-", 1)[1]) for i in existing if re.match(re.escape(prefix) + r"-0\d+$", i)), default=0
-        )
-        return f"{prefix}-{(max(nums) + 1 if nums else 1):0{width}d}"
+        rx = re.compile(re.escape(prefix) + r"-(\d+)$")
+        nums = [m.group(1) for e in model.section(kind).values() if (m := rx.match(e.id))]
+        width = max((len(n) for n in nums if n.startswith("0")), default=0)
+        return f"{prefix}-{(max(int(n) for n in nums) + 1 if nums else 1):0{width}d}"
 
     def file_for_new(self, kind: str) -> str:
         """Where a new entity of ``kind`` goes: next to its siblings.
@@ -176,7 +196,7 @@ class Workspace:
             if counts[best] == 1 and len(counts) > 1 and self._single_object(best):
                 return os.path.dirname(best)  # a directory: one file per object
             return best
-        files = self.files()
+        files = [f for f in self.files() if not f.endswith(".json")]
         if files:
             return files[0]
         base = self.model_paths[0] if self.model_paths else "requirements"
@@ -184,6 +204,9 @@ class Workspace:
 
     def _single_object(self, rel: str) -> bool:
         return bool(re.search(r"^kind:\s", self._read(rel), re.M))
+
+    def _covered(self, rel: str) -> bool:
+        return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in self.model_paths)
 
     def create(self, kind: str, data: Mapping[str, Any], file: str = "") -> str:
         if kind not in cfg.KINDS:
@@ -201,41 +224,48 @@ class Workspace:
             target = self._rel(file) if file else self.file_for_new(kind)
             if not target.endswith((".yaml", ".yml", ".json")):
                 target = f"{target}/{ent.id}.yaml"
-            if (
-                os.path.exists(self.abspath(target))
-                and target.endswith((".yaml", ".yml"))
-                and not self._single_object(target)
-            ):
-                text = edit.insert_entity(self._read(target), kind, edit.entity_to_dict(ent))
-            elif os.path.exists(self.abspath(target)):
-                raise WorkspaceError(f"{target} already exists", 409)
-            else:
-                text = edit.render_file(kind, edit.entity_to_dict(ent))
-            self._check(target, text)
             if not self._covered(target):
                 raise WorkspaceError(f"{target} is not part of the model paths {self.model_paths}")
-            self._write(target, text)
+            txn = self._txn()
+            exists = os.path.exists(self.abspath(target))
+            if exists and not self._single_object(target):
+                txn.edit(target, lambda text: edit.insert_entity(text, kind, edit.entity_to_dict(ent)), {ent.id: data})
+            elif exists:
+                raise WorkspaceError(f"{target} already exists", 409)
+            else:
+                txn.edit(target, lambda _text: edit.render_file(kind, edit.entity_to_dict(ent)), {ent.id: data})
+            txn.commit()
             return ent.id
 
-    def _covered(self, rel: str) -> bool:
-        return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in self.model_paths)
+    def update(self, entity_id: str, data: Mapping[str, Any], version: str = "") -> None:
+        """Replace an entity's fields with ``data``.
 
-    def update(self, entity_id: str, data: Mapping[str, Any]) -> None:
+        ``notes`` are kept unless ``data`` names them (the form editor does
+        not); with ``version`` (from :func:`entity_payload`) a concurrent change
+        since the caller loaded the entity is a 409 instead of being lost.
+        """
         with self._lock:
             ent = self.model.get(entity_id)
             if ent is None:
                 raise WorkspaceError(f"{entity_id} does not exist", 404)
+            if version and version != self.version(ent):
+                raise WorkspaceError(f"{entity_id} changed since it was loaded; reload and reapply your edit", 409)
             data = dict(data)
             if str(data.get("id", entity_id)) != entity_id:
                 raise WorkspaceError("use rename to change an id")
             data["id"] = entity_id
+            if "notes" not in data and ent.notes:
+                data["notes"] = edit.entity_to_dict(ent).get("notes", [])
             new, problems = edit.dict_to_entity(ent.kind, data)
             if new is None or problems:
                 raise WorkspaceError("; ".join(problems) or "invalid entity")
-            rel = ent.location.path
-            text = edit.update_entity(self._read(rel), entity_id, edit.entity_to_dict(new))
-            self._check(rel, text)
-            self._write(rel, text)
+            txn = self._txn()
+            txn.edit(
+                ent.location.path,
+                lambda t: edit.update_entity(t, entity_id, edit.entity_to_dict(new)),
+                {entity_id: data},
+            )
+            txn.commit()
 
     def referrers(self, entity_id: str) -> list[tuple[str, str]]:
         """(referring id, relation) for every reference to ``entity_id``."""
@@ -246,6 +276,22 @@ class Workspace:
                     out.append((ent.id, relation))
         return out
 
+    def _retarget(self, txn: _Transaction, holder_id: str, old: str, new: str | None) -> None:
+        """Rewrite (or, with ``new`` None, drop) every reference to ``old`` in ``holder_id``."""
+        holder = self.model.get(holder_id)
+        if holder is None:
+            return
+        data = edit.entity_to_dict(holder)
+        for key in ("satisfies", "refines", "mitigates", "implemented_by", "mitigated_by"):
+            if key in data:
+                data[key] = [x for x in (new if x == old else x for x in data[key]) if x is not None]
+        if data.get("method") == old:
+            if new is None:
+                data.pop("method")
+            else:
+                data["method"] = new
+        txn.edit(holder.location.path, lambda t: edit.update_entity(t, holder_id, data), {holder_id: data})
+
     def delete(self, entity_id: str, force: bool = False) -> None:
         with self._lock:
             ent = self.model.get(entity_id)
@@ -255,32 +301,21 @@ class Workspace:
             if refs and not force:
                 who = ", ".join(f"{i} ({r})" for i, r in refs)
                 raise WorkspaceError(f"{entity_id} is referenced by {who}", 409)
-            for ref_id, _ in refs:
-                self._drop_reference(ref_id, entity_id)
+            txn = self._txn()
+            for ref_id in dict.fromkeys(i for i, _ in refs):
+                self._retarget(txn, ref_id, entity_id, None)
             rel = ent.location.path
             if self._single_object(rel) and len([e for e in self.model.entities() if e.location.path == rel]) == 1:
-                os.remove(self.abspath(rel))
-                return
-            text = edit.delete_entity(self._read(rel), entity_id)
-            self._check(rel, text)
-            self._write(rel, text)
-
-    def _drop_reference(self, holder_id: str, target_id: str) -> None:
-        holder = self.model.get(holder_id)
-        if holder is None:
-            return
-        data = edit.entity_to_dict(holder)
-        for key in ("satisfies", "refines", "mitigates", "implemented_by", "mitigated_by"):
-            if key in data:
-                data[key] = [x for x in data[key] if x != target_id]
-        if data.get("method") == target_id:
-            data.pop("method")
-        self.update(holder_id, data)
+                txn.remove(rel, {entity_id: None})
+            else:
+                txn.edit(rel, lambda t: edit.delete_entity(t, entity_id), {entity_id: None})
+            txn.commit()
 
     def rename(self, old_id: str, new_id: str) -> list[str]:
-        """Change an id and every model reference to it; returns touched ids.
+        """Change an id and every model reference to it, in one transaction.
 
-        Source annotations are not rewritten (they are reported by the scan).
+        Source annotations are not rewritten (the scan reports them). A
+        one-object file named after the old id is renamed with it.
         """
         with self._lock:
             ent = self.model.get(old_id)
@@ -290,31 +325,18 @@ class Workspace:
                 raise WorkspaceError(f"{new_id} already exists", 409)
             if not self.model.config.id_regex(ent.kind).match(new_id):
                 raise WorkspaceError(f"{new_id} does not match the {ent.kind} id pattern")
-            touched = []
-            for ref_id, _ in self.referrers(old_id):
-                holder = self.model.get(ref_id)
-                assert holder is not None
-                data = edit.entity_to_dict(holder)
-                for key in ("satisfies", "refines", "mitigates", "implemented_by", "mitigated_by"):
-                    if key in data:
-                        data[key] = [new_id if x == old_id else x for x in data[key]]
-                if data.get("method") == old_id:
-                    data["method"] = new_id
-                self.update(ref_id, data)
-                touched.append(ref_id)
-            rel = ent.location.path
-            text = self._read(rel)
-            span = edit.locate(text, old_id)
-            assert span is not None
+            txn = self._txn()
+            touched = list(dict.fromkeys(i for i, _ in self.referrers(old_id)))
+            for ref_id in touched:
+                self._retarget(txn, ref_id, old_id, new_id)
             data = {**edit.entity_to_dict(ent), "id": new_id}
-            rendered = (
-                edit.render_entity(ent.kind, data, indent=span.indent, list_item=True)
-                if span.list_item
-                else edit.render_file(ent.kind, data)
-            )
-            text = text[: span.start] + rendered + text[span.end :]
-            self._check(rel, text)
-            self._write(rel, text)
+            rel = ent.location.path
+            txn.aliases[new_id] = old_id
+            txn.edit(rel, lambda t: edit.update_entity(t, old_id, data), {old_id: None, new_id: data})
+            base, ext = os.path.splitext(os.path.basename(rel))
+            if base == old_id and self._single_object(rel):
+                txn.move(rel, os.path.join(os.path.dirname(rel), new_id + ext).replace(os.sep, "/"))
+            txn.commit()
             return touched
 
     # ------------------------------------------------------------------ notes
@@ -329,8 +351,7 @@ class Workspace:
             note = Note(
                 text=text.strip(), kind=kind, author=author or self.author, created=_dt.date.today().isoformat(), id=nid
             )
-            data = edit.entity_to_dict(replace(ent, notes=(*ent.notes, note)))
-            self.update(entity_id, data)
+            self.update(entity_id, edit.entity_to_dict(replace(ent, notes=(*ent.notes, note))))
             return nid
 
     def update_note(self, entity_id: str, note_id: str, **changes: str) -> None:
@@ -344,17 +365,17 @@ class Workspace:
                 replace(n, **{k: v for k, v in changes.items() if v is not None}) if n.id == note_id else n
                 for n in ent.notes
             )
-            self.update(entity_id, edit.entity_to_dict(replace(ent, notes=notes)))
+            self.update(entity_id, {**edit.entity_to_dict(ent), "notes": [edit._note_dict(n) for n in notes]})
 
     def delete_note(self, entity_id: str, note_id: str) -> None:
         with self._lock:
             ent = self.model.get(entity_id)
             if ent is None:
                 raise WorkspaceError(f"{entity_id} does not exist", 404)
-            notes = tuple(n for n in ent.notes if n.id != note_id)
+            notes = [edit._note_dict(n) for n in ent.notes if n.id != note_id]
             if len(notes) == len(ent.notes):
                 raise WorkspaceError(f"{entity_id} has no note {note_id}", 404)
-            self.update(entity_id, edit.entity_to_dict(replace(ent, notes=notes)))
+            self.update(entity_id, {**edit.entity_to_dict(ent), "notes": notes})
 
     # ------------------------------------------------------------------ sources
 
@@ -409,8 +430,7 @@ class Workspace:
             return {"git": False}
         branch = self.git("rev-parse", "--abbrev-ref", "HEAD", check=False).strip()
         head = self.git("rev-parse", "--short", "HEAD", check=False).strip()
-        porcelain = self.git("status", "--porcelain", "--", *self.model_paths, check=False)
-        changed = [line[3:] for line in porcelain.splitlines() if line.strip()]
+        changed = self._changed_model_files()
         name = self.git("config", "user.name", check=False).strip()
         email = self.git("config", "user.email", check=False).strip()
         return {
@@ -420,6 +440,26 @@ class Workspace:
             "changed": changed,
             "user": f"{name} <{email}>" if name else "",
         }
+
+    def _changed_model_files(self) -> list[str]:
+        """Model files (YAML/JSON under the model paths) with uncommitted changes."""
+        out = self.git("status", "--porcelain", "-z", "--untracked-files=all", "--", *self.model_paths, check=False)
+        entries = out.split("\0")
+        changed: list[str] = []
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            status, path = entry[:2], entry[3:]
+            if status[0] in "RC":  # renames/copies carry the source path next
+                i += 1
+            prefix = self.git("rev-parse", "--show-prefix", check=False).strip()
+            rel = path[len(prefix) :] if prefix and path.startswith(prefix) else path
+            if rel.endswith((".yaml", ".yml", ".json")) and self._covered(rel):
+                changed.append(rel)
+        return sorted(dict.fromkeys(changed))
 
     def refs(self) -> dict[str, Any]:
         if not self.is_git():
@@ -458,7 +498,7 @@ class Workspace:
         out = self.git(
             "log",
             f"-n{int(limit)}",
-            "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s",
+            "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%P",
             "--date=short",
             self._resolve(ref),
             "--",
@@ -467,8 +507,12 @@ class Workspace:
         )
         rows = []
         for line in out.splitlines():
-            full, short, author, date, subject = (line.split("\x1f") + ["", "", "", "", ""])[:5]
-            rows.append({"sha": full, "short": short, "author": author, "date": date, "subject": subject})
+            full, short, author, date, subject, parents = (line.split("\x1f") + [""] * 6)[:6]
+            parent = parents.split()[0] if parents.split() else ""
+            # `parent` is the first parent, or "" for a root commit (diff it from EMPTY).
+            rows.append(
+                {"sha": full, "short": short, "author": author, "date": date, "subject": subject, "parent": parent}
+            )
         return rows
 
     def model_at(self, ref: str) -> Model:
@@ -482,10 +526,13 @@ class Workspace:
         if ref == "EMPTY":
             return Model(config=self.model.config)
         ref = self._resolve(ref)
-        listing = self.git("ls-tree", "-r", "--name-only", ref, "--", *self.model_paths)
+        # --full-name: paths relative to the repository top (the workspace root
+        # may be a subdirectory); -z: no C-quoting of non-ASCII names.
+        listing = self.git("ls-tree", "-r", "-z", "--full-name", "--name-only", ref, "--", *self.model_paths)
         docs: list[tuple[str, Any]] = []
-        for rel in sorted(p for p in listing.splitlines() if p.endswith((".yaml", ".yml", ".json"))):
-            text = self.git("show", f"{ref}:{rel}")
+        for full in sorted(p for p in listing.split("\0") if p.endswith((".yaml", ".yml", ".json"))):
+            text = self.git("show", f"{ref}:{full}")
+            rel = full
             try:
                 docs.extend((rel, d) for d in yaml.safe_load_all(text) if d is not None)
             except yaml.YAMLError:
@@ -518,17 +565,92 @@ class Workspace:
     def commit(self, message: str, author: str = "") -> str:
         if not message.strip():
             raise WorkspaceError("a commit message is required")
-        status = self.git_status()
-        if not status.get("changed"):
+        changed = self._changed_model_files()
+        if not changed:
             raise WorkspaceError("no model changes to commit", 409)
-        self.git("add", "-A", "--", *self.model_paths)
-        args = ["commit", "-m", message, "--", *self.model_paths]
+        # Stage and commit exactly the model files: never sweep in unrelated
+        # edits (a BUILD file, scratch files) that happen to sit alongside.
+        self.git("add", "-A", "--", *changed)
+        args = ["commit", "-m", message, "--", *changed]
         author = author or self.author
         m = re.match(r"^\s*(.+?)\s*<([^>]+)>\s*$", author or "")
         if m:
             args[1:1] = ["--author", f"{m.group(1)} <{m.group(2)}>"]
         self.git(*args, env=self._identity_env(author))
         return self.git("rev-parse", "--short", "HEAD").strip()
+
+
+class _Transaction:
+    """Edits to one or more model files, verified together, then written.
+
+    Every edited file is re-parsed and checked with :func:`edit.verify`
+    (exactly the intended entities changed, nothing else); only if every file
+    passes is anything written.
+    """
+
+    def __init__(self, ws: Workspace):
+        self.ws = ws
+        self.texts: dict[str, str] = {}
+        self.orig: dict[str, str] = {}
+        self.crlf: dict[str, bool] = {}
+        self.expect: dict[str, dict[str, Any]] = {}
+        self.removed: set[str] = set()
+        self.moves: dict[str, str] = {}
+        self.aliases: dict[str, str] = {}  # renamed ids, new -> old
+
+    def _text(self, rel: str) -> str:
+        if rel not in self.texts:
+            if rel.endswith(".json"):
+                raise WorkspaceError(f"{rel} is a JSON model file; the editor writes YAML only — edit it by hand", 422)
+            text, crlf = self.ws._load(rel)
+            self.texts[rel], self.orig[rel], self.crlf[rel] = text, text, crlf
+        return self.texts[rel]
+
+    def edit(self, rel: str, fn: Any, expect: Mapping[str, Any]) -> None:
+        text = self._text(rel)
+        try:
+            self.texts[rel] = fn(text)
+        except edit.EditError as exc:
+            raise WorkspaceError(f"{rel}: {exc}", 422) from exc
+        except KeyError as exc:
+            raise WorkspaceError(f"{rel}: {exc.args[0] if exc.args else exc}", 404) from exc
+        except ValueError as exc:
+            raise WorkspaceError(f"{rel}: {exc}", 400) from exc
+        self.expect.setdefault(rel, {}).update(expect)
+
+    def remove(self, rel: str, expect: Mapping[str, Any]) -> None:
+        self._text(rel)
+        self.removed.add(rel)
+        self.expect.setdefault(rel, {}).update(expect)
+
+    def move(self, src: str, dst: str) -> None:
+        if os.path.exists(self.ws.abspath(dst)):
+            raise WorkspaceError(f"{dst} already exists", 409)
+        self.moves[src] = dst
+
+    def commit(self) -> None:
+        for rel, text in self.texts.items():
+            try:
+                if rel in self.removed:
+                    left = [
+                        e
+                        for e in edit._parse(self.orig[rel], rel).entities()
+                        if self.expect[rel].get(e.id, 1) is not None
+                    ]
+                    if left:
+                        raise edit.EditError(f"removing the file would also remove {left[0].id}")
+                else:
+                    edit.verify(self.orig[rel], text, self.expect.get(rel, {}), rel, aliases=self.aliases)
+            except edit.EditError as exc:
+                raise WorkspaceError(f"{rel}: {exc}", 422) from exc
+        for rel, text in self.texts.items():
+            if rel in self.removed:
+                os.remove(self.ws.abspath(rel))
+                continue
+            dst = self.moves.get(rel, rel)
+            self.ws._write(dst, text, self.crlf[rel])
+            if dst != rel:
+                os.remove(self.ws.abspath(rel))
 
 
 def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
@@ -574,6 +696,7 @@ def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
     return {
         "id": ent.id,
         "kind": ent.kind,
+        "version": ws.version(ent),
         "data": edit.entity_to_dict(ent),
         "location": {"path": ent.location.path, "line": ent.location.line},
         "status": verdict.status if verdict else "",
@@ -626,6 +749,7 @@ def summary_rows(ws: Workspace, kinds: Iterable[str] = cfg.KINDS) -> list[dict[s
                     "path": ent.location.path,
                     "line": ent.location.line,
                     "tags": list(ent.tags),
+                    "version": ws.version(ent),
                     "data": edit.entity_to_dict(ent),
                 }
             )

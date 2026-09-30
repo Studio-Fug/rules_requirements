@@ -19,6 +19,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -189,7 +190,8 @@ class Api:
         return entity_payload(self.ws, eid)
 
     def update_entity(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        self.ws.update(params["id"], _obj(_obj(body).get("data")))
+        body = _obj(body)
+        self.ws.update(params["id"], _obj(body.get("data")), version=str(body.get("version") or ""))
         return entity_payload(self.ws, params["id"])
 
     def delete_entity(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
@@ -343,6 +345,8 @@ class Api:
         """Elevate a finding: a note on its entity, or the proposed object."""
         body = _obj(body)
         _, finding = self.jobs.finding(params["finding"])
+        if finding.status != "open":
+            raise HttpError(409, f"finding {finding.id} is already {finding.status}")
         action = str(body.get("action", "note"))
         author = f"rr-agent/{finding.workflow}" if finding.source == "llm" else (self._author(params) or "rr")
         if action == "note":
@@ -360,7 +364,13 @@ class Api:
             kind = str(body.get("kind") or proposal.get("kind", ""))
             if action == "update" or proposal.get("op") == "update":
                 target = str(body.get("entity") or finding.entity)
-                self.ws.update(target, {**data, "id": target})
+                current = self.ws.model.get(target)
+                if current is None:
+                    raise HttpError(404, f"{target} does not exist")
+                # A proposal only carries the fields it changes: merge it over
+                # the entity instead of replacing fields it cannot express.
+                merged = {**edit_to_dict(current), **{k: v for k, v in data.items() if k != "id"}, "id": target}
+                self.ws.update(target, merged, version=str(body.get("version") or ""))
                 eid = target
             else:
                 eid = self.ws.create(kind, data, str(body.get("file", "")))
@@ -372,6 +382,12 @@ class Api:
         _, finding = self.jobs.finding(params["finding"])
         finding.status = "dismissed"
         return finding.to_dict()
+
+
+def edit_to_dict(ent: Any) -> dict[str, Any]:
+    from rules_requirements.edit import entity_to_dict
+
+    return entity_to_dict(ent)
 
 
 def _obj(value: Any) -> dict[str, Any]:
@@ -400,7 +416,7 @@ def _neighborhood(focus: str, edges: list[rr_graph.Edge], depth: int) -> set[str
 
 
 def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = None) -> type[BaseHTTPRequestHandler]:
-    hosts = LOCAL_HOSTS | (allowed_hosts or set())
+    hosts = LOCAL_HOSTS | {h.strip().lower() for h in (allowed_hosts or set())}
 
     class RequestHandler(BaseHTTPRequestHandler):
         server_version = "rules_requirements"
@@ -440,7 +456,12 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
                     return self._json(401, {"error": "missing or invalid token"})
                 if method not in ("GET", "HEAD") and self.headers.get("X-RR-Request") != "1":
                     return self._json(403, {"error": "missing X-RR-Request header"})
-                length = int(self.headers.get("Content-Length") or 0)
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = -1
+                if length < 0:
+                    return self._json(400, {"error": "invalid Content-Length"})
                 if length > 5 * 1024 * 1024:
                     return self._json(413, {"error": "request too large"})
                 raw = self.rfile.read(length) if length else b""
@@ -506,11 +527,19 @@ def serve(
     allowed_hosts: set[str] | None = None,
     ready: Callable[[str], None] | None = None,
 ) -> ThreadingHTTPServer:
-    """Start the server on a background thread and return it (``.shutdown()`` to stop)."""
-    extra = set(allowed_hosts or ())
+    """Start the server on a background thread and return it (``.shutdown()`` to stop).
+
+    Off loopback the Host check is no protection (any client can send
+    ``Host: localhost``), so a token is then mandatory: pass ``token`` or one is
+    generated (see :func:`needs_token`).
+    """
+    extra = {h.lower() for h in (allowed_hosts or ())}
     if host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::"):  # noqa: S104 — only a comparison
         extra.add(host.lower())
-    httpd = ThreadingHTTPServer((host, port), make_handler(api, token, extra))
+    if needs_token(host) and not token:
+        raise ValueError("a --token is required when binding to a non-loopback address")
+    server_cls: type[ThreadingHTTPServer] = _IPv6Server if ":" in host else ThreadingHTTPServer
+    httpd = server_cls((host, port), make_handler(api, token, extra))
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -520,4 +549,13 @@ def serve(
     return httpd
 
 
-__all__ = ["Api", "HTTPStatus", "HttpError", "serve"]
+def needs_token(host: str) -> bool:
+    """Whether binding to ``host`` exposes the server beyond this machine."""
+    return host not in ("127.0.0.1", "localhost", "::1")
+
+
+class _IPv6Server(ThreadingHTTPServer):
+    address_family = socket.AF_INET6
+
+
+__all__ = ["Api", "HTTPStatus", "HttpError", "needs_token", "serve"]
