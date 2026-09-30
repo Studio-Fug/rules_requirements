@@ -28,11 +28,14 @@ directories (walked recursively, following symlinks) and globs (`**` allowed).
 Each file goes to the first registered ingestor that recognises it; files no
 ingestor recognises — the `test.log` next to each `test.xml` in
 `bazel-testlogs`, for example — are skipped. The result also rolls cases up per
-target for [`verified_by`](../concepts.md#evidence) traces: `error` if any case
-errored, else `failed` if any failed, else `passed` if any passed, else
-`skipped`. A binary that exits non-zero although every case in its report
-passed (a sanitizer, a crash after writing the report) gets an extra
-`exit-status` error case — from `rr_evidence` and from the libtest wrapper.
+target for [`verified_by`](../concepts.md#evidence) traces, the most severe
+status winning: `error` > `failed` > `skipped` > `passed`. A target with any
+skipped case is therefore not passing whole-target evidence — the skipped part
+may be exactly the hardware its `verified_by` level claims (an absent DUT). A
+binary that exits non-zero although every case in its report passed (a
+sanitizer, a crash after writing the report) gets an extra `exit-status` error
+case carrying every requirement id the run traced, so those requirements read
+FAILED — from `rr_evidence` and from the libtest wrapper.
 
 ## Built-in ingestors
 

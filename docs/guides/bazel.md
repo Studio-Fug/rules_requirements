@@ -142,10 +142,13 @@ pass the `rust_test` rule as `rule`.
 | `env`, `env_inherit` | | Environment of the wrapper, inherited by the test binary. |
 | `**kwargs` | | Forwarded to the `rust_test` (`srcs`, `crate`, `deps`, `edition`, ...). |
 
-The wrapper also turns a crash into evidence: a test that recorded traces but
-never reported a result (an abort mid-run) becomes an `error` case carrying its
-ids, and a binary that exits non-zero after every test passed gets an
-`exit-status` error case.
+The wrapper also turns a crash into evidence: when the binary fails, a test
+that recorded traces but never reported a result (an abort mid-run) becomes an
+`error` case carrying its ids, and a binary that exits non-zero after every
+test passed gets an `exit-status` error case carrying every id the run traced.
+It understands `--nocapture` output (the result on a line of its own). Call
+`rr::verifies!` on the test's own thread: traces from spawned threads or async
+runtimes cannot be attributed to a test (the wrapper warns about them).
 
 googletest needs no macro: a `cc_test` depending on
 `@rules_requirements//cc:gtest` writes traced JUnit by itself.
