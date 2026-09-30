@@ -305,3 +305,27 @@ def test_libtest_ignores_result_lines_in_captured_output():
     cases = {f"{c.classname}::{c.name}": c for c in parse_libtest(text)}
     assert sorted(cases) == ["parse::ok", "ui::compile_fail"]
     assert "missing_field.rs" in cases["ui::compile_fail"].message
+
+
+def test_libtest_nocapture_last_verdict_and_failure_list_win():
+    text = (
+        "running 3 tests\n"
+        "test hw::flash_and_boot ... \n"
+        "ok\n"  # the test's own step output
+        "thread 'hw::flash_and_boot' panicked at src/lib.rs:9:5\n"
+        "FAILED\n"
+        "test hw::other ... step 1\n"
+        "ok\n"
+        "test hw::silent ... \n"
+        "ok\n"
+        "\n"
+        "failures:\n"
+        "\n"
+        "failures:\n"
+        "    hw::flash_and_boot\n"
+        "    hw::silent\n"
+        "\n"
+        "test result: FAILED. 1 passed; 2 failed\n"
+    )
+    cases = {f"{c.classname}::{c.name}": c.status for c in parse_libtest(text)}
+    assert cases == {"hw::flash_and_boot": "failed", "hw::other": "passed", "hw::silent": "failed"}

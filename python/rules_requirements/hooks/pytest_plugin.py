@@ -19,9 +19,18 @@ point; under Bazel pass it explicitly (the runner does).
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
-import pytest
+try:  # importable without pytest (e.g. a wheel smoke test); hooks need it only under pytest
+    import pytest
+
+    _trylast: Callable[[Any], Any] = pytest.hookimpl(trylast=True)
+except ImportError:  # pragma: no cover - pytest is always present when the hooks run
+    pytest = None  # type: ignore[assignment]
+
+    def _trylast(fn: Any) -> Any:
+        return fn
+
 
 from rules_requirements.util import dedupe
 
@@ -85,7 +94,7 @@ def trace_of(item: Any) -> tuple[list[str], str, dict[str, str]]:
     return dedupe(ids), level, artifact
 
 
-@pytest.hookimpl(trylast=True)
+@_trylast
 def pytest_collection_modifyitems(items: list[Any]) -> None:
     # Recorded once collection is final — after every conftest's
     # collection_modifyitems has added its markers — and before any test

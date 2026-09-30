@@ -46,44 +46,68 @@ _STDOUT_HEADER = re.compile(r"^---- (?P<name>\S+) stdout ----$")
 # once the test finishes.
 _PENDING = re.compile(r"^test (?P<name>\S+)(?: - should panic)? \.\.\.(?: .*)?$")
 _BARE_RESULT = re.compile(r"^(?P<result>ok|FAILED|ignored)(?:, (?P<reason>.*))?$")
+_FAILURE_ENTRY = re.compile(r"^    (?P<name>\S+)$")
 
 
 def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCase]:
     cases: dict[str, TestCase] = {}
+
+    def record(name: str, result: str, reason: str = "") -> None:
+        module, _, leaf = name.rpartition("::")
+        status = {"ok": PASSED, "FAILED": FAILED, "ignored": SKIPPED}[result]
+        cases[name] = TestCase(name=leaf, classname=module, status=status, message=reason, source=source, target=target)
+
     in_output = False  # inside a "---- name stdout ----" block of captured output
-    pending: str | None = None  # --nocapture: name printed, result still to come
+    in_failure_list = False  # the final "failures:" list of failed test names
+    # --nocapture: the test's name is printed first and its verdict on a line
+    # of its own when it finishes — but the test may print "ok" itself, so the
+    # *last* bare verdict before the next test (or the summary) counts.
+    pending: str | None = None
+    verdict: tuple[str, str] | None = None
+
+    def settle() -> None:
+        nonlocal pending, verdict
+        if pending is not None and verdict is not None:
+            record(pending, *verdict)
+        pending, verdict = None, None
+
     for line in text.splitlines():
+        stripped = line.rstrip()
         if _STDOUT_HEADER.match(line):
-            in_output = True
+            settle()
+            in_output, in_failure_list = True, False
             continue
         if line.startswith(("failures:", "successes:", "test result:", "running ")):
+            settle()
             in_output = False
+            in_failure_list = stripped == "failures:"
+            continue
         if in_output:
             continue  # e.g. trybuild prints its own "test x ... ok" lines here
-        stripped = line.rstrip()
+        if in_failure_list:
+            f = _FAILURE_ENTRY.match(stripped)
+            if f:
+                # libtest's own list of failed tests is authoritative.
+                name = f.group("name")
+                prev = cases.get(name)
+                record(name, "FAILED", prev.message if prev else "")
+            elif stripped:
+                in_failure_list = False
+            continue
         m = _RESULT.match(stripped)
-        if m is None:
-            p = _PENDING.match(stripped)
-            if p:
-                pending = p.group("name")
-                continue
-            m = _BARE_RESULT.match(stripped.strip()) if pending else None
-            if m is None:
-                continue
-            name, pending = pending, None
-            assert name is not None
-        else:
-            name, pending = m.group("name"), None
-        status = {"ok": PASSED, "FAILED": FAILED, "ignored": SKIPPED}[m.group("result")]
-        module, _, leaf = name.rpartition("::")
-        cases[name] = TestCase(
-            name=leaf,
-            classname=module,
-            status=status,
-            message=m.group("reason") or "",
-            source=source,
-            target=target,
-        )
+        if m is not None:
+            settle()
+            record(m.group("name"), m.group("result"), m.group("reason") or "")
+            continue
+        p = _PENDING.match(stripped)
+        if p:
+            settle()
+            pending = p.group("name")
+            continue
+        b = _BARE_RESULT.match(stripped.strip()) if pending else None
+        if b is not None:
+            verdict = (b.group("result"), b.group("reason") or "")
+    settle()
     # Attach captured output of failures as the failure message.
     current = None
     buf: list[str] = []
