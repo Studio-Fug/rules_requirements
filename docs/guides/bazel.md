@@ -105,6 +105,7 @@ the real files, never runfiles copies.
 | `paths` | the model's files | Workspace-relative files or directories to open instead. |
 | `evidence` | `["bazel-testlogs"]` | Workspace-relative evidence paths. |
 | `args` | `[]` | Extra `rr serve` flags (`--port=9000`, `--no-llm`, ...). |
+| `deps` | `[]` | Extra Python dependencies: your pip hub's `anthropic` (e.g. `@pypi//anthropic`) enables the LLM-backed agent workflows. |
 
 ## Test hooks
 

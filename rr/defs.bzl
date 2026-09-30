@@ -121,7 +121,7 @@ def rr_annotations_check(name, model, **kwargs):
     """
     _py("binary", name, "cli", baked_args = ["scan", "--model", "$(rootpaths %s)" % model], data = [model], **kwargs)
 
-def rr_editor(name, model, paths = [], evidence = ["bazel-testlogs"], args = [], **kwargs):
+def rr_editor(name, model, paths = [], evidence = ["bazel-testlogs"], args = [], deps = [], **kwargs):
     """`bazel run :<name>` opens the web editor (`rr serve`) on the model.
 
     The editor edits the real files in the workspace (not runfiles copies):
@@ -135,6 +135,8 @@ def rr_editor(name, model, paths = [], evidence = ["bazel-testlogs"], args = [],
         layouts, so new entities can be created there.
       evidence: workspace-relative evidence paths (default `bazel-testlogs`).
       args: extra `rr serve` arguments (e.g. `--port=9000`, `--no-llm`).
+      deps: extra Python dependencies — your pip hub's `anthropic` (e.g.
+        `@pypi//anthropic`) enables the LLM-backed agent workflows.
       **kwargs: forwarded to the underlying `py_binary`.
     """
     model_args = ["--model"] + (paths if paths else ["$(rootpaths %s)" % model])
@@ -144,6 +146,7 @@ def rr_editor(name, model, paths = [], evidence = ["bazel-testlogs"], args = [],
         "cli",
         baked_args = ["serve"] + model_args + ["--evidence"] + evidence + args,
         data = [model],
+        deps = deps,
         **kwargs
     )
 

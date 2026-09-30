@@ -122,10 +122,13 @@ The LLM-backed workflows use Claude through the official `anthropic` SDK, an
 optional dependency:
 
 ```sh
-pip install "rules-requirements[agents]"
+pip install anthropic       # or: pip install "rules-requirements[agents] @ git+https://github.com/Studio-Fug/rules_requirements"
 export ANTHROPIC_API_KEY=...        # or `ant auth login`
 rr serve --model requirements/
 ```
+
+Under Bazel, give the {doc}`rr_editor <bazel>` target your pip hub's
+`anthropic` package (`deps = ["@pypi//anthropic"]`).
 
 Requests use `claude-opus-5-5` with adaptive thinking and structured (JSON
 schema) output, streamed; a safety-classifier decline falls back server-side to

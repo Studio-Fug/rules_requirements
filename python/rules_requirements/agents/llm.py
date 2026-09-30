@@ -4,7 +4,7 @@
 Only the :class:`LLM` protocol is used by the workflows, so tests (and other
 providers) can supply their own. :class:`ClaudeLLM` talks to Claude through the
 official ``anthropic`` SDK, which is an *optional* dependency
-(``pip install "rules-requirements[agents]"``): without it the deterministic
+(``pip install anthropic``, or the ``agents`` extra): without it the deterministic
 workflows still run and the LLM-backed ones report themselves unavailable.
 
 Requests use adaptive thinking, JSON-schema structured output, streaming (the
@@ -50,9 +50,7 @@ class ClaudeLLM:
             try:
                 import anthropic  # type: ignore[import-not-found,unused-ignore]
             except ImportError as exc:
-                raise LLMUnavailable(
-                    'the "anthropic" package is not installed (pip install "rules-requirements[agents]")'
-                ) from exc
+                raise LLMUnavailable('the "anthropic" package is not installed (pip install anthropic)') from exc
             # Credentials resolve from the environment (ANTHROPIC_API_KEY,
             # ANTHROPIC_AUTH_TOKEN or an `ant auth login` profile).
             client = anthropic.Anthropic()
@@ -112,6 +110,6 @@ def llm_status(llm: LLM | None, enabled: bool = True) -> dict[str, Any]:
     except ImportError:
         return {
             "available": False,
-            "reason": 'install the optional "anthropic" package: pip install "rules-requirements[agents]"',
+            "reason": 'install the optional "anthropic" package: pip install anthropic',
         }
     return {"available": False, "reason": "the Claude client could not be created"}

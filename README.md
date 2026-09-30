@@ -157,8 +157,8 @@ rr report --model requirements/ --evidence results.xml --html report.html
 ## The web editor
 
 ```sh
-rr serve --model requirements/ --evidence bazel-testlogs     # or: bazel run @rules_requirements//python:rr -- serve ...
-pip install "rules-requirements[agents]"                    # optional: LLM-backed agent workflows (Claude)
+rr serve --model requirements/ --evidence bazel-testlogs   # Bazel: an rr_editor target, then `bazel run :editor`
+pip install anthropic                                      # optional: LLM-backed agent workflows (Claude)
 ```
 
 ![Trace graph in the web editor](docs/_static/editor-graph.png)
