@@ -25,6 +25,7 @@ from rules_requirements import annotations as rr_annotations
 from rules_requirements import graph, ingest, report
 from rules_requirements.model import Model, read_model
 from rules_requirements.trace import FAILED, UNVERIFIED, build_matrix
+from rules_requirements.util import natural_key
 from rules_requirements.validate import validate
 
 DEFAULT_MODEL = "requirements"
@@ -187,8 +188,22 @@ def cmd_report(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     reqs = matrix.of_kind("requirement")
-    failed = [v.id for v in reqs if v.status == FAILED]
+    # Any FAILED verdict gates: a failing validation test on a need, or a
+    # failing effectiveness test on a mitigation, counts as much as a
+    # requirement's.
+    failed = sorted((v.id for v in matrix.verdicts.values() if v.status == FAILED), key=natural_key)
     unverified = [v.id for v in reqs if v.status == UNVERIFIED]
+    current = _kv(args.current_build)
+    if current:
+        keys = {k for cs in evidence.cases for k in cs.artifact}
+        if not keys & set(current):
+            print(
+                "warning: --current-build keys (" + ", ".join(sorted(current)) + ") match no artifact identity "
+                "recorded in the evidence"
+                + (f" ({', '.join(sorted(keys))})" if keys else "")
+                + "; nothing can be stale",
+                file=sys.stderr,
+            )
     violations = matrix.pyramid_violations()
     if failed:
         print("FAILED: " + ", ".join(failed), file=sys.stderr)

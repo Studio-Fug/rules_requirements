@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import time
 import traceback
@@ -47,32 +48,69 @@ def trace_of(test: unittest.TestCase) -> Any:
     return {"ids": list(dict.fromkeys(ids)), "level": level, "artifact": artifact}
 
 
+def _module_name(module: str) -> str:
+    if module == "__main__":  # run as a script: name the module after its file
+        main_file = getattr(sys.modules.get("__main__"), "__file__", "") or ""
+        return os.path.splitext(os.path.basename(main_file))[0] or module
+    return module
+
+
+_HOLDER = re.compile(r"^(?P<fixture>\w+) \((?P<path>[^()]+)\)$")
+
+
+def _holder_trace(description: str) -> tuple[str, str, Any]:
+    """(name, classname, trace) for a class/module fixture error.
+
+    unittest reports ``setUpClass`` / ``setUpModule`` failures as an
+    ``_ErrorHolder`` whose description is e.g. ``"setUpClass (pkg.mod.Cls)"``;
+    the class's ``@rr.verifies`` ids still apply to that failure.
+    """
+    m = _HOLDER.match(description or "")
+    if not m:
+        return description or "fixture", "", {"ids": [], "level": "", "artifact": {}}
+    path = m.group("path")
+    module, _, attr = path.rpartition(".")
+    owner: Any = sys.modules.get(path)
+    if owner is None:  # "pkg.mod.Outer.Inner": find the longest importable module prefix
+        parts = path.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            obj: Any = sys.modules.get(".".join(parts[:i]))
+            for name in parts[i:]:
+                obj = getattr(obj, name, None)
+            if obj is not None:
+                owner, module, attr = obj, ".".join(parts[:i]), ".".join(parts[i:])
+                break
+    rr = getattr(owner, "__rr__", None) or {}
+    trace = {"ids": list(rr.get("ids", [])), "level": rr.get("level", ""), "artifact": dict(rr.get("artifact") or {})}
+    classname = f"{_module_name(module)}.{attr}" if module else _module_name(path)
+    return m.group("fixture"), classname, trace
+
+
 class JUnitResult(unittest.TextTestResult):
     """Collects every outcome into a :class:`JUnitWriter`."""
 
     def __init__(self, stream: Any, descriptions: bool, verbosity: int, writer: JUnitWriter):
         super().__init__(stream, descriptions, verbosity)
         self.writer = writer
-        self._start = 0.0
+        self._start: float | None = None
 
     def startTest(self, test: unittest.TestCase) -> None:  # noqa: N802
         self._start = time.monotonic()
         super().startTest(test)
 
-    def _record(self, test: Any, status: str, message: str = "") -> None:
-        tr: Any = trace_of(test) if isinstance(test, unittest.TestCase) else {"ids": [], "level": "", "artifact": {}}
-        name = getattr(test, "_testMethodName", str(test))
-        module = type(test).__module__
-        if module == "__main__":  # run as a script: name the module after its file
-            main_file = getattr(sys.modules.get("__main__"), "__file__", "") or ""
-            module = os.path.splitext(os.path.basename(main_file))[0] or module
-        classname = f"{module}.{type(test).__qualname__}"
+    def _record(self, test: Any, status: str, message: str = "", name: str = "") -> None:
+        if isinstance(test, unittest.TestCase):
+            tr: Any = trace_of(test)
+            name = name or test._testMethodName
+            classname = f"{_module_name(type(test).__module__)}.{type(test).__qualname__}"
+        else:  # a class/module fixture error
+            name, classname, tr = _holder_trace(getattr(test, "description", str(test)))
         self.writer.add(
             name,
             tr["ids"],
             status=status,
             message=message,
-            duration=time.monotonic() - self._start,
+            duration=(time.monotonic() - self._start) if self._start is not None else 0.0,
             level=tr["level"],
             artifact=tr["artifact"],
             classname=classname,
@@ -90,13 +128,23 @@ class JUnitResult(unittest.TextTestResult):
         super().addError(test, err)
         self._record(test, "error", "".join(traceback.format_exception(*err)))
 
+    def addSubTest(self, test: unittest.TestCase, subtest: Any, err: Any) -> None:  # noqa: N802
+        super().addSubTest(test, subtest, err)
+        if err is not None:  # a failing subtest fails its test; passing ones are not reported
+            status = "failed" if issubclass(err[0], test.failureException) else "error"
+            label = subtest._subDescription() if hasattr(subtest, "_subDescription") else str(subtest)
+            self._record(
+                test, status, "".join(traceback.format_exception(*err)), name=f"{test._testMethodName} {label}"
+            )
+
     def addSkip(self, test: unittest.TestCase, reason: str) -> None:  # noqa: N802
         super().addSkip(test, reason)
         self._record(test, "skipped", reason)
 
     def addExpectedFailure(self, test: unittest.TestCase, err: Any) -> None:  # noqa: N802
+        # A test documenting a known defect is not evidence the requirement holds.
         super().addExpectedFailure(test, err)
-        self._record(test, "passed", "expected failure")
+        self._record(test, "skipped", "expected failure")
 
     def addUnexpectedSuccess(self, test: unittest.TestCase) -> None:  # noqa: N802
         super().addUnexpectedSuccess(test)

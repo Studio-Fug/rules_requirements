@@ -18,6 +18,7 @@ properties) so the report can mark evidence from an older build as stale.
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -37,6 +38,16 @@ class _Case:
     level: str = ""
     artifact: dict[str, str] = field(default_factory=dict)
     classname: str = ""
+
+
+# Characters XML 1.0 cannot represent (ANSI escapes in serial logs, NULs from
+# crashing binaries...). Left in, they make the whole report unparsable.
+_INVALID_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def xml_safe(text: str) -> str:
+    """``text`` with XML-invalid characters replaced by ``#xNN`` (like pytest)."""
+    return _INVALID_XML.sub(lambda m: f"#x{ord(m.group(0)):02X}", str(text))
 
 
 def _summary(message: str) -> str:
@@ -101,11 +112,12 @@ class JUnitWriter:
         self.add(name, requirements, "passed", "", time.monotonic() - start, level, artifact)
 
     def to_element(self) -> ET.Element:
+        x = xml_safe
         root = ET.Element("testsuites")
         suite = ET.SubElement(
             root,
             "testsuite",
-            name=self.suite,
+            name=x(self.suite),
             tests=str(len(self.cases)),
             failures=str(sum(c.status == "failed" for c in self.cases)),
             errors=str(sum(c.status == "error" for c in self.cases)),
@@ -113,20 +125,20 @@ class JUnitWriter:
             time=f"{sum(c.duration for c in self.cases):.3f}",
         )
         for c in self.cases:
-            tc = ET.SubElement(suite, "testcase", classname=c.classname, name=c.name, time=f"{c.duration:.3f}")
+            tc = ET.SubElement(suite, "testcase", classname=x(c.classname), name=x(c.name), time=f"{c.duration:.3f}")
             if c.requirements or c.level or c.artifact:
                 props = ET.SubElement(tc, "properties")
                 for rid in c.requirements:
-                    ET.SubElement(props, "property", name="requirement", value=rid)
+                    ET.SubElement(props, "property", name="requirement", value=x(rid))
                 if c.level:
-                    ET.SubElement(props, "property", name="level", value=c.level)
+                    ET.SubElement(props, "property", name="level", value=x(c.level))
                 for key, value in sorted(c.artifact.items()):
-                    ET.SubElement(props, "property", name=f"artifact.{key}", value=str(value))
+                    ET.SubElement(props, "property", name=x(f"artifact.{key}"), value=x(value))
             if c.status in ("failed", "error"):
                 tag = "failure" if c.status == "failed" else "error"
-                ET.SubElement(tc, tag, message=_summary(c.message) or c.status).text = c.message
+                ET.SubElement(tc, tag, message=x(_summary(c.message) or c.status)).text = x(c.message)
             elif c.status == "skipped":
-                ET.SubElement(tc, "skipped", message=c.message)
+                ET.SubElement(tc, "skipped", message=x(c.message))
         return root
 
     def to_string(self) -> str:

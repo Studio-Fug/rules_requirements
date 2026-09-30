@@ -37,7 +37,7 @@ def _norm_label(label: str) -> str:
     return label[2:] if label.startswith("@@//") else (label[1:] if label.startswith("@//") else label)
 
 
-def run_tests(out: str, tests: list[str], timeout: float) -> int:
+def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None = None) -> int:
     out = os.path.abspath(out)  # tests run with their runfiles dir as cwd
     os.makedirs(out, exist_ok=True)
     execroot = os.getcwd()
@@ -65,6 +65,10 @@ def run_tests(out: str, tests: list[str], timeout: float) -> int:
             "PYTHONDONTWRITEBYTECODE": "1",
             "LANG": "C.UTF-8",
         }
+        for spec_env in envs or []:
+            env_label, key, value = spec_env.split("=", 2)
+            if _norm_label(env_label) == label:
+                env[key] = value
         os.makedirs(env["TEST_UNDECLARED_OUTPUTS_DIR"], exist_ok=True)
         cwd = os.path.join(runfiles, workspace)
         if not os.path.isdir(cwd):
@@ -80,6 +84,18 @@ def run_tests(out: str, tests: list[str], timeout: float) -> int:
         with open(os.path.join(logdir, "test.log"), "w", encoding="utf-8") as fh:
             fh.write(log)
         failures += code != 0
+        if code != 0 and os.path.exists(xml) and os.path.getsize(xml) > 0 and not _has_failure(xml):
+            # The binary failed (sanitizer, crash after writing its report,
+            # non-zero exit from main) although every case it reported passed:
+            # record the failure next to the report so it cannot be missed.
+            w = JUnitWriter(label, classname=label)
+            w.add(
+                "exit-status",
+                (),
+                "error",
+                f"test binary exited with {code} although its report shows no failure\n{log[-4000:]}",
+            )
+            w.write(os.path.join(logdir, "test.exit.xml"))
         if not os.path.exists(xml) or os.path.getsize(xml) == 0:
             # Like Bazel: a test that writes no JUnit gets one synthetic case.
             w = JUnitWriter(label, classname=label)
@@ -95,6 +111,12 @@ def run_tests(out: str, tests: list[str], timeout: float) -> int:
         shutil.rmtree(tmp, ignore_errors=True)
         print(f"rr_evidence: {label}: {'PASSED' if code == 0 else f'FAILED (exit {code})'}", file=sys.stderr)
     return 0  # failing tests are evidence, not build failures
+
+
+def _has_failure(xml: str) -> bool:
+    from rules_requirements.ingest.junit import JUnitIngestor
+
+    return any(c.is_failure for c in JUnitIngestor().ingest(xml))
 
 
 def golden(actual: str, golden_path: str, update: bool) -> int:
@@ -158,11 +180,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--out", required=True)
     r.add_argument("--test", action="append", default=[], help="LABEL=EXECUTABLE=WORKSPACE")
     r.add_argument("--timeout", type=float, default=300)
+    r.add_argument("--env", action="append", default=[], help="LABEL=KEY=VALUE (the test's env attribute)")
     g = sub.add_parser("golden")
     g.add_argument("--actual", required=True)
     g.add_argument("--golden", required=True, help="workspace-relative path")
     g.add_argument("--update", action="store_true")
     args = p.parse_args(argv)
     if args.cmd == "run-tests":
-        return run_tests(args.out, args.test, args.timeout)
+        return run_tests(args.out, args.test, args.timeout, args.env)
     return golden(args.actual, args.golden, args.update)

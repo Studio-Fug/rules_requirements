@@ -173,3 +173,17 @@ def test_ingest_with_extra_ingestor_spec(capsys, tmp_path, monkeypatch):
         assert rc == 0 and json.loads(out)["cases"][0]["name"] == "n"
     finally:
         ingest._REGISTRY.pop("noop", None)
+
+
+def test_fail_on_counts_failures_on_needs_and_mitigations(capsys, model_path, tmp_path):
+    x = junit(tmp_path, "e.xml", [("usability", "failed", ["UN-1"], ""), ("heat", "passed", ["REQ-1"], "")])
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", x, "--fail-on", "failed")
+    assert rc == 1 and "FAILED: UN-1" in err
+
+
+def test_current_build_warns_when_no_identity_matches(capsys, model_path, tmp_path):
+    x = junit(tmp_path, "e.xml", [("heat", "passed", ["REQ-1"], "", [("artifact.sha", "abc")])])
+    _, _, err = run(capsys, "report", "--model", model_path, "--evidence", x, "--current-build", "git_sha=abc")
+    assert "match no artifact identity" in err and "(sha)" in err
+    _, _, err = run(capsys, "report", "--model", model_path, "--evidence", x, "--current-build", "sha=abc")
+    assert "match no artifact identity" not in err

@@ -69,3 +69,28 @@ def test_golden(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BUILD_WORKSPACE_DIRECTORY", str(tmp_path))
     assert bazel.main(["golden", "--update", "--actual", str(actual), "--golden", "pkg/g.json"]) == 0
     assert bazel.main(["golden", "--actual", str(actual), "--golden", "pkg/g.json"]) == 0
+
+
+def test_nonzero_exit_with_all_pass_report_is_an_error(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    _exe(
+        tmp_path / "bin" / "leaky",
+        "import os, sys\n"
+        "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite><testcase name=\"ok\"><properties>"
+        '<property name="requirement" value="REQ-2"/></properties></testcase></testsuite>\')\n'
+        "sys.exit(23)  # e.g. LeakSanitizer after all tests passed\n",
+    )
+    _exe(tmp_path / "bin" / "envcheck", "import os, sys\nsys.exit(0 if os.environ.get('MODE') == 'strict' else 1)\n")
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(
+        [
+            "run-tests", "--out", str(out),
+            "--test", "//pkg:leaky=bin/leaky=_main",
+            "--test", "//pkg:envcheck=bin/envcheck=_main",
+            "--env", "//pkg:envcheck=MODE=strict",
+        ]
+    )  # fmt: skip
+    ev = ingest.collect([str(out)])
+    assert ev.target_status == {"//pkg:leaky": "error", "//pkg:envcheck": "passed"}
+    assert any(c.name == "exit-status" and "exited with 23" in c.message for c in ev.cases)

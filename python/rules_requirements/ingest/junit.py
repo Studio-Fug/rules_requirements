@@ -64,7 +64,9 @@ def target_from_path(path: str) -> str:
     parts = norm[idx + len(marker) :].split("/")
     if parts and parts[-1].endswith(".xml"):
         parts.pop()
-    while parts and (parts[-1].startswith(("shard_", "run_", "attempt_")) or parts[-1] == "test.outputs"):
+    while parts and (
+        parts[-1].startswith(("shard_", "run_", "attempt_")) or parts[-1] in ("test.outputs", "test_attempts")
+    ):
         parts.pop()
     repo = ""
     if len(parts) > 2 and parts[0] == "external":
@@ -107,17 +109,24 @@ class JUnitIngestor(Ingestor):
         return path.endswith(".xml") and (b"<testsuite" in head or b"<testcase" in head)
 
     def ingest(self, path: str) -> Iterable[TestCase]:
+        target = target_from_path(path)
         try:
             # Test reports are produced by the build itself; expat (>= 2.4)
             # also refuses entity-expansion bombs.
             root = ET.parse(path).getroot()  # noqa: S314
-        except (ET.ParseError, OSError):
-            return []
-        target = target_from_path(path)
+        except (ET.ParseError, OSError) as exc:
+            # A report we cannot read must not silently vanish: it may well be
+            # the report of a failing run (e.g. control characters in a log).
+            name = target.rsplit(":", 1)[-1] if target else path.rsplit("/", 1)[-1]
+            return [
+                TestCase(name=name, status=ERROR, message=f"unreadable JUnit report: {exc}", source=path, target=target)
+            ]
         return list(self._suite(root, [], path, target))
 
     def _suite(self, el: ET.Element, inherited: list[tuple[str, str]], path: str, target: str) -> Iterable[TestCase]:
-        props = inherited + (_props(el) if el.tag == "testsuite" else [])
+        # Properties on <testsuites> or <testsuite> apply to every case below
+        # (googletest writes RecordProperty calls made outside tests there).
+        props = inherited + (_props(el) if el.tag in ("testsuite", "testsuites") else [])
         for child in el:
             if child.tag in ("testsuite", "testsuites"):
                 yield from self._suite(child, props, path, target)

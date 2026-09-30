@@ -16,12 +16,14 @@ turns a failing test green or a passing one red.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
 import tempfile
 
 from rules_requirements.hooks.junit_writer import JUnitWriter
+from rules_requirements.ingest import TestCase
 from rules_requirements.ingest.libtest import merge_trace, parse_libtest
 
 FORMATS = ("libtest",)
@@ -41,6 +43,20 @@ def _resolve(binary: str) -> str:
             if os.path.exists(cand):
                 return cand
     return binary
+
+
+def _traced(trace: str) -> dict[str, list[str]]:
+    """test name -> ids recorded by rr::verifies! (in first-seen order)."""
+    out: dict[str, list[str]] = {}
+    for line in trace.splitlines():
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        ids = out.setdefault(str(rec.get("test", "")), [])
+        ids.extend(i for i in rec.get("requirements", []) if i not in ids)
+    out.pop("", None)
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,9 +88,36 @@ def main(argv: list[str] | None = None) -> int:
     cases = parse_libtest(text, target=args.target)
     try:
         with open(trace_path, encoding="utf-8") as fh:
-            merge_trace(cases, fh.read())
+            trace = fh.read()
     except OSError:
-        pass
+        trace = ""
+    merge_trace(cases, trace)
+    # Tests that recorded traces but never reported a result crashed the
+    # binary mid-run (abort, stack overflow): they are errors, not absent.
+    reported = {f"{c.classname}::{c.name}" if c.classname else c.name for c in cases}
+    for test, ids in _traced(trace).items():
+        if test not in reported:
+            module, _, leaf = test.rpartition("::")
+            cases.append(
+                TestCase(
+                    name=leaf,
+                    classname=module,
+                    status="error",
+                    requirements=tuple(ids),
+                    message=f"no result reported: the test binary exited with {proc.returncode} while it ran",
+                    target=args.target,
+                )
+            )
+    if proc.returncode != 0 and cases and not any(c.is_failure for c in cases):
+        cases.append(
+            TestCase(
+                name="exit-status",
+                status="error",
+                message=f"test binary exited with {proc.returncode} although every reported test passed\n"
+                + text[-2000:],
+                target=args.target,
+            )
+        )
 
     suite = args.suite or (args.target.rsplit(":", 1)[-1] if args.target else os.path.basename(cmd[0]))
     writer = JUnitWriter(suite, default_level=args.level)

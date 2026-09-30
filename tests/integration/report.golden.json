@@ -17,7 +17,7 @@
     "risks_mitigated": 1,
     "mitigations": 1,
     "mitigations_verified": 1,
-    "test_cases": 11,
+    "test_cases": 13,
     "gaps": 2
   },
   "levels": [
@@ -69,6 +69,12 @@
       "evidence": [
         {
           "name": "GtestHook::IdsAccumulateAcrossCalls",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "NextSuite::OnlyItsOwnSuiteIds",
           "status": "passed",
           "level": "simulation",
           "target": "//tests/integration:gtest_hook_test"
@@ -133,6 +139,12 @@
           "name": "GtestHook::VerifiesIsTraced",
           "status": "passed",
           "level": "sil",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "SuiteLevel::InheritsSuiteIds",
+          "status": "passed",
+          "level": "simulation",
           "target": "//tests/integration:gtest_hook_test"
         }
       ],

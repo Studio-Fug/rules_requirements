@@ -76,7 +76,7 @@ class _Validator:
             )
         )
 
-    def rule(self, name: str, message: str, ent: Entity) -> None:
+    def rule(self, name: str, message: str, ent: Entity | None) -> None:
         sev = self.c.rule(name)
         if sev != "off":
             self.add(name, message, ent, sev)
@@ -84,6 +84,8 @@ class _Validator:
     def run(self) -> None:
         for err in self.m.parse_errors:
             self.issues.append(Issue("error", "shape", err))
+        for msg in self.m.unknown_fields:
+            self.rule("unknown-field", msg, None)
         for ent in self.m.entities():
             self.check_common(ent)
         for req in self.m.requirements.values():
@@ -106,7 +108,7 @@ class _Validator:
 
     def check_common(self, ent: Entity) -> None:
         if not self.c.id_regex(ent.kind).match(ent.id):
-            pattern = self.c.id_pattern.format(prefix=self.c.prefix(ent.kind))
+            pattern = self.c.id_pattern.replace("{prefix}", self.c.prefix(ent.kind))
             self.add("bad-id", f"{ent.id}: {ent.kind} ids must match {pattern}", ent)
         if ent.status and ent.status not in cfg.STATUSES:
             self.add("bad-status", f"{ent.id}: status must be one of {cfg.STATUSES}", ent)

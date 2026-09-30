@@ -30,6 +30,18 @@ def to_dict(matrix: Matrix, title: str = "") -> dict[str, Any]:
         out: dict[str, Any] = {"id": ent.id, "title": ent.title, "status": v[ent.id].status}
         if ent.description:
             out["description"] = ent.description
+        # Authoring metadata: lifecycle status, owner, category, rationale, tags.
+        for key, name in (
+            ("status", "lifecycle"),
+            ("owner", "owner"),
+            ("category", "category"),
+            ("rationale", "rationale"),
+        ):
+            value = getattr(ent, key, "")
+            if value:
+                out[name] = value
+        if ent.tags:
+            out["tags"] = list(ent.tags)
         open_notes = [n for n in ent.notes if n.status == "open"]
         if open_notes:
             out["open_notes"] = [{"kind": n.kind, "text": n.text} for n in open_notes]

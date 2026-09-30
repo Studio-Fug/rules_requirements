@@ -44,6 +44,15 @@ SAMPLE = textwrap.dedent(
         @rr.verifies("REQ-5", level="inspection")
         def test_decorated(self):
             pass
+
+    @pytest.mark.skip(reason="not yet")
+    @pytest.mark.rr("REQ-6")
+    def test_skip_marked():
+        pass
+
+    @pytest.mark.requirements("REQ-7", level="simulation")
+    def test_near_level():
+        pass
     """
 )
 
@@ -58,7 +67,14 @@ def _check_sample(xml):
     assert cases["test_module_default"].status == "skipped"
     assert cases["test_module_default"].level == "sil"
     assert sorted(cases["test_decorated"].requirements) == ["REQ-1", "REQ-5"]
-    assert cases["test_decorated"].level == "sil"  # the nearer pytest marker level wins
+    assert cases["test_decorated"].level == "inspection"  # the method's own decorator is nearest
+    # a skip marker must not lose the traces (pytest skips before setup hooks)
+    assert cases["test_skip_marked"].status == "skipped" and cases["test_skip_marked"].requirements == (
+        "REQ-6",
+        "REQ-1",
+    )
+    # nearest level wins across both marker names
+    assert cases["test_near_level"].level == "simulation"
 
 
 def test_pytest_runner_in_process(tmp_path, monkeypatch):
@@ -135,7 +151,7 @@ def test_unittest_runner(tmp_path):
     assert cases["test_fail"].status == "failed" and "nope" in cases["test_fail"].message
     assert cases["test_error"].status == "error"
     assert cases["test_skip"].status == "skipped"
-    assert cases["test_xfail"].status == "passed"
+    assert cases["test_xfail"].status == "skipped"  # a documented known defect is not evidence
     assert cases["test_xpass"].status == "failed"
     assert cases["test_inherits"].requirements == ("REQ-9",) and cases["test_inherits"].level == "hil"
     assert cases["test_pass"].classname.endswith("_Sample")
@@ -158,6 +174,38 @@ def test_unittest_main_discover_and_module(tmp_path, monkeypatch):
     )
     assert proc.returncode == 0, proc.stderr
     assert ingest.collect([str(xml2)]).for_id("REQ-1")
+
+
+def test_unittest_subtests_and_fixture_errors(tmp_path):
+    @rr.verifies("REQ-8")
+    class Broken(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            raise RuntimeError("no bench")
+
+        def test_never_runs(self):
+            pass
+
+    class Sub(unittest.TestCase):
+        @rr.verifies("REQ-9")
+        def test_many(self):
+            for i in range(3):
+                with self.subTest(i=i):
+                    self.assertLess(i, 2)
+
+    Broken.__module__, Broken.__qualname__ = __name__, "Broken"
+    globals()["Broken"] = Broken
+    try:
+        suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(c) for c in (Broken, Sub)])
+        xml = tmp_path / "s.xml"
+        assert not rr_unittest.run(suite, str(xml), "s", verbosity=0)
+        cases = ingest.collect([str(xml)]).cases
+        fixture = next(c for c in cases if c.name == "setUpClass")
+        assert fixture.status == "error" and fixture.requirements == ("REQ-8",) and fixture.duration < 60
+        sub = [c for c in cases if c.name.startswith("test_many")]
+        assert [c.status for c in sub] == ["failed"] and sub[0].requirements == ("REQ-9",) and "(i=2)" in sub[0].name
+    finally:
+        globals().pop("Broken", None)
 
 
 def test_implements_decorator():
@@ -246,3 +294,47 @@ def test_wrap_resolves_runfiles_paths(tmp_path, monkeypatch):
     assert wrap._resolve("nope/bin") == "nope/bin"
     with pytest.raises(SystemExit):
         wrap.main(["--junit-xml", "x"])
+
+
+CRASHING_LIBTEST = r"""
+import json, os, sys
+with open(os.environ["RR_TRACE_FILE"], "a") as fh:
+    fh.write(json.dumps({"test": "tests::passes", "requirements": ["REQ-1"]}) + "\n")
+    fh.write(json.dumps({"test": "tests::crashes", "requirements": ["REQ-2"]}) + "\n")
+print("running 2 tests")
+print("test tests::passes ... ok")
+sys.stdout.flush()
+os._exit(134)  # abort while tests::crashes runs
+"""
+
+
+def test_wrap_attributes_a_crash_to_the_running_test(tmp_path, monkeypatch):
+    fake = tmp_path / "crashy"
+    fake.write_text("#!" + sys.executable + "\n" + CRASHING_LIBTEST)
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "c.xml"
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 134
+    cases = {c.name: c for c in ingest.collect([str(xml)]).cases}
+    assert cases["passes"].status == "passed"
+    assert cases["crashes"].status == "error" and cases["crashes"].requirements == ("REQ-2",)
+
+
+def test_wrap_nonzero_exit_after_all_passed(tmp_path, monkeypatch):
+    fake = tmp_path / "leaky"
+    fake.write_text("#!/bin/sh\necho 'running 1 test'\necho 'test t ... ok'\nexit 23\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "l.xml"
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 23
+    statuses = {c.name: c.status for c in ingest.collect([str(xml)]).cases}
+    assert statuses == {"t": "passed", "exit-status": "error"}
+
+
+def test_control_characters_do_not_hide_failures(tmp_path):
+    w = junit_writer.JUnitWriter("bench")
+    w.add("flash", ["REQ-1"], status="failed", message="\x1b[31mE (123) boot: bad image\x1b[0m\x00")
+    path = tmp_path / "bench.xml"
+    w.write(str(path))
+    (case,) = ingest.collect([str(path)]).cases
+    assert case.status == "failed" and "#x1B[31mE (123) boot" in case.message

@@ -145,7 +145,7 @@ def extract(text: str, path: str, config: Config) -> list[Reference]:
                     continue  # already consumed by a more specific tag
                 taken.append((m.start(), m.end()))
                 body = m.group("ids") if "ids" in regex.groupindex else m.group(1)
-                ids = tuple(dict.fromkeys(id_re.findall(body)))
+                ids = tuple(dict.fromkeys(mm.group(0) for mm in id_re.finditer(body)))
                 if not ids:
                     continue
                 rel = fixed_rel or (m.groupdict().get("rel") or default_rel)

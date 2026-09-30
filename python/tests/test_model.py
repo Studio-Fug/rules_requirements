@@ -88,8 +88,9 @@ def test_parse_errors(tmp_path):
     assert "notes[0] needs a 'text'" in text
     assert "notes[1].kind must be one of" in text
     assert "notes[1].status must be one of" in text
-    assert "unknown field 'verified_by'" in text
-    assert "unknown top-level key 'mystery'" in text
+    unknown = "\n".join(m.unknown_fields)
+    assert "unknown field 'verified_by'" in unknown
+    assert "unknown top-level key 'mystery'" in unknown
     assert warnings == []
 
 
@@ -100,8 +101,56 @@ def test_unknown_fields_as_warnings(tmp_path):
         "config: {rules: {unknown-field: warning}}\nuser_needs: [{id: UN-1, title: A, colour: red}]\n",
     )
     m, warnings = read_model(path)
-    assert not m.parse_errors
-    assert any("colour" in w for w in warnings)
+    assert not m.parse_errors and warnings == []
+    from rules_requirements.validate import validate
+
+    issues = [i for i in validate(m) if i.code == "unknown-field"]
+    assert [i.severity for i in issues] == ["warning"] and "colour" in issues[0].message
+    assert [i.severity for i in validate(m, strict=True) if i.code == "unknown-field"] == ["error"]
+
+
+def test_duplicate_keys_are_errors(tmp_path):
+    path = write(
+        tmp_path,
+        "dup.yaml",
+        "requirements: [{id: REQ-1, title: a}]\nrequirements: [{id: REQ-2, title: b}]\n",
+    )
+    m, _ = read_model(path)
+    assert any("duplicate key 'requirements'" in e for e in m.parse_errors)
+    path = write(
+        tmp_path, "dup2.yaml", "requirements:\n  - id: REQ-1\n    title: a\n    method: hil\n    method: simulation\n"
+    )
+    m, _ = read_model(path)
+    assert any("duplicate key 'method'" in e for e in m.parse_errors)
+
+
+def test_braces_and_groups_in_id_pattern(tmp_path):
+    path = write(
+        tmp_path,
+        "m.yaml",
+        r"""
+        config: {id_pattern: '{prefix}-\d{4}(\.\d+)?'}
+        user_needs: [{id: UN-0001, title: A}]
+        requirements: [{id: REQ-0001.2, title: R, satisfies: [UN-0001]}, {id: REQ-1, title: bad, satisfies: [UN-0001]}]
+        """,
+    )
+    m = read_model(path)[0]
+    from rules_requirements.annotations import extract
+    from rules_requirements.validate import validate
+
+    assert [i.entity for i in validate(m) if i.code == "bad-id"] == ["REQ-1"]
+    refs = extract("# @rr(REQ-0001.2, UN-0001)", "a.py", m.config)
+    assert refs[0].ids == ("REQ-0001.2", "UN-0001")
+
+
+def test_malformed_config_sections_do_not_crash(tmp_path):
+    path = write(
+        tmp_path, "m.yaml", "config: {prefixes: [REQ], rules: 3, levels: [[1]]}\nuser_needs: [{id: UN-1, title: A}]\n"
+    )
+    m, _ = read_model(path)
+    text = "\n".join(m.parse_errors)
+    assert "config.prefixes: must be a mapping" in text and "config.rules: must be a mapping" in text
+    assert "must be a name or a mapping" in text
 
 
 def test_duplicates_and_bad_documents(tmp_path):

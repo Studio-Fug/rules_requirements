@@ -36,14 +36,19 @@ class RecordsIngestor(Ingestor):
         for i, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
-            status = str(item.get("status", "passed")).lower()
+            raw_status = item.get("status")
+            status = str(raw_status or "").lower()
+            message = str(item.get("message", ""))
             if status not in STATUS_ORDER:
+                # A record without an explicit outcome (e.g. a planned but
+                # unsigned inspection) must not count as passed.
+                message = f"record has no valid status (got {raw_status!r}); expected passed/failed/skipped/error"
                 status = "error"
             case = TestCase(
                 name=str(item.get("name", f"record-{i + 1}")),
                 classname=str(item.get("classname", "")),
                 status=status,
-                message=str(item.get("message", "")),
+                message=message,
                 duration=float(item.get("duration", 0) or 0),
                 source=path,
                 target=str(item.get("target", "")),

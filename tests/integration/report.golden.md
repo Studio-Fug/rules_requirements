@@ -1,6 +1,6 @@
 # rules_requirements hook integration
 
-**0/1** user needs validated · **4/6** requirements verified (1 under-verified, 1 failed, 0 unverified) · **1/1** risks mitigated · 11 test cases · 2 gaps
+**0/1** user needs validated · **4/6** requirements verified (1 under-verified, 1 failed, 0 unverified) · **1/1** risks mitigated · 13 test cases · 2 gaps
 
 ## User needs — validation
 
@@ -12,9 +12,9 @@
 
 | ID | Requirement | Traces | Demands | Evidence | Status |
 |---|---|---|---|---|---|
-| REQ-1 | pytest markers are traced | satisfies UN-1; implements MIT-1 | simulation | ✓ GtestHook::IdsAccumulateAcrossCalls [simulation]<br>✓ tests.integration.test_pytest_hook::test_marker_is_traced [simulation]<br>✓ rust_hook_test::multiple_ids [simulation] | ✅ VERIFIED |
+| REQ-1 | pytest markers are traced | satisfies UN-1; implements MIT-1 | simulation | ✓ GtestHook::IdsAccumulateAcrossCalls [simulation]<br>✓ NextSuite::OnlyItsOwnSuiteIds [simulation]<br>✓ tests.integration.test_pytest_hook::test_marker_is_traced [simulation]<br>✓ rust_hook_test::multiple_ids [simulation] | ✅ VERIFIED |
 | REQ-2 | unittest decorators are traced | satisfies UN-1; implements MIT-1 | simulation | ✓ unittest_hook_test.UnittestHook::test_decorator_is_traced [simulation] | ✅ VERIFIED |
-| REQ-3 | googletest RR_VERIFIES is traced | satisfies UN-1; implements MIT-1 | sil | ✓ GtestHook::IdsAccumulateAcrossCalls [simulation]<br>✓ GtestHook::VerifiesIsTraced [sil] | ✅ VERIFIED |
+| REQ-3 | googletest RR_VERIFIES is traced | satisfies UN-1; implements MIT-1 | sil | ✓ GtestHook::IdsAccumulateAcrossCalls [simulation]<br>✓ GtestHook::VerifiesIsTraced [sil]<br>✓ SuiteLevel::InheritsSuiteIds [simulation] | ✅ VERIFIED |
 | REQ-4 | Rust rr::verifies! is traced | satisfies UN-1; implements MIT-1 | sil | ✓ rust_hook_test::multiple_ids [simulation]<br>✓ rust_hook_test::verifies_is_traced [sil] | ✅ VERIFIED |
 | REQ-5 | A failing test marks its requirement FAILED | satisfies UN-1 | simulation | ✗ unittest_hook_test.UnittestHook::test_failure_is_recorded [simulation] | ❌ FAILED |
 | REQ-6 | Hardware-only requirement stays under-verified without a bench | satisfies UN-1 | hil | ✓ tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation [simulation] | 🟠 UNDER-VERIFIED |

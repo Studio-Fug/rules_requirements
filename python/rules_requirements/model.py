@@ -210,6 +210,8 @@ class Model:
     test_methods: Mapping[str, TestMethod] = field(default_factory=dict)
     # Problems found while *parsing* (shape); validation adds referential ones.
     parse_errors: tuple[str, ...] = ()
+    # Unknown keys, reported by validation under the ``unknown-field`` rule.
+    unknown_fields: tuple[str, ...] = ()
 
     # --- lookup ---------------------------------------------------------------
 
@@ -309,7 +311,23 @@ class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
 
 def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict:
     loader.flatten_mapping(node)
-    out = _LineDict(loader.construct_pairs(node, deep=True))
+    pairs = loader.construct_pairs(node, deep=True)
+    # A repeated key silently replaces the first value in plain YAML loaders,
+    # which here would drop whole sections or weaken a demanded method.
+    seen: dict[Any, int] = {}
+    for (key, _), (knode, _) in zip(pairs, node.value):
+        try:
+            first = seen.setdefault(key, knode.start_mark.line + 1)
+        except TypeError:  # unhashable key: not a model field anyway
+            continue
+        if first != knode.start_mark.line + 1:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                f"found duplicate key {key!r} (first defined on line {first})",
+                knode.start_mark,
+            )
+    out = _LineDict(pairs)
     out.line = node.start_mark.line + 1
     return out
 
@@ -471,8 +489,8 @@ def parse_entity(
 def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
     """Merge ``(path, document)`` pairs into one model.
 
-    Returns the model and the unknown-field findings when that rule is a
-    warning (as errors they are already in ``model.parse_errors``).
+    Returns the model and a list of extra warnings (currently always empty;
+    unknown keys are recorded on ``model.unknown_fields`` for validation).
 
     A document is either a *section document* (a mapping with any of
     ``config``, ``project``, ``user_needs``, ``requirements``, ``risks``,
@@ -538,9 +556,6 @@ def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
             for raw in items:
                 add(kind, raw, path)
 
-    rule = config.rule("unknown-field")
-    if rule == "error":
-        errors.extend(unknown)
     return Model(
         config=config,
         project=project,
@@ -550,11 +565,15 @@ def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
         mitigations=sections[cfg.MITIGATION],  # type: ignore[arg-type]
         test_methods=sections[cfg.TEST_METHOD],  # type: ignore[arg-type]
         parse_errors=tuple(errors),
-    ), (unknown if rule == "warning" else [])
+        unknown_fields=tuple(unknown),
+    ), []
 
 
 def read_model(paths: str | Iterable[str], root: str = "") -> tuple[Model, list[str]]:
-    """Read model files without raising; returns (model, unknown-field warnings).
+    """Read model files without raising; returns (model, extra warnings).
+
+    Unknown fields are kept on ``model.unknown_fields`` and reported by
+    :func:`~rules_requirements.validate.validate` like any other issue.
 
     ``root`` makes recorded source paths relative (stable across machines).
     """

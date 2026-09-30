@@ -170,7 +170,7 @@ def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], **kwa
         **kwargs
     )
 
-def rr_rust_test(name, rule, level = "", tags = [], size = None, timeout = None, flaky = None, **kwargs):
+def rr_rust_test(name, rule, level = "", tags = [], size = None, timeout = None, flaky = None, args = [], env = {}, env_inherit = [], visibility = None, **kwargs):
     """A Rust test whose `rr::verifies!(...)` calls become JUnit traces.
 
     Pass `rule = rust_test` (from `@rules_rust//rust:defs.bzl`) and the usual
@@ -185,16 +185,22 @@ def rr_rust_test(name, rule, level = "", tags = [], size = None, timeout = None,
       size: test size.
       timeout: test timeout.
       flaky: flaky flag.
+      args: arguments for the test binary (e.g. `--test-threads=1`).
+      env: environment for the test run.
+      env_inherit: environment variables to inherit from the invoking shell.
+      visibility: visibility of the wrapper test.
       **kwargs: forwarded to `rust_test`.
     """
-    rule(name = name + "_bin", tags = ["manual"], **kwargs)
-    extra = {}
+    rule(name = name + "_bin", tags = ["manual"], visibility = ["//visibility:private"], **kwargs)
+    extra = {"args": args, "env": env, "env_inherit": env_inherit, "visibility": visibility}
     if size:
         extra["size"] = size
     if timeout:
         extra["timeout"] = timeout
     if flaky != None:
         extra["flaky"] = flaky
+    if kwargs.get("testonly") != None:
+        extra["testonly"] = kwargs["testonly"]
     rr_wrapped_test(name = name, test = ":%s_bin" % name, level = level, tags = tags, **extra)
 
 def rr_golden_test(name, src, golden, **kwargs):

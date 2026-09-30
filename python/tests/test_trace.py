@@ -229,3 +229,89 @@ def test_annotations_feed_implementation_links(tmp_path, model):
 
 def test_model_text_is_reused(tmp_path):
     assert "REQ-3" in MODEL
+
+
+def test_refinement_does_not_override_the_parents_demand(tmp_path):
+    path = write(
+        tmp_path,
+        "m.yaml",
+        """
+        user_needs: [{id: UN-1, title: n}]
+        requirements:
+          - {id: REQ-1, title: system, satisfies: [UN-1], method: hitl}
+          - {id: REQ-2, title: sw a, refines: [REQ-1]}
+          - {id: REQ-3, title: sw b, refines: [REQ-1]}
+        """,
+    )
+    model = load_model(path)
+    sim = [("a", "passed", ["REQ-2"], ""), ("b", "passed", ["REQ-3"], "")]
+    m = matrix_for(tmp_path, model, sim)
+    assert m.status("REQ-2") == VERIFIED and m.status("REQ-1") == UNDER_VERIFIED
+    assert m.verdicts["REQ-1"].provided == "simulation" and m.status("UN-1") == PARTIAL
+    # more evidence never makes it worse
+    m2 = matrix_for(tmp_path, model, [*sim, ("own", "passed", ["REQ-1"], "")])
+    assert m2.status("REQ-1") == UNDER_VERIFIED
+    # system-level evidence at the demanded rigor verifies it
+    m3 = matrix_for(tmp_path, model, [*sim, ("own", "passed", ["REQ-1"], "hitl")])
+    assert m3.status("REQ-1") == VERIFIED
+    # children proving at the parent's rigor carry it
+    m4 = matrix_for(tmp_path, model, [("a", "passed", ["REQ-2"], "hitl"), ("b", "passed", ["REQ-3"], "hitl")])
+    assert m4.status("REQ-1") == VERIFIED and m4.verdicts["REQ-1"].provided == "hitl"
+
+
+def test_refines_cycle_does_not_crash_build_matrix(tmp_path):
+    from rules_requirements.model import read_model
+
+    path = write(
+        tmp_path,
+        "m.yaml",
+        "user_needs: [{id: UN-1, title: n}]\nrequirements: [{id: REQ-1, title: a, satisfies: [UN-1], refines: [REQ-2]}, {id: REQ-2, title: b, refines: [REQ-1]}]\n",
+    )
+    model, _ = read_model(path)
+    m = build_matrix(model, ingest.Evidence())
+    assert m.status("REQ-1") == UNVERIFIED and m.status("REQ-2") == UNVERIFIED
+
+
+def test_verified_by_targets_can_be_stale(tmp_path):
+    path = write(
+        tmp_path,
+        "m.yaml",
+        "user_needs: [{id: UN-1, title: n}]\nrequirements: [{id: REQ-1, title: r, satisfies: [UN-1], method: hil, verified_by: [{target: '//hw:bench', level: hil}]}]\n",
+    )
+    model = load_model(path)
+    junit(tmp_path, "bazel-testlogs/hw/bench/test.xml", [("a", "passed", [], "", [("artifact.sha", "OLD")])])
+    ev = ingest.collect([str(tmp_path / "bazel-testlogs")])
+    stale = build_matrix(model, ev, current_build={"sha": "NEW"})
+    assert stale.status("REQ-1") == UNDER_VERIFIED and stale.verdicts["REQ-1"].stale
+    assert build_matrix(model, ev, current_build={"sha": "OLD"}).status("REQ-1") == VERIFIED
+
+
+def test_failures_outside_requirements_and_misdirected_evidence(tmp_path, model):
+    m = matrix_for(
+        tmp_path,
+        model,
+        [
+            ("heat", "passed", ["REQ-1"], ""),
+            ("usability", "failed", ["UN-1"], ""),
+            ("effect", "failed", ["MIT-1"], ""),
+            ("risk-tagged", "failed", ["RISK-1"], ""),
+            ("method-tagged", "passed", ["TM-1"], ""),
+            ("orphan", "error", [], ""),
+        ],
+    )
+    kinds = {(g.kind, g.entity) for g in m.gaps}
+    assert ("failed", "UN-1") in kinds and ("failed", "MIT-1") in kinds
+    assert ("misdirected-evidence", "RISK-1") in kinds and ("misdirected-evidence", "TM-1") in kinds
+    assert ("untraced-failure", "//pkg:t") in kinds
+    assert m.status("UN-1") == FAILED and m.status("MIT-1") == FAILED and m.status("RISK-1") == FAILED
+
+
+def test_failed_hardware_requirement_routes_to_a_human(tmp_path, model):
+    m = matrix_for(tmp_path, model, [("bench", "failed", ["REQ-3"], "hil")])
+    (gap,) = [g for g in m.gaps if g.kind == "failed"]
+    assert gap.entity == "REQ-3" and gap.route == "human-gate"
+
+
+def test_no_pyramid_violation_without_physical_evidence(tmp_path, model):
+    m = matrix_for(tmp_path, model, [("sil-only", "passed", ["REQ-3"], "sil")])
+    assert m.status("REQ-3") == UNDER_VERIFIED and m.pyramid_violations() == []

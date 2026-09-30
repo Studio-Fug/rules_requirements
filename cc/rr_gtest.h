@@ -30,12 +30,17 @@
 namespace rules_requirements {
 
 namespace internal {
+// Ids accumulate per recording scope: the running test, else the running
+// suite (SetUpTestSuite/TearDownTestSuite), else the whole program (main, an
+// Environment). Entering a new scope forgets the previous scope's ids.
 inline std::string& CurrentIds() {
   static std::string ids;
-  static const ::testing::TestInfo* owner = nullptr;
-  const ::testing::TestInfo* now =
-      ::testing::UnitTest::GetInstance()->current_test_info();
-  if (now != owner) {  // a new test started: forget the previous test's ids
+  static const void* owner = nullptr;
+  const ::testing::UnitTest* unit = ::testing::UnitTest::GetInstance();
+  const void* now = unit->current_test_info();
+  if (now == nullptr) now = unit->current_test_suite();
+  if (now == nullptr) now = unit;
+  if (now != owner) {
     owner = now;
     ids.clear();
   }

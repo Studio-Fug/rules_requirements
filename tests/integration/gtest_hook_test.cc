@@ -14,3 +14,19 @@ TEST(GtestHook, IdsAccumulateAcrossCalls) {
 }
 
 TEST(GtestHook, UntracedTestHasNoIds) { EXPECT_TRUE(true); }
+
+// Suite-level recording applies to every test in the suite and must not leak
+// into the next suite's tests.
+class SuiteLevel : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() { RR_VERIFIES("REQ-3"); }
+};
+
+TEST_F(SuiteLevel, InheritsSuiteIds) { EXPECT_TRUE(true); }
+
+class NextSuite : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() { RR_VERIFIES("REQ-1"); }
+};
+
+TEST_F(NextSuite, OnlyItsOwnSuiteIds) { EXPECT_TRUE(true); }

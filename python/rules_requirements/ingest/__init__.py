@@ -43,13 +43,16 @@ import glob
 import importlib
 import os
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 from rules_requirements.util import dedupe
 
 PASSED, SKIPPED, FAILED, ERROR = "passed", "skipped", "failed", "error"
-# Most severe wins when a target's cases are folded into one status.
+# Most severe wins when cases are merged.
 STATUS_ORDER = {PASSED: 0, SKIPPED: 1, FAILED: 2, ERROR: 3}
+# A *target* (whole test binary) passes if any case passed and none failed; a
+# skipped case alongside passing ones does not make the target "skipped".
+TARGET_ORDER = {SKIPPED: 0, PASSED: 1, FAILED: 2, ERROR: 3}
 
 REQUIREMENT_PROPERTY = "requirement"
 LEVEL_PROPERTY = "level"
@@ -115,6 +118,7 @@ class Ingestor:
 
 
 _REGISTRY: dict[str, Ingestor] = {}
+PLUGIN_ERRORS: list[str] = []  # entry-point ingestors that failed to load
 _BUILTINS_LOADED = False
 
 
@@ -139,16 +143,19 @@ def _load_builtins() -> None:
         from importlib.metadata import entry_points
 
         eps = entry_points()
-        group = (
+        group: Any = (
             eps.select(group="rules_requirements.ingestors")  # type: ignore[attr-defined]
             if hasattr(eps, "select")
             else eps.get("rules_requirements.ingestors", [])  # type: ignore[attr-defined,arg-type]
         )
-        for ep in group:
+    except Exception:  # metadata problems must not break ingestion
+        group = []
+    for ep in group:
+        try:
             obj = ep.load()
             register(obj() if isinstance(obj, type) else obj)
-    except Exception:  # noqa: S110 — a broken third-party plugin must not break ingestion
-        pass
+        except Exception as exc:
+            PLUGIN_ERRORS.append(f"{ep.name}: {type(exc).__name__}: {exc}")
 
 
 def load_ingestor(spec: str) -> Ingestor:
@@ -192,7 +199,7 @@ class Evidence:
         self.cases.append(case)
         if case.target:
             cur = self.target_status.get(case.target)
-            if cur is None or STATUS_ORDER[case.status] > STATUS_ORDER[cur]:
+            if cur is None or TARGET_ORDER[case.status] > TARGET_ORDER[cur]:
                 self.target_status[case.target] = case.status
 
     def for_id(self, entity_id: str) -> list[TestCase]:

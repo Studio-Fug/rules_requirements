@@ -62,8 +62,25 @@ def test_junit_dialects(tmp_path):
     assert cases["f"].status == "skipped" and cases["f"].full_name == "//pkg:t f"
 
 
-def test_junit_unparseable(tmp_path):
-    assert JUnitIngestor().ingest(write(tmp_path, "x.xml", "<testsuite><oops")) == []
+def test_junit_unparseable_reports_an_error(tmp_path):
+    (case,) = JUnitIngestor().ingest(write(tmp_path, "bazel-testlogs/p/t/test.xml", "<testsuite><oops"))
+    assert case.status == "error" and case.target == "//p:t" and "unreadable" in case.message
+
+
+def test_testsuites_level_properties_and_attempts(tmp_path):
+    xml = (
+        '<testsuites><properties><property name="artifact.sha" value="old"/></properties>'
+        '<testsuite name="s"><testcase name="a"/></testsuite></testsuites>'
+    )
+    (case,) = JUnitIngestor().ingest(write(tmp_path, "t.xml", xml))
+    assert case.artifact == {"sha": "old"}
+    assert target_from_path("/x/bazel-testlogs/pkg/name/test_attempts/attempt_1.xml") == "//pkg:name"
+
+
+def test_target_passes_despite_a_skipped_case(tmp_path):
+    base = tmp_path / "bazel-testlogs"
+    junit(base, "p/t/test.xml", [("a", "passed", [], ""), ("b", "skipped", [], "")])
+    assert ingest.collect([str(base)]).target_status == {"//p:t": "passed"}
 
 
 def test_collect_walks_dirs_and_skips_unknown(tmp_path):
@@ -153,6 +170,8 @@ def test_records_ingestor(tmp_path):
             properties: {signed_by: J. Doe}
           - name: weird
             status: exploded
+          - name: planned-not-signed
+            requirements: [REQ-13]
           - not-a-mapping
         """,
     )
@@ -164,7 +183,8 @@ def test_records_ingestor(tmp_path):
     lbl = by_name["label-legible"]
     assert lbl.requirements == ("REQ-12",) and lbl.level == "inspection"
     assert lbl.artifact == {"board_rev": "C"} and lbl.properties == {"signed_by": "J. Doe"}
-    assert by_name["weird"].status == "error"
+    assert by_name["weird"].status == "error" and "no valid status" in by_name["weird"].message
+    assert by_name["planned-not-signed"].status == "error"
     assert by_name["record-1"].status == "failed" and by_name["record-1"].duration == 2
 
 
@@ -196,6 +216,38 @@ def test_custom_ingestor_registration(tmp_path):
         ingest._REGISTRY.pop("tap", None)
 
 
+def test_broken_entry_point_does_not_block_others(monkeypatch):
+    class EP:
+        def __init__(self, name, obj):
+            self.name, self._obj = name, obj
+
+        def load(self):
+            if isinstance(self._obj, Exception):
+                raise self._obj
+            return self._obj
+
+    class Good(Ingestor):
+        name = "good-plugin"
+
+    class EPS(list):
+        def select(self, group):
+            return self
+
+    import importlib.metadata
+
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda: EPS([EP("bad", ImportError("nope")), EP("good", Good)])
+    )
+    monkeypatch.setattr(ingest, "_BUILTINS_LOADED", False)
+    monkeypatch.setattr(ingest, "PLUGIN_ERRORS", [])
+    try:
+        names = ingest.ingestors()
+        assert "good-plugin" in names and "junit" in names
+        assert ingest.PLUGIN_ERRORS == ["bad: ImportError: nope"]
+    finally:
+        ingest._REGISTRY.pop("good-plugin", None)
+
+
 def test_load_ingestor_by_spec(tmp_path, monkeypatch):
     mod = tmp_path / "my_ingestors.py"
     mod.write_text(
@@ -220,3 +272,20 @@ def test_register_requires_name_and_base_ingest_abstract(tmp_path):
     assert Ingestor().sniff("x.xml", b"") is False
     assert ingest.ingestor_for(str(tmp_path / "nope.xml")) is None
     assert os.path.exists(tmp_path)
+
+
+def test_libtest_ignores_result_lines_in_captured_output():
+    text = (
+        "running 2 tests\n"
+        "test ui::compile_fail ... FAILED\n"
+        "test parse::ok ... ok\n\n"
+        "failures:\n\n"
+        "---- ui::compile_fail stdout ----\n"
+        "test tests/ui/missing_field.rs ... ok\n"
+        "test tests/ui/extra.rs ... mismatch\n\n"
+        "failures:\n    ui::compile_fail\n\n"
+        "test result: FAILED. 1 passed; 1 failed\n"
+    )
+    cases = {f"{c.classname}::{c.name}": c for c in parse_libtest(text)}
+    assert sorted(cases) == ["parse::ok", "ui::compile_fail"]
+    assert "missing_field.rs" in cases["ui::compile_fail"].message

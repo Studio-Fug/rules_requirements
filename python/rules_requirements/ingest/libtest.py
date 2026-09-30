@@ -45,7 +45,15 @@ _STDOUT_HEADER = re.compile(r"^---- (?P<name>\S+) stdout ----$")
 
 def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCase]:
     cases: dict[str, TestCase] = {}
+    in_output = False  # inside a "---- name stdout ----" block of captured output
     for line in text.splitlines():
+        if _STDOUT_HEADER.match(line):
+            in_output = True
+            continue
+        if line.startswith(("failures:", "successes:", "test result:", "running ")):
+            in_output = False
+        if in_output:
+            continue  # e.g. trybuild prints its own "test x ... ok" lines here
         m = _RESULT.match(line.rstrip())
         if not m:
             continue

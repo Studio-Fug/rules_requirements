@@ -133,15 +133,24 @@ class Config:
     def prefix(self, kind: str) -> str:
         return self.prefixes[kind]
 
+    def pattern(self, kind: str) -> str:
+        """The id regex (unanchored) for ``kind``.
+
+        ``{prefix}`` is substituted literally, so patterns may use braces of
+        their own (``{prefix}-\\d{4}``).
+        """
+        return self.id_pattern.replace("{prefix}", re.escape(self.prefix(kind)))
+
     def id_regex(self, kind: str) -> re.Pattern[str]:
-        return re.compile("^" + self.id_pattern.format(prefix=re.escape(self.prefix(kind))) + "$")
+        return re.compile("^(?:" + self.pattern(kind) + ")$")
 
     def any_id_regex(self) -> re.Pattern[str]:
-        """Matches any entity id of any kind, as a word inside free text."""
-        alts = "|".join(
-            self.id_pattern.format(prefix=re.escape(p))
-            for p in sorted(set(self.prefixes.values()), key=len, reverse=True)
-        )
+        """Matches any entity id of any kind, as a word inside free text.
+
+        Use ``finditer(...).group(0)``: a pattern may contain capture groups.
+        """
+        kinds = sorted(KINDS, key=lambda k: len(self.prefix(k)), reverse=True)
+        alts = "|".join("(?:" + self.pattern(k) + ")" for k in kinds)
         return re.compile(r"(?<![\w-])(?:" + alts + r")(?![\w-])")
 
     def kind_of(self, entity_id: str) -> str | None:
@@ -202,6 +211,22 @@ def parse_config(raw: Mapping[str, Any] | None, errors: list[str]) -> Config:
         if key not in known:
             errors.append(f"config: unknown key {key!r}")
 
+    for key in ("prefixes", "rules"):
+        if key in raw and not isinstance(raw[key] or {}, Mapping):
+            errors.append(f"config.{key}: must be a mapping")
+            raw = {k: v for k, v in raw.items() if k != key}
+    for key in (
+        "levels",
+        "severities",
+        "likelihoods",
+        "pyramid_cheap_levels",
+        "high_severities",
+        "annotation_patterns",
+    ):
+        if key in raw and not isinstance(raw[key] or [], (list, tuple)):
+            errors.append(f"config.{key}: must be a list")
+            raw = {k: v for k, v in raw.items() if k != key}
+
     if "prefixes" in raw:
         prefixes = dict(DEFAULT_PREFIXES)
         for kind, prefix in (raw["prefixes"] or {}).items():
@@ -220,7 +245,7 @@ def parse_config(raw: Mapping[str, Any] | None, errors: list[str]) -> Config:
             errors.append("config.id_pattern: must contain '{prefix}'")
         else:
             try:
-                re.compile(pattern.format(prefix="X"))
+                re.compile(pattern.replace("{prefix}", "X"))
                 kwargs["id_pattern"] = pattern
             except re.error as exc:
                 errors.append(f"config.id_pattern: invalid regex: {exc}")
@@ -231,6 +256,9 @@ def parse_config(raw: Mapping[str, Any] | None, errors: list[str]) -> Config:
         for item in raw["levels"] or []:
             if isinstance(item, str):
                 item = {"name": item}
+            if not isinstance(item, Mapping):
+                errors.append(f"config.levels: {item!r} must be a name or a mapping")
+                continue
             name = str(item.get("name", "")).strip().lower()
             if not name:
                 errors.append("config.levels: every level needs a name")

@@ -72,6 +72,10 @@ def _rr_evidence_impl(ctx):
             fail("%s is not executable" % t.label)
         tools.append(ftr)
         args.add("--test", "%s=%s=%s" % (t.label, ftr.executable.path, _workspace_of(t.label)))
+        if RunEnvironmentInfo in t:
+            # The test's own `env` attribute (as `bazel test` would set it).
+            for k, v in t[RunEnvironmentInfo].environment.items():
+                args.add("--env", "%s=%s=%s" % (t.label, k, v))
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
@@ -97,6 +101,12 @@ cacheable reports (and golden tests of them); for suites that cannot run in a
 sandbox (hardware-in-the-loop), aggregate real `bazel-testlogs` with the `rr`
 CLI instead.""",
     attrs = {
+        # Exec configuration: the binaries must run on the execution platform.
+        # (The target configuration would reuse `bazel test`'s binaries, but
+        # with test-configuration trimming — Bazel 7's default — a non-test
+        # rule depending on tests collides with the tests' own actions.) The
+        # cost is a second build of the tests; for large or hardware suites,
+        # aggregate the real bazel-testlogs with `rr report` instead.
         "tests": attr.label_list(cfg = "exec", mandatory = True, doc = "Test targets to run."),
         "timeout": attr.int(default = 300, doc = "Per-test timeout in seconds."),
         "local": attr.bool(default = False, doc = "Never execute remotely."),

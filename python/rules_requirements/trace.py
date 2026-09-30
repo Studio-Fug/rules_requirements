@@ -256,9 +256,18 @@ def build_matrix(
     """
     c = model.config
     by_id: dict[str, list[TestCase]] = {}
+    by_target: dict[str, list[TestCase]] = {}
     for case in evidence.cases:
         for rid in case.requirements:
             by_id.setdefault(rid, []).append(case)
+        if case.target:
+            by_target.setdefault(case.target, []).append(case)
+
+    def target_stale(target: str) -> bool:
+        """A target's evidence is stale when every passing case in it recorded
+        an artifact identity that differs from the current build."""
+        passing = [cs for cs in by_target.get(target, []) if cs.status == "passed"]
+        return bool(passing) and all(is_stale(cs.artifact, current_build) for cs in passing)
 
     known = model.ids()
     unknown = {
@@ -286,7 +295,16 @@ def build_matrix(
             target, level = vb.target, vb.level or c.default_provided_level  # type: ignore[attr-defined]
             status = evidence.target_status.get(target)
             if status is not None:
-                refs.append(EvidenceRef(name=target, status=status, level=level, target=target, kind="target"))
+                refs.append(
+                    EvidenceRef(
+                        name=target,
+                        status=status,
+                        level=level,
+                        target=target,
+                        kind="target",
+                        stale=status == "passed" and target_stale(target),
+                    )
+                )
         refs.sort(key=lambda r: (r.target, r.name, r.kind))
         failed = any(r.status in ("failed", "error") for r in refs)
         fresh = [r.level for r in refs if r.status == "passed" and not r.stale]
@@ -301,7 +319,10 @@ def build_matrix(
         want = c.rank(demanded)
         floor = c.rank(c.pyramid_min_level) if c.pyramid_min_level else None
         passed_all = fresh + stale
-        if want is not None and floor is not None and want >= floor and passed_all:
+        physical = [lvl for lvl in passed_all if (c.rank(lvl) or 0) >= (floor or 0)]
+        # A violation needs physical (>= floor) evidence standing alone; lower
+        # evidence without any physical result is UNDER-VERIFIED, not this.
+        if want is not None and floor is not None and want >= floor and physical:
             pyramid = not any(lvl in c.pyramid_cheap_levels for lvl in passed_all)
         return Verdict(
             id=entity_id,
@@ -325,16 +346,28 @@ def build_matrix(
         v = own(req.id, model.demanded_level(req), req.verified_by)
         v.kind = cfg.REQUIREMENT
         visiting.add(req.id)
-        kids = [k for k in model.children(req.id) if k.id not in visiting]
+        kids = [req_verdict(k) for k in model.children(req.id) if k.id not in visiting]
         visiting.discard(req.id)
         if kids:
-            child = _rollup([req_verdict(k).status for k in kids], VERIFIED, UNVERIFIED)
-            if v.status == UNVERIFIED:
-                v.status = child
-            elif FAILED in (v.status, child):
+            child = _rollup([k.status for k in kids], VERIFIED, UNVERIFIED)
+            if FAILED in (v.status, child):
                 v.status = FAILED
-            elif not (v.status == VERIFIED and child == VERIFIED):
-                v.status = PARTIAL if v.status == VERIFIED else v.status
+            elif child == VERIFIED:
+                # Verified refinements carry the parent only if their rigor
+                # meets the parent's own demand: a hitl system requirement is
+                # not proven by simulation-verified software requirements.
+                want = c.rank(v.demanded)
+                ranks = [c.rank(k.provided) for k in kids]
+                meets = v.status == VERIFIED or (want is not None and all(r is not None and r >= want for r in ranks))
+                weakest = min(kids, key=lambda k: c.rank(k.provided) or 0).provided
+                if meets:
+                    v.provided = v.provided if v.status == VERIFIED else weakest
+                    v.status = VERIFIED
+                else:
+                    v.status = UNDER_VERIFIED
+                    v.provided = v.provided or weakest
+            elif v.status in (VERIFIED, UNDER_VERIFIED) or child == PARTIAL:
+                v.status = PARTIAL
         verdicts[req.id] = v
         return v
 
@@ -406,7 +439,8 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
         route = route_for(v.demanded, c)
         if v.status == FAILED:
             failing = [e.name for e in v.evidence if e.status in ("failed", "error")]
-            gaps.append(Gap("failed", v.id, "failing evidence: " + ", ".join(failing), ROUTE_AUTONOMOUS, v.demanded))
+            # Reproducing a failure needs the same rig the evidence ran on.
+            gaps.append(Gap("failed", v.id, "failing evidence: " + ", ".join(failing), route, v.demanded))
         elif v.stale:
             gaps.append(
                 Gap("stale", v.id, "only passing evidence is against an older build", route, v.demanded, v.provided)
@@ -440,6 +474,36 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
             )
         if matrix.annotations_scanned and not v.implemented_in and not m.children(v.id):
             gaps.append(Gap("no-implementation", v.id, "no source annotation implements it", ROUTE_AUTONOMOUS))
+    for kind in (cfg.USER_NEED, cfg.MITIGATION):
+        for v in matrix.of_kind(kind):
+            failing = [e.name for e in v.evidence if e.status in ("failed", "error")]
+            if failing:
+                gaps.append(Gap("failed", v.id, "failing evidence: " + ", ".join(failing), ROUTE_AUTONOMOUS))
+    for kind in (cfg.RISK, cfg.TEST_METHOD):
+        for ent in m.section(kind).values():
+            tagged = matrix.evidence.for_id(ent.id)
+            if tagged:
+                names = ", ".join(sorted({cs.full_name for cs in tagged}))
+                gaps.append(
+                    Gap(
+                        "misdirected-evidence",
+                        ent.id,
+                        f"tests tagged with a {kind.replace('_', ' ')} id verify nothing (tag the requirement "
+                        f"instead): {names}",
+                        ROUTE_AUTONOMOUS,
+                    )
+                )
+    covered_targets = {vb.target for req in m.requirements.values() for vb in req.verified_by}
+    for cs in matrix.evidence.cases:
+        if cs.is_failure and not cs.requirements and cs.target not in covered_targets:
+            gaps.append(
+                Gap(
+                    "untraced-failure",
+                    cs.target or cs.full_name,
+                    f"{cs.full_name} {cs.status} and traces to no requirement",
+                    ROUTE_AUTONOMOUS,
+                )
+            )
     for rid in matrix.high_open_risks():
         risk = m.risks[rid]
         gaps.append(
