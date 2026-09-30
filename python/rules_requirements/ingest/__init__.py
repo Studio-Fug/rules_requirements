@@ -48,11 +48,10 @@ from typing import Any, Iterable, Iterator
 from rules_requirements.util import dedupe
 
 PASSED, SKIPPED, FAILED, ERROR = "passed", "skipped", "failed", "error"
-# Most severe wins when cases are merged.
+# Most severe wins when cases are merged — also for a whole target: a target
+# with skipped cases does not count as a passing verification artifact (the
+# skipped part may be exactly the hardware the `verified_by` level claims).
 STATUS_ORDER = {PASSED: 0, SKIPPED: 1, FAILED: 2, ERROR: 3}
-# A *target* (whole test binary) passes if any case passed and none failed; a
-# skipped case alongside passing ones does not make the target "skipped".
-TARGET_ORDER = {SKIPPED: 0, PASSED: 1, FAILED: 2, ERROR: 3}
 
 REQUIREMENT_PROPERTY = "requirement"
 LEVEL_PROPERTY = "level"
@@ -199,7 +198,7 @@ class Evidence:
         self.cases.append(case)
         if case.target:
             cur = self.target_status.get(case.target)
-            if cur is None or TARGET_ORDER[case.status] > TARGET_ORDER[cur]:
+            if cur is None or STATUS_ORDER[case.status] > STATUS_ORDER[cur]:
                 self.target_status[case.target] = case.status
 
     def for_id(self, entity_id: str) -> list[TestCase]:

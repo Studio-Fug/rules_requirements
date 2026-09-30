@@ -309,25 +309,30 @@ class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
     pass
 
 
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
 def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict:
-    loader.flatten_mapping(node)
-    pairs = loader.construct_pairs(node, deep=True)
     # A repeated key silently replaces the first value in plain YAML loaders,
-    # which here would drop whole sections or weaken a demanded method.
-    seen: dict[Any, int] = {}
-    for (key, _), (knode, _) in zip(pairs, node.value):
+    # which here would drop whole sections or weaken a demanded method. Check
+    # the explicitly written keys — merge-key contributions may legitimately
+    # be overridden — before merges are flattened in.
+    seen: dict[Any, Any] = {}
+    for knode, _ in node.value:
+        if knode.tag == _MERGE_TAG:
+            continue
+        key = loader.construct_object(knode, deep=True)
         try:
-            first = seen.setdefault(key, knode.start_mark.line + 1)
+            first = seen.get(key)
         except TypeError:  # unhashable key: not a model field anyway
             continue
-        if first != knode.start_mark.line + 1:
+        if first is not None:
             raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r} (first defined on line {first})",
-                knode.start_mark,
+                "while constructing a mapping", first, f"found duplicate key {key!r}", knode.start_mark
             )
-    out = _LineDict(pairs)
+        seen[key] = knode.start_mark
+    loader.flatten_mapping(node)
+    out = _LineDict(loader.construct_pairs(node, deep=True))
     out.line = node.start_mark.line + 1
     return out
 

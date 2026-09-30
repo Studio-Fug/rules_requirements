@@ -315,3 +315,21 @@ def test_failed_hardware_requirement_routes_to_a_human(tmp_path, model):
 def test_no_pyramid_violation_without_physical_evidence(tmp_path, model):
     m = matrix_for(tmp_path, model, [("sil-only", "passed", ["REQ-3"], "sil")])
     assert m.status("REQ-3") == UNDER_VERIFIED and m.pyramid_violations() == []
+
+
+def test_one_unstamped_case_does_not_freshen_a_stale_target(tmp_path):
+    path = write(
+        tmp_path,
+        "m.yaml",
+        "user_needs: [{id: UN-1, title: n}]\nrequirements: [{id: REQ-1, title: r, satisfies: [UN-1], method: hil, verified_by: [{target: '//hw:bench', level: hil}]}]\n",
+    )
+    model = load_model(path)
+    junit(
+        tmp_path,
+        "bazel-testlogs/hw/bench/test.xml",
+        [("cutoff", "passed", [], "", [("artifact.sha", "OLD")]), ("sanity", "passed", [], "")],
+    )
+    ev = ingest.collect([str(tmp_path / "bazel-testlogs")])
+    assert build_matrix(model, ev, current_build={"sha": "NEW"}).verdicts["REQ-1"].stale
+    assert build_matrix(model, ev, current_build={"sha": "OLD"}).status("REQ-1") == VERIFIED
+    assert build_matrix(model, ev).status("REQ-1") == VERIFIED  # no reference build: never stale

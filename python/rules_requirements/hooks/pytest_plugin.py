@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from rules_requirements.util import dedupe
 
 MARKERS = ("rr", "requirements")
@@ -48,8 +50,6 @@ def _declarations(item: Any) -> list[tuple[list[str], str, dict[str, str]]]:
     class's markers, the class decorator, then module/package markers. Both
     marker names (``rr`` and ``requirements``) share one order.
     """
-    import pytest
-
     fn = getattr(item, "obj", None)
     cls = getattr(item, "cls", None)
     by_scope: dict[str, list[tuple[list[str], str, dict[str, str]]]] = {"function": [], "class": [], "other": []}
@@ -85,10 +85,17 @@ def trace_of(item: Any) -> tuple[list[str], str, dict[str, str]]:
     return dedupe(ids), level, artifact
 
 
-def pytest_itemcollected(item: Any) -> None:
-    # Recorded at collection time so the properties reach the JUnit testcase
-    # however the test ends — including tests skipped by @pytest.mark.skip /
-    # skipif, whose setup hooks never run.
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(items: list[Any]) -> None:
+    # Recorded once collection is final — after every conftest's
+    # collection_modifyitems has added its markers — and before any test
+    # runs, so the properties reach the JUnit testcase however the test ends,
+    # including tests skipped by @pytest.mark.skip / skipif.
+    for item in items:
+        _record(item)
+
+
+def _record(item: Any) -> None:
     ids, level, artifact = trace_of(item)
     for rid in ids:
         item.user_properties.append(("requirement", rid))

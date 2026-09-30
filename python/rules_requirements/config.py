@@ -314,6 +314,11 @@ def parse_config(raw: Mapping[str, Any] | None, errors: list[str]) -> Config:
         kwargs["rules"] = rules
 
     cfg = Config(**kwargs)
+    try:
+        cfg.any_id_regex()  # every kind's pattern combined, as the scanner uses it
+    except re.error as exc:
+        errors.append(f"config.id_pattern: cannot be combined across kinds ({exc}); use (?:...) not named groups")
+        cfg = Config(**{k: v for k, v in kwargs.items() if k != "id_pattern"})
 
     names = cfg.level_names()
     for key in ("default_level", "default_provided_level", "autonomous_max_level"):

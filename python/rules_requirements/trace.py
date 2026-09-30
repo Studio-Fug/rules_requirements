@@ -264,10 +264,17 @@ def build_matrix(
             by_target.setdefault(case.target, []).append(case)
 
     def target_stale(target: str) -> bool:
-        """A target's evidence is stale when every passing case in it recorded
-        an artifact identity that differs from the current build."""
-        passing = [cs for cs in by_target.get(target, []) if cs.status == "passed"]
-        return bool(passing) and all(is_stale(cs.artifact, current_build) for cs in passing)
+        """A target's evidence is stale when its identity-stamped cases say so.
+
+        One run is one binary, so a mismatched stamp is decisive unless another
+        case in the target carries a matching one; unstamped cases (a helper
+        test without RR_ARTIFACT) do not make stale evidence fresh."""
+        if not current_build:
+            return False
+        stamped = [
+            cs for cs in by_target.get(target, []) if cs.status == "passed" and set(cs.artifact) & set(current_build)
+        ]
+        return bool(stamped) and all(is_stale(cs.artifact, current_build) for cs in stamped)
 
     known = model.ids()
     unknown = {
@@ -361,7 +368,10 @@ def build_matrix(
                 meets = v.status == VERIFIED or (want is not None and all(r is not None and r >= want for r in ranks))
                 weakest = min(kids, key=lambda k: c.rank(k.provided) or 0).provided
                 if meets:
-                    v.provided = v.provided if v.status == VERIFIED else weakest
+                    if v.status != VERIFIED:
+                        # Verified through the refinements, whose own verdicts
+                        # already weighed staleness and the cost pyramid.
+                        v.provided, v.stale, v.pyramid_violation = weakest, False, False
                     v.status = VERIFIED
                 else:
                     v.status = UNDER_VERIFIED

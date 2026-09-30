@@ -77,10 +77,11 @@ def test_testsuites_level_properties_and_attempts(tmp_path):
     assert target_from_path("/x/bazel-testlogs/pkg/name/test_attempts/attempt_1.xml") == "//pkg:name"
 
 
-def test_target_passes_despite_a_skipped_case(tmp_path):
+def test_target_with_skipped_cases_is_not_passing_evidence(tmp_path):
+    # e.g. the DUT was absent: hardware cases skipped, one host-side case passed
     base = tmp_path / "bazel-testlogs"
-    junit(base, "p/t/test.xml", [("a", "passed", [], ""), ("b", "skipped", [], "")])
-    assert ingest.collect([str(base)]).target_status == {"//p:t": "passed"}
+    junit(base, "p/t/test.xml", [("sanity", "passed", [], "")] + [(f"hw{i}", "skipped", [], "") for i in range(20)])
+    assert ingest.collect([str(base)]).target_status == {"//p:t": "skipped"}
 
 
 def test_collect_walks_dirs_and_skips_unknown(tmp_path):
@@ -272,6 +273,21 @@ def test_register_requires_name_and_base_ingest_abstract(tmp_path):
     assert Ingestor().sniff("x.xml", b"") is False
     assert ingest.ingestor_for(str(tmp_path / "nope.xml")) is None
     assert os.path.exists(tmp_path)
+
+
+def test_libtest_nocapture_layout():
+    text = (
+        "running 2 tests\n"
+        "test hw::flash_and_boot ... \n"
+        "[boot] ESP-ROM:esp32c6\n"
+        "[boot] app started\n"
+        "ok\n"
+        "test hw::soak ... flashing DUT 0x10000\n"
+        "FAILED\n"
+        "test result: FAILED. 1 passed; 1 failed\n"
+    )
+    cases = {f"{c.classname}::{c.name}": c.status for c in parse_libtest(text)}
+    assert cases == {"hw::flash_and_boot": "passed", "hw::soak": "failed"}
 
 
 def test_libtest_ignores_result_lines_in_captured_output():

@@ -93,4 +93,5 @@ def test_nonzero_exit_with_all_pass_report_is_an_error(tmp_path, monkeypatch):
     )  # fmt: skip
     ev = ingest.collect([str(out)])
     assert ev.target_status == {"//pkg:leaky": "error", "//pkg:envcheck": "passed"}
-    assert any(c.name == "exit-status" and "exited with 23" in c.message for c in ev.cases)
+    (exit_case,) = [c for c in ev.cases if c.name == "exit-status"]
+    assert "exited with 23" in exit_case.message and exit_case.requirements == ("REQ-2",)

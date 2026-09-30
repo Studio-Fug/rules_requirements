@@ -90,6 +90,26 @@ def test_pytest_runner_in_process(tmp_path, monkeypatch):
     _check_sample(xml)
 
 
+def test_markers_added_by_conftest_are_recorded(tmp_path, monkeypatch):
+    from rules_requirements.hooks import pytest_runner
+
+    (tmp_path / "conftest.py").write_text(
+        "import pytest\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    for item in items:\n"
+        "        item.add_marker(pytest.mark.rr('REQ-1', level='hil'))\n"
+    )
+    (tmp_path / "test_bench.py").write_text("def test_cutoff_bench():\n    assert False\n")
+    xml = tmp_path / "out.xml"
+    monkeypatch.setenv("XML_OUTPUT_FILE", str(xml))
+    monkeypatch.setattr(sys, "argv", ["main", "-q"])
+    # the nested run registers its own "conftest" module; restore ours after
+    monkeypatch.setitem(sys.modules, "conftest", sys.modules["conftest"])
+    assert pytest_runner.main(str(tmp_path / "main.py")) == 1
+    (case,) = ingest.collect([str(xml)]).cases
+    assert case.status == "failed" and case.requirements == ("REQ-1",) and case.level == "hil"
+
+
 def test_pytest_runner_subprocess(tmp_path):
     (tmp_path / "test_sample.py").write_text(SAMPLE)
     (tmp_path / "main.py").write_text(
@@ -281,7 +301,7 @@ def test_wrap_crash_records_synthetic_case(tmp_path, monkeypatch):
     monkeypatch.delenv("TEST_TMPDIR", raising=False)
     assert wrap.main(["--", str(crash)]) == 139
     (case,) = ingest.collect([str(tmp_path / "c.xml")]).cases
-    assert case.status == "error" and "exit code 139" in case.message
+    assert case.status == "error" and "exited with 139" in case.message
 
 
 def test_wrap_resolves_runfiles_paths(tmp_path, monkeypatch):
@@ -329,6 +349,37 @@ def test_wrap_nonzero_exit_after_all_passed(tmp_path, monkeypatch):
     assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 23
     statuses = {c.name: c.status for c in ingest.collect([str(xml)]).cases}
     assert statuses == {"t": "passed", "exit-status": "error"}
+
+
+NOCAPTURE_SPAWNED = r"""
+import json, os, sys
+with open(os.environ["RR_TRACE_FILE"], "a") as fh:
+    fh.write(json.dumps({"test": "hw::flash_and_boot", "requirements": ["REQ-1"]}) + "\n")
+    fh.write(json.dumps({"test": "tokio-runtime-worker", "requirements": ["REQ-2"]}) + "\n")
+print("running 1 test")
+print("test hw::flash_and_boot ... ")
+print("[boot] app started")
+print("ok")
+print("test result: ok. 1 passed")
+sys.exit(int(sys.argv[1]) if len(sys.argv) > 1 else 0)
+"""
+
+
+def test_wrap_nocapture_and_spawned_threads(tmp_path, monkeypatch, capsys):
+    fake = tmp_path / "nocap"
+    fake.write_text("#!" + sys.executable + "\n" + NOCAPTURE_SPAWNED)
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "n.xml"
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 0
+    cases = {c.name: c for c in ingest.collect([str(xml)]).cases}
+    assert set(cases) == {"flash_and_boot"} and cases["flash_and_boot"].status == "passed"
+    assert cases["flash_and_boot"].requirements == ("REQ-1",)
+    assert "tokio-runtime-worker" in capsys.readouterr().err
+    # the same run exiting non-zero: the unattributable ids ride on the exit-status error
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake), "3"]) == 3
+    (exit_case,) = [c for c in ingest.collect([str(xml)]).cases if c.name == "exit-status"]
+    assert set(exit_case.requirements) == {"REQ-1", "REQ-2"}
 
 
 def test_control_characters_do_not_hide_failures(tmp_path):

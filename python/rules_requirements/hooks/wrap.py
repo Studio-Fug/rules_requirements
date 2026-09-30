@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,9 @@ def _resolve(binary: str) -> str:
             if os.path.exists(cand):
                 return cand
     return binary
+
+
+_TEST_PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*$")
 
 
 def _traced(trace: str) -> dict[str, list[str]]:
@@ -92,11 +96,14 @@ def main(argv: list[str] | None = None) -> int:
     except OSError:
         trace = ""
     merge_trace(cases, trace)
-    # Tests that recorded traces but never reported a result crashed the
-    # binary mid-run (abort, stack overflow): they are errors, not absent.
     reported = {f"{c.classname}::{c.name}" if c.classname else c.name for c in cases}
+    unattributed: list[str] = []
     for test, ids in _traced(trace).items():
-        if test not in reported:
+        if test in reported:
+            continue
+        if proc.returncode != 0 and _TEST_PATH.match(test):
+            # A test that recorded traces but never reported a result was
+            # running when the binary died (abort, stack overflow).
             module, _, leaf = test.rpartition("::")
             cases.append(
                 TestCase(
@@ -108,13 +115,25 @@ def main(argv: list[str] | None = None) -> int:
                     target=args.target,
                 )
             )
-    if proc.returncode != 0 and cases and not any(c.is_failure for c in cases):
+        else:
+            # rr::verifies! from a spawned thread or async task (its thread is
+            # not named after the test): the ids cannot be attributed.
+            unattributed.extend(ids)
+            print(
+                f"rr wrap: warning: traces from thread {test!r} match no test; "
+                "call rr::verifies! on the test's own thread",
+                file=sys.stderr,
+            )
+    if proc.returncode != 0 and not any(c.is_failure for c in cases):
+        # Every reported test passed, yet the binary failed: the run is
+        # suspect, so the failure carries every id it traced.
+        ids = [i for c in cases for i in c.requirements] + unattributed
         cases.append(
             TestCase(
                 name="exit-status",
                 status="error",
-                message=f"test binary exited with {proc.returncode} although every reported test passed\n"
-                + text[-2000:],
+                requirements=tuple(dict.fromkeys(ids)),
+                message=f"test binary exited with {proc.returncode} although no reported test failed\n" + text[-2000:],
                 target=args.target,
             )
         )

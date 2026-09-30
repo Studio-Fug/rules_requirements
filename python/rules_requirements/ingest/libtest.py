@@ -41,11 +41,17 @@ _RESULT = re.compile(
     r"^test (?P<name>\S+)(?: - should panic)? \.\.\. (?P<result>ok|FAILED|ignored)(?:, (?P<reason>.*))?$"
 )
 _STDOUT_HEADER = re.compile(r"^---- (?P<name>\S+) stdout ----$")
+# With --nocapture, libtest prints "test name ... " first — the test's live
+# output may continue on that same line — and the result on a line of its own
+# once the test finishes.
+_PENDING = re.compile(r"^test (?P<name>\S+)(?: - should panic)? \.\.\.(?: .*)?$")
+_BARE_RESULT = re.compile(r"^(?P<result>ok|FAILED|ignored)(?:, (?P<reason>.*))?$")
 
 
 def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCase]:
     cases: dict[str, TestCase] = {}
     in_output = False  # inside a "---- name stdout ----" block of captured output
+    pending: str | None = None  # --nocapture: name printed, result still to come
     for line in text.splitlines():
         if _STDOUT_HEADER.match(line):
             in_output = True
@@ -54,11 +60,21 @@ def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCas
             in_output = False
         if in_output:
             continue  # e.g. trybuild prints its own "test x ... ok" lines here
-        m = _RESULT.match(line.rstrip())
-        if not m:
-            continue
+        stripped = line.rstrip()
+        m = _RESULT.match(stripped)
+        if m is None:
+            p = _PENDING.match(stripped)
+            if p:
+                pending = p.group("name")
+                continue
+            m = _BARE_RESULT.match(stripped.strip()) if pending else None
+            if m is None:
+                continue
+            name, pending = pending, None
+            assert name is not None
+        else:
+            name, pending = m.group("name"), None
         status = {"ok": PASSED, "FAILED": FAILED, "ignored": SKIPPED}[m.group("result")]
-        name = m.group("name")
         module, _, leaf = name.rpartition("::")
         cases[name] = TestCase(
             name=leaf,

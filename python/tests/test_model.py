@@ -122,6 +122,19 @@ def test_duplicate_keys_are_errors(tmp_path):
     )
     m, _ = read_model(path)
     assert any("duplicate key 'method'" in e for e in m.parse_errors)
+    # on one line, in flow style
+    path = write(tmp_path, "dup3.yaml", "requirements: [{id: REQ-1, title: a, method: hil, method: simulation}]\n")
+    assert any("duplicate key 'method'" in e for e in read_model(path)[0].parse_errors)
+    # a merge key may legitimately be overridden
+    path = write(
+        tmp_path,
+        "merge.yaml",
+        "hw: &hw {method: sil}\nuser_needs: [{id: UN-1, title: n}]\nrequirements:\n"
+        "  - <<: *hw\n    id: REQ-1\n    title: a\n    satisfies: [UN-1]\n    method: hitl\n",
+    )
+    m, _ = read_model(path)
+    assert not [e for e in m.parse_errors if "duplicate" in e]
+    assert m.requirements["REQ-1"].method == "hitl"
 
 
 def test_braces_and_groups_in_id_pattern(tmp_path):
@@ -141,6 +154,15 @@ def test_braces_and_groups_in_id_pattern(tmp_path):
     assert [i.entity for i in validate(m) if i.code == "bad-id"] == ["REQ-1"]
     refs = extract("# @rr(REQ-0001.2, UN-0001)", "a.py", m.config)
     assert refs[0].ids == ("REQ-0001.2", "UN-0001")
+
+
+def test_named_groups_in_id_pattern_are_rejected(tmp_path):
+    path = write(
+        tmp_path, "m.yaml", "config: {id_pattern: '{prefix}-(?P<num>\\d+)'}\nuser_needs: [{id: UN-1, title: A}]\n"
+    )
+    m, _ = read_model(path)
+    assert any("named groups" in e for e in m.parse_errors)
+    m.config.any_id_regex()  # the fallback pattern still works
 
 
 def test_malformed_config_sections_do_not_crash(tmp_path):

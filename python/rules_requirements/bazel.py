@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from typing import Any
 
 from rules_requirements.hooks.junit_writer import JUnitWriter
 
@@ -84,14 +85,17 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
         with open(os.path.join(logdir, "test.log"), "w", encoding="utf-8") as fh:
             fh.write(log)
         failures += code != 0
-        if code != 0 and os.path.exists(xml) and os.path.getsize(xml) > 0 and not _has_failure(xml):
+        reported = _report(xml) if os.path.exists(xml) and os.path.getsize(xml) > 0 else None
+        if code != 0 and reported is not None and not any(c.is_failure for c in reported):
             # The binary failed (sanitizer, crash after writing its report,
             # non-zero exit from main) although every case it reported passed:
-            # record the failure next to the report so it cannot be missed.
+            # the whole run is suspect, so the failure carries every id the
+            # report traced — those requirements must not read VERIFIED.
+            ids = [i for c in reported for i in c.requirements]
             w = JUnitWriter(label, classname=label)
             w.add(
                 "exit-status",
-                (),
+                list(dict.fromkeys(ids)),
                 "error",
                 f"test binary exited with {code} although its report shows no failure\n{log[-4000:]}",
             )
@@ -113,10 +117,10 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
     return 0  # failing tests are evidence, not build failures
 
 
-def _has_failure(xml: str) -> bool:
+def _report(xml: str) -> list[Any]:
     from rules_requirements.ingest.junit import JUnitIngestor
 
-    return any(c.is_failure for c in JUnitIngestor().ingest(xml))
+    return list(JUnitIngestor().ingest(xml))
 
 
 def golden(actual: str, golden_path: str, update: bool) -> int:
