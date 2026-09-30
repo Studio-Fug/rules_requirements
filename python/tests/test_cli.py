@@ -136,6 +136,23 @@ def test_paths_resolve_against_bazel_working_directory(capsys, model_path, tmp_p
     assert m.requirements["REQ-1"].location.path == "model.yaml"
 
 
+def test_path_prefers_working_directory_but_falls_back_to_cwd(tmp_path, monkeypatch):
+    runfiles = tmp_path / "runfiles"
+    (runfiles / "req").mkdir(parents=True)
+    (runfiles / "req" / "m.yaml").write_text("x")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(runfiles)
+    monkeypatch.setenv("BUILD_WORKING_DIRECTORY", str(work))
+    assert cli._path("req/m.yaml") == "req/m.yaml"  # only exists in runfiles
+    assert cli._path("out/report.html") == str(work / "out/report.html")  # outputs go to the user
+    (work / "req").mkdir()
+    (work / "req" / "m.yaml").write_text("y")
+    assert cli._path("req/m.yaml") == str(work / "req/m.yaml")
+    assert cli._path("-") == "-"
+    assert cli._path("/abs") == "/abs"
+
+
 def test_wrap_subcommand(capsys, tmp_path):
     with pytest.raises(SystemExit):
         cli.main(["wrap", "--junit-xml", str(tmp_path / "x.xml")])

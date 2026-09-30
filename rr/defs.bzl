@@ -8,6 +8,7 @@ Model:
   * `rr_model`            — declare the model files; also creates `<name>_test`
                             (validation) unless `validate = False`.
   * `rr_annotations_test` — fail on source annotations referencing unknown ids.
+  * `rr_annotations_check`— the same over the whole workspace, via `bazel run`.
 
 Test hooks:
   * `rr_py_test`          — pytest with `@pytest.mark.rr(...)` traceability JUnit.
@@ -103,6 +104,21 @@ def rr_annotations_test(name, model, srcs, **kwargs):
         data = [model] + srcs,
         **kwargs
     )
+
+def rr_annotations_check(name, model, **kwargs):
+    """`bazel run` target that scans the whole workspace for annotations.
+
+    Unlike `rr_annotations_test` (hermetic, explicit `srcs`), this walks the
+    source tree `bazel run` was invoked in (git-aware) and fails on any
+    annotation naming an id the model does not define. Extra `rr scan` flags
+    (`--list`, `--exclude GLOB`, ...) can be passed after `--`.
+
+    Args:
+      name: target name.
+      model: an `rr_model` target.
+      **kwargs: forwarded to the underlying `py_binary`.
+    """
+    _py("binary", name, "cli", baked_args = ["scan", "--model", "$(rootpaths %s)" % model], data = [model], **kwargs)
 
 def rr_py_test(name, srcs, deps = [], args = [], data = [], **kwargs):
     """A pytest `py_test` whose JUnit carries `@pytest.mark.rr(...)` traces.

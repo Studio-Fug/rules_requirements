@@ -31,11 +31,21 @@ DEFAULT_MODEL = "requirements"
 
 
 def _path(p: str) -> str:
-    """Resolve a user-supplied path against the invoking directory."""
-    if not p or os.path.isabs(p):
+    """Resolve a user-supplied path against the invoking directory.
+
+    Under ``bazel run`` a relative path means "relative to where I ran it" —
+    unless it only exists relative to the current directory, which is how the
+    runfiles paths baked into generated mains (``rr_annotations_check``) look.
+    """
+    if not p or p == "-" or os.path.isabs(p):
         return p
     base = os.environ.get("BUILD_WORKING_DIRECTORY") or os.environ.get("BUILD_WORKSPACE_DIRECTORY")
-    return os.path.join(base, p) if base else p
+    if not base:
+        return p
+    candidate = os.path.join(base, p)
+    if os.path.exists(candidate) or not os.path.exists(p):
+        return candidate
+    return p
 
 
 def _root() -> str:
