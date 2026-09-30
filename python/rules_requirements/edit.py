@@ -24,6 +24,7 @@ JSON files — are refused with :class:`EditError` instead of being rewritten.
 from __future__ import annotations
 
 import bisect
+import hashlib
 import re
 import textwrap
 from dataclasses import dataclass
@@ -613,7 +614,12 @@ _FIRST_DEFINED = re.compile(r"\s*\(first defined at [^)]*\)")
 def _scalar_ranges(text: str) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
 
+    seen: set[int] = set()
+
     def walk(node: yaml.Node) -> None:
+        if id(node) in seen:  # an alias: its node is already walked
+            return
+        seen.add(id(node))
         if isinstance(node, yaml.ScalarNode):
             start = node.start_mark.index
             if node.style in ("|", ">"):  # a comment may follow the header: content starts below it
@@ -694,14 +700,43 @@ def _problems(messages: Any, aliases: Mapping[str, str]) -> list[str]:
     return sorted(out)
 
 
-def _canon(value: Any) -> str:
-    """A comparable rendering of a plain YAML value (types included)."""
+def _canon(value: Any, memo: dict[int, tuple[Any, str]]) -> str:
+    """A comparable digest of a plain YAML value (types included). Shared
+    (aliased) values are digested once, so aliases cannot blow it up."""
+    hit = memo.get(id(value))
+    if hit is not None and hit[0] is value:
+        return hit[1]
     if isinstance(value, Mapping):
-        items = sorted(value.items(), key=lambda kv: repr(kv[0]))
-        return "{" + ", ".join(f"{_canon(k)}: {_canon(v)}" for k, v in items) + "}"
-    if isinstance(value, (list, tuple)):
-        return "[" + ", ".join(_canon(v) for v in value) + "]"
-    return repr(value)
+        text = "{" + ",".join(sorted(f"{_canon(k, memo)}:{_canon(v, memo)}" for k, v in value.items())) + "}"
+    elif isinstance(value, (list, tuple)):
+        text = "[" + ",".join(_canon(v, memo) for v in value) + "]"
+    else:
+        text = repr(value)
+    digest = hashlib.sha1(text.encode("utf-8", "surrogatepass")).hexdigest()  # noqa: S324 — not security relevant
+    memo[id(value)] = (value, digest)
+    return digest
+
+
+def _id_counts(text: str) -> dict[str, int]:
+    """How many times each entity id is defined in ``text``."""
+    counts: dict[str, int] = {}
+    for doc in yaml.safe_load_all(text):
+        if not isinstance(doc, Mapping):
+            continue
+        items = (
+            [doc]
+            if "kind" in doc
+            else [
+                item
+                for key, value in doc.items()
+                if key in cfg.KIND_BY_SECTION and isinstance(value, list)
+                for item in value
+            ]
+        )
+        for item in items:
+            if isinstance(item, Mapping) and item.get("id"):
+                counts[str(item["id"])] = counts.get(str(item["id"]), 0) + 1
+    return counts
 
 
 def _extras(text: str, aliases: Mapping[str, str]) -> list[tuple[str, str, str]]:
@@ -710,23 +745,28 @@ def _extras(text: str, aliases: Mapping[str, str]) -> list[tuple[str, str, str]]
     and each key of an entity that its kind does not define. Owners are
     entity ids (renamed ids mapped back to their old ones), "" for top level."""
     out = []
+    memo: dict[int, tuple[Any, str]] = {}
     for doc in yaml.safe_load_all(text):
         if not isinstance(doc, Mapping):
             continue
         if "kind" in doc:
             kind = cfg.KIND_BY_SECTION.get(str(doc["kind"]), str(doc["kind"]))
             owner = str(doc.get("id", ""))
-            out += [(owner, str(k), _canon(v)) for k, v in doc.items() if k != "kind" and k not in FIELDS.get(kind, ())]
+            out += [
+                (owner, str(k), _canon(v, memo))
+                for k, v in doc.items()
+                if k != "kind" and k not in FIELDS.get(kind, ())
+            ]
             continue
         for key, value in doc.items():
             section_kind = cfg.KIND_BY_SECTION.get(key)
             if section_kind is None:
-                out.append(("", str(key), _canon(value)))
+                out.append(("", str(key), _canon(value, memo)))
                 continue
             for item in value if isinstance(value, list) else ():
                 if isinstance(item, Mapping):
                     owner = str(item.get("id", ""))
-                    out += [(owner, str(k), _canon(v)) for k, v in item.items() if k not in FIELDS[section_kind]]
+                    out += [(owner, str(k), _canon(v, memo)) for k, v in item.items() if k not in FIELDS[section_kind]]
     return [(aliases.get(owner, owner), key, value) for owner, key, value in out]
 
 
@@ -769,12 +809,14 @@ def verify(
         raise EditError(f"the edit would change {f'{owner} ' if owner else ''}{key!r}; refusing to write")
     old_ents = {e.id: e for e in old.entities()}
     new_ents = {e.id: e for e in new.entities()}
+    old_n = _id_counts(old_text) if old_text.strip() else {}
+    new_n = _id_counts(new_text)
     for eid in sorted(set(old_ents) | set(new_ents) | set(expect)):
         a, b = old_ents.get(eid), new_ents.get(eid)
         if eid in expect:
             want = expect[eid]
-            if want is None:
-                if b is not None:
+            if want is None:  # one definition gone (another copy of a duplicate id may stay)
+                if new_n.get(eid, 0) >= max(old_n.get(eid, 0), 1):
                     raise EditError(f"{eid} is still present after deleting it")
                 continue
             if b is None:
@@ -797,6 +839,12 @@ def verify(
             if c not in kept:
                 raise EditError(f"the edit would lose the comment {c!r}; refusing to write")
             kept.remove(c)
+
+
+def append_document(text: str, kind: str, data: Mapping[str, Any]) -> str:
+    """Add a one-object document for a new entity to a multi-document file."""
+    lead = "" if not text or text.endswith("\n") else "\n"
+    return text + lead + "---\n" + render_file(kind, data)
 
 
 def is_blank(text: str) -> bool:

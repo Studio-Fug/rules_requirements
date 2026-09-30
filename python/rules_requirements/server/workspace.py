@@ -25,7 +25,7 @@ from rules_requirements import config as cfg
 from rules_requirements import edit, ingest
 from rules_requirements._vendor import yaml
 from rules_requirements.diff import EntityChange, diff_models
-from rules_requirements.model import Model, Note, model_files, parse_documents, read_model
+from rules_requirements.model import Model, Note, load_text, model_files, parse_documents, read_model
 from rules_requirements.trace import Matrix, build_matrix
 from rules_requirements.util import natural_key
 from rules_requirements.validate import Issue, validate
@@ -166,7 +166,7 @@ class Workspace:
             counts[ent.location.path] = counts.get(ent.location.path, 0) + 1
         if counts:
             best = max(sorted(counts), key=lambda p: counts[p])
-            if counts[best] == 1 and len(counts) > 1 and self._single_object(best):
+            if counts[best] == 1 and self._single_object(best):
                 return os.path.dirname(best)  # a directory: one file per object
             return best
         files = [f for f in self.files() if not f.endswith(".json")]
@@ -181,15 +181,15 @@ class Workspace:
     def _covered(self, rel: str) -> bool:
         return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in self.model_paths)
 
-    def _loadable(self, rel: str) -> bool:
+    def _loadable(self, rel: str, exts: tuple[str, ...] = (".yaml", ".yml")) -> bool:
         """Whether the model loader would read ``rel`` (see ``model_files``):
-        a model path itself, or a YAML file under a model directory that is
-        not inside a dot-directory."""
+        a model path itself, or a file with one of ``exts`` under a model
+        directory that is not inside a dot-directory."""
         for p in self.model_paths:
             if rel == p:
                 return True
             sub = rel if p == "." else rel[len(p) + 1 :] if rel.startswith(p.rstrip("/") + "/") else ""
-            if sub and rel.endswith((".yaml", ".yml")) and not any(x.startswith(".") for x in sub.split("/")[:-1]):
+            if sub and rel.endswith(exts) and not any(x.startswith(".") for x in sub.split("/")[:-1]):
                 return True
         return False
 
@@ -207,7 +207,8 @@ class Workspace:
             if not self.model.config.id_regex(kind).match(ent.id):
                 raise WorkspaceError(f"{ent.id} does not match the {kind} id pattern")
             target = self._rel(file) if file else self.file_for_new(kind)
-            if not target.endswith((".yaml", ".yml", ".json")):
+            named = target.endswith((".yaml", ".yml", ".json"))  # a file, not a folder to put one in
+            if not named:
                 target = f"{target}/{ent.id}.yaml"
             if not self._loadable(target):
                 raise WorkspaceError(
@@ -219,6 +220,8 @@ class Workspace:
             want = {ent.id: {**data, "kind": kind}}
             if exists and not self._single_object(target):
                 txn.edit(target, lambda text: edit.insert_entity(text, kind, edit.entity_to_dict(ent)), want)
+            elif exists and named and file:  # asked for this one-object file: one more document in it
+                txn.edit(target, lambda text: edit.append_document(text, kind, edit.entity_to_dict(ent)), want)
             elif exists:
                 raise WorkspaceError(f"{target} already exists", 409)
             else:
@@ -290,7 +293,10 @@ class Workspace:
             ent = self.model.get(entity_id)
             if ent is None:
                 raise WorkspaceError(f"{entity_id} does not exist", 404)
-            refs = self.referrers(entity_id)
+            # Deleting one copy of a duplicated id leaves the id defined: its
+            # references stay (they now resolve to the remaining copy).
+            duplicated = any(f"duplicate id {entity_id} (" in e for e in self.model.parse_errors)
+            refs = [] if duplicated else self.referrers(entity_id)
             if refs and not force:
                 who = ", ".join(f"{i} ({r})" for i, r in refs)
                 raise WorkspaceError(f"{entity_id} is referenced by {who}", 409)
@@ -521,12 +527,14 @@ class Workspace:
         # --full-name: paths relative to the repository top (the workspace root
         # may be a subdirectory); -z: no C-quoting of non-ASCII names.
         listing = self.git("ls-tree", "-r", "-z", "--full-name", "--name-only", ref, "--", *self.model_paths)
+        prefix = self.git("rev-parse", "--show-prefix").strip()  # the root, relative to the repository top
         docs: list[tuple[str, Any]] = []
-        for full in sorted(p for p in listing.split("\0") if p.endswith((".yaml", ".yml", ".json"))):
-            text = self.git("show", f"{ref}:{full}")
-            rel = full
+        for full in sorted(p for p in listing.split("\0") if p):
+            rel = full[len(prefix) :] if full.startswith(prefix) else full
+            if not self._loadable(rel, (".yaml", ".yml", ".json")):
+                continue  # read the files the working-tree loader reads, and only those
             try:
-                docs.extend((rel, d) for d in yaml.safe_load_all(text) if d is not None)
+                docs.extend((rel, d) for d in load_text(self.git("show", f"{ref}:{full}")))
             except yaml.YAMLError:
                 continue
         model, _ = parse_documents(docs)

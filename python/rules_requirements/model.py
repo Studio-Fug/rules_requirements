@@ -310,7 +310,36 @@ class _LineDict(dict):  # type: ignore[type-arg]
 
 
 class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
-    pass
+    # Aliases are fine, but not a document that expands into an absurd number
+    # of values through them ("billion laughs"): everything downstream walks
+    # the expanded values.
+    MAX_EXPANDED_VALUES = 1_000_000
+
+    def construct_document(self, node: Any) -> Any:
+        if _expanded_size(node, {}) > self.MAX_EXPANDED_VALUES:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                f"the document expands to over {self.MAX_EXPANDED_VALUES:,} values through aliases",
+                node.start_mark,
+            )
+        return super().construct_document(node)
+
+
+def _expanded_size(node: Any, memo: dict[int, int]) -> int:
+    """How many nodes ``node`` stands for once aliases are expanded (linear:
+    each distinct node is sized once; a recursive alias counts once)."""
+    key = id(node)
+    if key in memo:
+        return memo[key]
+    memo[key] = 1
+    size = 1
+    if isinstance(node, yaml.SequenceNode):
+        size += sum(_expanded_size(child, memo) for child in node.value)
+    elif isinstance(node, yaml.MappingNode):
+        size += sum(_expanded_size(k, memo) + _expanded_size(v, memo) for k, v in node.value)
+    memo[key] = size
+    return size
 
 
 _MERGE_TAG = "tag:yaml.org,2002:merge"
@@ -346,7 +375,13 @@ _LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _con
 
 def _load_documents(path: str) -> list[Any]:
     with open(path, encoding="utf-8") as fh:
-        return [d for d in yaml.load_all(fh, Loader=_LineLoader) if d is not None]
+        return load_text(fh.read())
+
+
+def load_text(text: str) -> list[Any]:
+    """The documents of one model file's text, loaded the way model files are
+    (line numbers, duplicate-key check, alias expansion limit)."""
+    return [d for d in yaml.load_all(text, Loader=_LineLoader) if d is not None]
 
 
 def model_files(paths: str | Iterable[str]) -> list[str]:

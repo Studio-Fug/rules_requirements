@@ -370,3 +370,38 @@ def test_verify_compares_the_values_of_keys_the_model_does_not_define():
     # a rename keeps them under the new id
     renamed = text.replace("id: REQ-1", "id: REQ-10")
     edit.verify(text, renamed, {"REQ-1": None, "REQ-10": {"id": "REQ-10", "title": "one"}}, aliases={"REQ-10": "REQ-1"})
+
+
+# --- fourth review round ------------------------------------------------------------
+
+
+def alias_chain(levels):
+    lines = ["x-chain:", "  a0: &a0 [1, 1, 1, 1, 1, 1, 1, 1, 1]"]
+    for i in range(1, levels + 1):
+        lines.append(f"  a{i}: &a{i} [{', '.join([f'*a{i - 1}'] * 9)}]")
+    return "\n".join(lines) + "\nrequirements:\n  - id: REQ-1\n    title: one  # keep\n"
+
+
+def test_aliases_cannot_blow_up_the_edit_checks():
+    import time
+
+    from rules_requirements.model import load_text
+
+    bomb = alias_chain(8)  # 9**9 values once expanded
+    with pytest.raises(yaml.YAMLError, match="expands to over"):
+        load_text(bomb)
+    start = time.monotonic()
+    assert [c for _, c in edit._comments(bomb)] == ["# keep"]
+    assert len(edit._extras(bomb, {})) == 1
+    assert time.monotonic() - start < 2
+    # under the limit, edits work as usual
+    text = alias_chain(4)
+    out = edit.update_entity(text, "REQ-1", {"id": "REQ-1", "title": "uno"})
+    edit.verify(text, out, {"REQ-1": {"id": "REQ-1", "title": "uno"}})
+
+
+def test_append_document():
+    text = "kind: user_need\nid: UN-1\ntitle: one"
+    out = edit.append_document(text, "user_need", {"id": "UN-2", "title": "two"})
+    edit.verify(text, out, {"UN-2": {"id": "UN-2", "title": "two", "kind": "user_need"}})
+    assert out == "kind: user_need\nid: UN-1\ntitle: one\n---\nkind: user_need\nid: UN-2\ntitle: two\n"

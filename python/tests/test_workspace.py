@@ -403,3 +403,46 @@ def test_new_files_never_touch_the_process_umask(repo, monkeypatch):
     ws = Workspace(root=str(repo), model_paths=["req"])
     ws.create("user_need", {"title": "N"}, file="req/more/UN-9.yaml")
     assert (repo / "req/more/UN-9.yaml").exists()
+
+
+def test_a_duplicated_id_can_be_repaired(tmp_path):
+    dup = "  - id: REQ-3\n    title: Second copy\n    satisfies: [UN-1]\n"
+    write(tmp_path, "req/model.yaml", MODEL.replace("risks:\n", dup.replace("REQ-3", "REQ-X") + "risks:\n"))
+    path = tmp_path / "req/model.yaml"
+    path.write_text(path.read_text().replace("REQ-X", "REQ-3"))
+    ws = Workspace(root=str(tmp_path), model_paths=["req"], scan=False)
+    assert any("duplicate id REQ-3" in e for e in ws.model.parse_errors)
+    ws.delete("REQ-3")  # no force needed: the id stays defined, MIT-1 keeps its reference
+    assert ws.model.get("REQ-3").title == "Second copy" and not ws.model.parse_errors
+    assert ws.model.mitigations["MIT-1"].implemented_by == ("REQ-3",)
+    # or rename one copy: references follow the renamed (first) copy, as they resolved
+    path.write_text(path.read_text().replace("risks:\n", dup.replace("Second", "Third") + "risks:\n"))
+    ws.rename("REQ-3", "REQ-30")
+    assert ws.model.get("REQ-30").title == "Second copy" and ws.model.get("REQ-3").title == "Third copy"
+    assert ws.model.mitigations["MIT-1"].implemented_by == ("REQ-30",) and not ws.model.parse_errors
+
+
+def test_second_object_of_a_kind_gets_its_own_file(tmp_path):
+    write(tmp_path, "m/un/UN-1.yaml", "kind: user_need\nid: UN-1\ntitle: n\n")
+    write(tmp_path, "m/objs/multi.yaml", "kind: test_method\nid: TM-1\ntitle: t\nlevel: sil\n")
+    ws = Workspace(root=str(tmp_path), model_paths=["m"], scan=False)
+    assert ws.file_for_new("user_need") == "m/un"
+    ws.create("user_need", {"title": "second"})
+    assert (tmp_path / "m/un/UN-2.yaml").exists()
+    # naming an existing one-object file adds a document to it
+    ws.create("test_method", {"title": "u", "level": "hil"}, file="m/objs/multi.yaml")
+    assert "---\nkind: test_method\nid: TM-2\n" in (tmp_path / "m/objs/multi.yaml").read_text()
+    # a folder target whose file for the new id is taken (by another object) is a conflict
+    write(tmp_path, "m/un/UN-9.yaml", "kind: user_need\nid: UN-8\ntitle: misnamed\n")
+    with pytest.raises(WorkspaceError, match="already exists") as exc:
+        ws.create("user_need", {"id": "UN-9", "title": "x"}, file="m/un")
+    assert exc.value.status == 409
+
+
+def test_history_reads_the_files_the_working_tree_reads(repo):
+    write(repo, "req/.drafts/wip.yaml", "requirements: [{id: REQ-99, title: draft, satisfies: [UN-1]}]\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "drafts")
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    assert ws.model.get("REQ-99") is None and ws.model_at("HEAD").get("REQ-99") is None
+    assert ws.diff("HEAD") == []
