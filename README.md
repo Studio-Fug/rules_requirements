@@ -1,6 +1,8 @@
 # rules_requirements
 
 [![CI](https://github.com/Studio-Fug/rules_requirements/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/Studio-Fug/rules_requirements/actions/workflows/ci.yaml)
+[![Docs](https://github.com/Studio-Fug/rules_requirements/actions/workflows/docs.yaml/badge.svg?branch=main)](https://studio-fug.github.io/rules_requirements/)
+[![Coverage](https://img.shields.io/endpoint?url=https://studio-fug.github.io/rules_requirements/badges/coverage.json)](https://github.com/Studio-Fug/rules_requirements/actions/workflows/docs.yaml)
 [![License: AGPL v3+](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue.svg)](LICENSE)
 [![Bazel 7 | 8](https://img.shields.io/badge/bazel-7.x%20%7C%208.x-43a047?logo=bazel)](MODULE.bazel)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9%2B-3776ab?logo=python&logoColor=white)](pyproject.toml)
@@ -21,6 +23,10 @@ The vocabulary follows the design-control and risk-management structure of
 **IEC 62304** (medical device software life cycle), **ISO 14971** (risk
 management) and **IEC 60601-1** §14 (programmable electrical medical systems),
 kept generic enough for any product that wants an auditable V&V argument.
+
+**Documentation: <https://studio-fug.github.io/rules_requirements/>** — concepts,
+a tutorial, the standards background, and the model, hooks, Bazel and CLI
+reference.
 
 ## Features
 
@@ -163,9 +169,10 @@ rr report --model requirements/ --evidence results.xml --html report.html
 ## Development
 
 ```sh
-pip install -e ".[test]" && pytest --cov      # unit tests + coverage
+pip install -e ".[test]" && coverage run -m pytest && coverage report   # unit tests + coverage
 bazel test //...                              # everything, including the hook integration goldens
 pre-commit run --all-files                    # lints (ruff, mypy, buildifier, codespell, SPDX headers)
+pip install -r docs/requirements.txt && python -m sphinx -W -n -b html docs docs/_build/html  # docs
 ```
 
 ## License
