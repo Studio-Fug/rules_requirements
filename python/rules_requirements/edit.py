@@ -615,7 +615,10 @@ def _scalar_ranges(text: str) -> list[tuple[int, int]]:
 
     def walk(node: yaml.Node) -> None:
         if isinstance(node, yaml.ScalarNode):
-            ranges.append((node.start_mark.index, node.end_mark.index))
+            start = node.start_mark.index
+            if node.style in ("|", ">"):  # a comment may follow the header: content starts below it
+                start = _line_end(text, start)
+            ranges.append((start, max(start, node.end_mark.index)))
         elif isinstance(node, yaml.SequenceNode):
             for child in node.value:
                 walk(child)
@@ -691,10 +694,40 @@ def _problems(messages: Any, aliases: Mapping[str, str]) -> list[str]:
     return sorted(out)
 
 
-def _owner(msg: str) -> tuple[str, str]:
-    """(entity id, rest) of an ``"<id>: ..."`` problem message ("" if none)."""
-    head, sep, rest = msg.partition(": ")
-    return (head, rest) if sep and " " not in head else ("", msg)
+def _canon(value: Any) -> str:
+    """A comparable rendering of a plain YAML value (types included)."""
+    if isinstance(value, Mapping):
+        items = sorted(value.items(), key=lambda kv: repr(kv[0]))
+        return "{" + ", ".join(f"{_canon(k)}: {_canon(v)}" for k, v in items) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_canon(v) for v in value) + "]"
+    return repr(value)
+
+
+def _extras(text: str, aliases: Mapping[str, str]) -> list[tuple[str, str, str]]:
+    """(owner, key, value) of everything the model does not turn into entity
+    data: each top-level key of a section document other than the sections,
+    and each key of an entity that its kind does not define. Owners are
+    entity ids (renamed ids mapped back to their old ones), "" for top level."""
+    out = []
+    for doc in yaml.safe_load_all(text):
+        if not isinstance(doc, Mapping):
+            continue
+        if "kind" in doc:
+            kind = cfg.KIND_BY_SECTION.get(str(doc["kind"]), str(doc["kind"]))
+            owner = str(doc.get("id", ""))
+            out += [(owner, str(k), _canon(v)) for k, v in doc.items() if k != "kind" and k not in FIELDS.get(kind, ())]
+            continue
+        for key, value in doc.items():
+            section_kind = cfg.KIND_BY_SECTION.get(key)
+            if section_kind is None:
+                out.append(("", str(key), _canon(value)))
+                continue
+            for item in value if isinstance(value, list) else ():
+                if isinstance(item, Mapping):
+                    owner = str(item.get("id", ""))
+                    out += [(owner, str(k), _canon(v)) for k, v in item.items() if k not in FIELDS[section_kind]]
+    return [(aliases.get(owner, owner), key, value) for owner, key, value in out]
 
 
 def verify(
@@ -709,10 +742,10 @@ def verify(
     ``expect`` maps entity ids to their intended data (``None`` = removed; a
     ``kind`` key pins the entity kind). Every other entity, the configuration
     and the project metadata must read back unchanged; the edit must not add
-    parse errors; keys this model does not define must survive (except inside
-    removed entities); and no comment may disappear except from removed
-    entities and from the fields the edit changes. ``aliases`` maps renamed ids
-    (new -> old). Raises :class:`EditError` otherwise — the caller then leaves
+    parse errors; top-level keys and keys this model does not define must keep
+    their values (except inside removed entities); and no comment may
+    disappear except from removed entities and from the fields the edit
+    changes. ``aliases`` maps renamed ids (new -> old). Raises :class:`EditError` otherwise — the caller then leaves
     the file untouched.
     """
     aliases = aliases or {}
@@ -724,21 +757,16 @@ def verify(
         raise EditError("the edit would introduce model errors: " + "; ".join(dict.fromkeys(fresh[:3])))
     renamed = set(aliases.values())
     removed = {eid for eid, want in expect.items() if want is None and eid not in renamed}
-    edited = {aliases.get(eid, eid) for eid, want in expect.items() if want is not None}
-
-    # Unknown keys must survive, except inside removed entities; those inside
-    # notes / verified_by items of edited entities are part of their data.
-    def keep(msg: str) -> bool:
-        owner, rest = _owner(msg)
-        return owner not in removed and not (owner in edited and rest.startswith(("notes[", "verified_by[")))
-
-    old_u = [m for m in _problems(old.unknown_fields, aliases) if keep(m)]
-    new_u = [m for m in _problems(new.unknown_fields, aliases) if keep(m)]
-    if old_u != new_u:
-        lost = [m for m in old_u if old_u.count(m) > new_u.count(m)]
-        raise EditError(
-            f"the edit would {f'lose {lost[0]}' if lost else 'introduce unknown fields'}; refusing to write"
-        )
+    # Everything the model does not turn into entity data (top-level keys such
+    # as config / project / schema_version, and keys of an entity the model
+    # does not define) must survive with its value, except inside removed
+    # entities. (Keys inside notes / verified_by items are entity data.)
+    old_x = sorted(x for x in _extras(old_text, aliases) if x[0] not in removed)
+    new_x = sorted(x for x in _extras(new_text, aliases) if x[0] not in removed)
+    if old_x != new_x:
+        diff = [x for x in old_x if x not in new_x] or [x for x in new_x if x not in old_x]
+        owner, key, _ = diff[0]
+        raise EditError(f"the edit would change {f'{owner} ' if owner else ''}{key!r}; refusing to write")
     old_ents = {e.id: e for e in old.entities()}
     new_ents = {e.id: e for e in new.entities()}
     for eid in sorted(set(old_ents) | set(new_ents) | set(expect)):

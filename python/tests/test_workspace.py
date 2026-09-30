@@ -316,7 +316,8 @@ def test_a_failed_write_changes_nothing(repo, monkeypatch):
     monkeypatch.setattr(os, "replace", flaky)
     with pytest.raises(WorkspaceError, match="Permission denied") as exc:
         ws.rename("REQ-3", "REQ-30")
-    assert exc.value.status == 500 and len(calls) == 2
+    assert exc.value.status == 500 and "nothing was changed" in str(exc.value)
+    assert len(calls) == 3  # two moves into place (the second fails), one restore
     assert {p: (repo / "req" / p).read_bytes() for p in before} == before
     assert not [f for f in os.listdir(repo / "req") if f.startswith(".rr-")]
 
@@ -365,3 +366,40 @@ def test_rename_with_move_keeps_the_file_mode(tmp_path):
     ws.rename("UN-1", "UN-7")
     assert not (tmp_path / "m/UN-1.yaml").exists()
     assert oct(os.stat(tmp_path / "m/UN-7.yaml").st_mode & 0o777) == "0o640"
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores file modes")
+def test_read_only_files_and_folders_are_refused_up_front(tmp_path):
+    write(tmp_path, "m/un.yaml", "user_needs: [{id: UN-1, title: n}]\n")
+    write(tmp_path, "m/risks/RISK-1.yaml", "kind: risk\nid: RISK-1\ntitle: r\nseverity: high\nlikelihood: rare\n")
+    write(
+        tmp_path,
+        "m/mit.yaml",
+        "mitigations:\n  - id: MIT-1\n    title: m\n    mitigates: [RISK-1]\n    implemented_by: [REQ-1]\n",
+    )
+    write(tmp_path, "m/reqs/REQ-1.yaml", "kind: requirement\nid: REQ-1\ntitle: r\nsatisfies: [UN-1]\n")
+    ws = Workspace(root=str(tmp_path), model_paths=["m"], scan=False)
+    snapshot = {p: p.read_bytes() for p in (tmp_path / "m").rglob("*.yaml")}
+    os.chmod(tmp_path / "m/mit.yaml", 0o444)
+    try:
+        with pytest.raises(WorkspaceError, match=r"m/mit\.yaml is read-only") as exc:
+            ws.delete("REQ-1", force=True)
+        assert exc.value.status == 403
+        os.chmod(tmp_path / "m/mit.yaml", 0o644)
+        os.chmod(tmp_path / "m/reqs", 0o555)
+        with pytest.raises(WorkspaceError, match="m/reqs/ is not writable"):
+            ws.delete("REQ-1", force=True)
+    finally:
+        os.chmod(tmp_path / "m/reqs", 0o755)
+        os.chmod(tmp_path / "m/mit.yaml", 0o644)
+    assert {p: p.read_bytes() for p in (tmp_path / "m").rglob("*.yaml")} == snapshot
+
+
+def test_new_files_never_touch_the_process_umask(repo, monkeypatch):
+    def forbidden(_mask):
+        raise AssertionError("os.umask changes the umask of every thread")
+
+    monkeypatch.setattr(os, "umask", forbidden)
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    ws.create("user_need", {"title": "N"}, file="req/more/UN-9.yaml")
+    assert (repo / "req/more/UN-9.yaml").exists()

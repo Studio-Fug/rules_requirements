@@ -639,7 +639,7 @@ class _Transaction:
             writes.append((dst, data, _mode(src) if dst != src else None))
             if dst != src:
                 removes.append(src)
-        _write_all(writes, removes)
+        _write_all(writes, removes, self.ws.root)
 
 
 def with_line_endings(orig: str, text: str) -> str:
@@ -663,19 +663,43 @@ def with_line_endings(orig: str, text: str) -> str:
     return "".join(line + ("\r\n" if c else "\n") for line, c in zip(new[:-1], use)) + new[-1]
 
 
+def _umask() -> int:
+    """The process umask, read without changing it (``os.umask`` sets it for
+    every thread, including git subprocesses started meanwhile)."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("Umask:"):
+                    return int(line.split()[1], 8)
+    except (OSError, ValueError):
+        pass
+    return 0o022
+
+
 def _mode(path: str) -> int:
     try:
         return os.stat(path).st_mode & 0o7777
     except FileNotFoundError:
-        umask = os.umask(0)
-        os.umask(umask)
-        return 0o666 & ~umask
+        return 0o666 & ~_umask()
 
 
-def _write_all(writes: list[tuple[str, str, int | None]], removes: list[str]) -> None:
-    """Replace, create and remove files as one unit: stage every new content
-    in a temporary file next to its target, then move them all into place and
-    remove files; on any failure, restore what was already changed."""
+def _write_all(writes: list[tuple[str, str, int | None]], removes: list[str], root: str) -> None:
+    """Replace, create and remove files as one unit: refuse what cannot be
+    written, stage every new content in a temporary file next to its target,
+    then move them all into place and remove files; on a failure part-way,
+    restore every file already changed."""
+
+    def show(path: str) -> str:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+
+    for path, _, _ in writes:
+        if os.path.exists(path) and not os.access(path, os.W_OK):
+            raise WorkspaceError(f"{show(path)} is read-only", 403)
+    for folder in {os.path.dirname(p) for p, _, _ in writes} | {os.path.dirname(p) for p in removes}:
+        while not os.path.isdir(folder) and os.path.dirname(folder) != folder:
+            folder = os.path.dirname(folder)  # to be created: its first existing ancestor
+        if not os.access(folder, os.W_OK | os.X_OK):
+            raise WorkspaceError(f"{show(folder)}/ is not writable", 403)
     staged: list[tuple[str, str]] = []  # (temporary file, target)
     try:
         for path, data, mode in writes:
@@ -687,28 +711,24 @@ def _write_all(writes: list[tuple[str, str, int | None]], removes: list[str]) ->
             os.chmod(tmp, _mode(path) if mode is None else mode)
     except OSError as exc:
         _discard(tmp for tmp, _ in staged)
-        raise WorkspaceError(f"could not write {exc.filename or 'a model file'}: {exc.strerror or exc}", 500) from exc
+        raise WorkspaceError(f"could not write {show(exc.filename or root)}: {exc.strerror or exc}", 500) from exc
     backups: list[tuple[str, bytes | None, int]] = []  # (path, previous content or None, mode)
     try:
-        for tmp, path in staged:
-            backups.append(_backup(path))
+        for tmp, path in staged:  # a backup counts once its file has changed
+            backup = _backup(path)
             os.replace(tmp, path)
+            backups.append(backup)
         for path in removes:
-            backups.append(_backup(path))
+            backup = _backup(path)
             os.remove(path)
+            backups.append(backup)
     except OSError as exc:
-        for path, content, mode in reversed(backups):
-            try:
-                if content is None:
-                    os.remove(path)
-                else:
-                    with open(path, "wb") as fh:
-                        fh.write(content)
-                    os.chmod(path, mode)
-            except OSError:
-                pass
+        failed = _restore(backups)
         _discard(tmp for tmp, _ in staged)
-        raise WorkspaceError(f"could not write {exc.filename or 'a model file'}: {exc.strerror or exc}", 500) from exc
+        msg = f"could not write {show(exc.filename or root)}: {exc.strerror or exc}; nothing was changed"
+        if failed:
+            msg = msg.replace("nothing was changed", "could not restore " + ", ".join(map(show, failed)))
+        raise WorkspaceError(msg, 500) from exc
 
 
 def _backup(path: str) -> tuple[str, bytes | None, int]:
@@ -717,6 +737,29 @@ def _backup(path: str) -> tuple[str, bytes | None, int]:
             return path, fh.read(), _mode(path)
     except FileNotFoundError:
         return path, None, 0
+
+
+def _restore(backups: list[tuple[str, bytes | None, int]]) -> list[str]:
+    """Put back files as they were (the way they were changed: through a
+    temporary file, so a read-only file restores too); returns failures."""
+    failed = []
+    for path, content, mode in reversed(backups):
+        tmp = ""
+        try:
+            if content is None:
+                if os.path.exists(path):
+                    os.remove(path)
+                continue
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rr-", suffix=".tmp")
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(content)
+            os.chmod(tmp, mode)
+            os.replace(tmp, path)
+        except OSError:
+            failed.append(path)
+            if tmp:
+                _discard([tmp])
+    return failed
 
 
 def _discard(paths: Iterable[str]) -> None:

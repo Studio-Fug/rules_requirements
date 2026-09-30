@@ -79,3 +79,10 @@ def test_parse_config_not_a_mapping():
     errors: list[str] = []
     assert parse_config(["x"], errors) == Config()  # type: ignore[arg-type]
     assert errors == ["config: must be a mapping"]
+
+
+def test_unquoted_off_is_off():
+    # YAML 1.1 reads `unknown-field: off` as false.
+    errors: list[str] = []
+    config = parse_config({"rules": {"unknown-field": False}}, errors)
+    assert not errors and config.rules["unknown-field"] == "off"

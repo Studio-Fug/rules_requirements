@@ -211,7 +211,7 @@ def test_verify_catches_collateral_changes_and_tolerates_line_shifts():
         edit.verify(text, text.replace("two", "TWO"), {})
     with pytest.raises(edit.EditError, match="introduce model errors"):
         edit.verify(text, text + "  - id: REQ-1\n    title: dup\n", {})
-    with pytest.raises(edit.EditError, match="unknown fields"):
+    with pytest.raises(edit.EditError, match=r"change REQ-1 .flavour."):
         edit.verify(text, text.replace("title: one", "title: one\n    flavour: x"), {})
     with pytest.raises(edit.EditError, match="not be valid YAML"):
         edit.verify(text, "requirements: [\n", {})
@@ -290,7 +290,7 @@ def test_verify_sees_lost_custom_fields_comments_and_wrong_kinds():
         "config: {rules: {unknown-field: warning}}\nrequirements:\n  - id: REQ-1\n    title: one  # keep\n    jira: A\n"
     )
     same = {"REQ-1": {"id": "REQ-1", "title": "one"}}
-    with pytest.raises(edit.EditError, match="lose"):
+    with pytest.raises(edit.EditError, match=r"change REQ-1 .jira."):
         edit.verify(text, text.replace("    jira: A\n", ""), same)
     with pytest.raises(edit.EditError, match="comment"):
         edit.verify(text, text.replace("  # keep", ""), same)
@@ -330,3 +330,43 @@ def test_deleting_a_document_keeps_the_others():
     assert parse(out).project["name"] == "P" and not edit.is_blank(out)
     alone = "# SPDX header\nkind: requirement\nid: REQ-1\ntitle: one\n"
     assert edit.is_blank(edit.delete_entity(alone, "REQ-1"))
+
+
+# --- third review round -------------------------------------------------------------
+
+
+def test_comments_on_block_scalar_headers_count():
+    text = (
+        "base: &b\n  owner: qa\n"
+        "requirements:\n"
+        "  - <<: *b\n    id: REQ-1\n    title: one\n"
+        "    description: >-  # wording agreed with QA, do not change\n      Folded text.\n"
+        "  - id: REQ-2\n    title: two\n"
+        "    rationale: |  # keep\n      Literal text.\n"
+    )
+    assert [c for _, c in edit._comments(text)] == ["# wording agreed with QA, do not change", "# keep"]
+    with pytest.raises(edit.EditError, match="comments"):
+        edit.update_entity(text, "REQ-1", {"id": "REQ-1", "title": "uno", "owner": "qa", "description": "Folded text."})
+    with pytest.raises(edit.EditError, match="# keep"):
+        edit.verify(text, text.replace("|  # keep", "|"), {})
+    # changing the field itself may drop its header comment; other edits keep it
+    two = {"id": "REQ-2", "title": "two", "rationale": "Literal text."}
+    out = edit.update_entity(text, "REQ-2", {**two, "title": "TWO"})
+    edit.verify(text, out, {"REQ-2": {**two, "title": "TWO"}})
+    assert "|  # keep" in out
+    out = edit.update_entity(text, "REQ-2", {**two, "rationale": "New."})
+    edit.verify(text, out, {"REQ-2": {**two, "rationale": "New."}})
+
+
+def test_verify_compares_the_values_of_keys_the_model_does_not_define():
+    text = (
+        "schema_version: 2\n"
+        "config: {rules: {unknown-field: warning}}\n"
+        "requirements:\n  - id: REQ-1\n    title: one\n    jira: ABC-1\n"
+    )
+    for old, new in (("ABC-1", "EVIL-9"), ("schema_version: 2", "schema_version: 3"), ("warning", "off")):
+        with pytest.raises(edit.EditError, match="refusing"):
+            edit.verify(text, text.replace(old, new), {})
+    # a rename keeps them under the new id
+    renamed = text.replace("id: REQ-1", "id: REQ-10")
+    edit.verify(text, renamed, {"REQ-1": None, "REQ-10": {"id": "REQ-10", "title": "one"}}, aliases={"REQ-10": "REQ-1"})
