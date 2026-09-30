@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""`bazel run //:thermostat -- --setpoint 21.5 19.0 20.8 22.1`"""
+"""`bazel run //:thermostat_cli -- --setpoint 21.5 19.0 20.8 22.1`"""
 
 from __future__ import annotations
 

@@ -239,6 +239,7 @@
       "title": "Reject setpoints outside 5-30 \u00b0C",
       "status": "VERIFIED",
       "description": "The panel shall reject any setpoint that converts to below 5 \u00b0C or above 30 \u00b0C.",
+      "category": "safety",
       "evidence": [
         {
           "name": "tests.test_controller::test_accepts_range_limits",
@@ -358,6 +359,7 @@
       "title": "Independent over-temperature cutoff",
       "status": "VERIFIED",
       "description": "The interlock shall force the heater off at or above 35 \u00b0C regardless of the controller, and keep it off until the temperature falls below 30 \u00b0C.",
+      "category": "safety",
       "evidence": [
         {
           "name": "Interlock::NanReadingTrips",
@@ -436,6 +438,7 @@
       "title": "Fail safe on an invalid sensor reading",
       "status": "VERIFIED",
       "description": "The controller shall turn the heater off when the reading is not a number or outside the sensor's -40..85 \u00b0C range.",
+      "category": "safety",
       "evidence": [
         {
           "name": "tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
