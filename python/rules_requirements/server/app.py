@@ -344,10 +344,25 @@ class Api:
     def apply_finding(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         """Elevate a finding: a note on its entity, or the proposed object."""
         body = _obj(body)
-        _, finding = self.jobs.finding(params["finding"])
-        if finding.status != "open":
-            raise HttpError(409, f"finding {finding.id} is already {finding.status}")
         action = str(body.get("action", "note"))
+        if action not in ("note", "create", "update"):
+            raise HttpError(400, f"unknown action {action!r}")
+        # Claim it first, so that a double-click applies it once.
+        try:
+            finding = self.jobs.transition(params["finding"], ("open",), "applying")
+        except KeyError as exc:
+            raise HttpError(404, f"no finding {params['finding']}") from exc
+        except ValueError as exc:
+            raise HttpError(409, f"finding {params['finding']} is already {exc}") from exc
+        try:
+            result = self._apply(finding, action, body, params)
+        except BaseException:
+            finding.status = "open"
+            raise
+        finding.status = "applied"
+        return {"finding": finding.to_dict(), **result}
+
+    def _apply(self, finding: Any, action: str, body: dict[str, Any], params: dict[str, str]) -> dict[str, Any]:
         author = f"rr-agent/{finding.workflow}" if finding.source == "llm" else (self._author(params) or "rr")
         if action == "note":
             target = str(body.get("entity") or finding.entity)
@@ -356,8 +371,7 @@ class Api:
             kind = str(body.get("kind", "gap"))
             text = str(body.get("text") or (finding.title + (f"\n\n{finding.detail}" if finding.detail else "")))
             self.ws.add_note(target, text, kind if kind in NOTE_KINDS else "gap", author=author)
-            finding.status = "applied"
-            return {"finding": finding.to_dict(), "entity": entity_payload(self.ws, target)}
+            return {"entity": entity_payload(self.ws, target)}
         if action in ("create", "update"):
             proposal = finding.proposal or {}
             data = _obj(body.get("data")) or dict(proposal.get("data", {}))
@@ -374,13 +388,16 @@ class Api:
                 eid = target
             else:
                 eid = self.ws.create(kind, data, str(body.get("file", "")))
-            finding.status = "applied"
-            return {"finding": finding.to_dict(), "entity": entity_payload(self.ws, eid)}
+            return {"entity": entity_payload(self.ws, eid)}
         raise HttpError(400, f"unknown action {action!r}")
 
     def dismiss_finding(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        _, finding = self.jobs.finding(params["finding"])
-        finding.status = "dismissed"
+        try:
+            finding = self.jobs.transition(params["finding"], ("open", "dismissed"), "dismissed")
+        except KeyError as exc:
+            raise HttpError(404, f"no finding {params['finding']}") from exc
+        except ValueError as exc:
+            raise HttpError(409, f"finding {params['finding']} is already {exc}") from exc
         return finding.to_dict()
 
 
@@ -545,7 +562,7 @@ def serve(
     thread.start()
     if ready:
         shown = "localhost" if host in ("127.0.0.1", "0.0.0.0", "::") else host  # noqa: S104
-        ready(f"http://{shown}:{httpd.server_address[1]}/")
+        ready(f"http://{f'[{shown}]' if ':' in shown else shown}:{httpd.server_address[1]}/")
     return httpd
 
 

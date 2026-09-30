@@ -61,6 +61,9 @@ class Note:
     author: str = ""
     created: str = ""  # ISO date
     id: str = ""  # stable within its object, e.g. "n1"
+    # Keys this model does not define, kept so that rewriting a note list never
+    # loses them (they are also reported under the ``unknown-field`` rule).
+    extra: tuple[tuple[str, Any], ...] = ()
 
 
 NOTE_KINDS = ("comment", "gap", "question", "todo")
@@ -74,6 +77,7 @@ class VerifiedBy:
 
     target: str
     level: str = ""  # "" -> config.default_provided_level
+    extra: tuple[tuple[str, Any], ...] = ()  # unknown keys, kept for round-trips
 
 
 @dataclass(frozen=True)
@@ -374,7 +378,10 @@ def _as_tuple(value: Any) -> tuple[str, ...]:
     return (str(value),)
 
 
-def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
+_NOTE_KEYS = ("id", "text", "kind", "status", "author", "created")
+
+
+def _parse_notes(raw: Any, where: str, errors: list[str], unknown: list[str] | None = None) -> tuple[Note, ...]:
     if raw is None:
         return ()
     if not isinstance(raw, list):
@@ -399,6 +406,10 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
             errors.append(f"{where}: notes[{i}].kind must be one of {NOTE_KINDS}")
         if status not in NOTE_STATUSES:
             errors.append(f"{where}: notes[{i}].status must be one of {NOTE_STATUSES}")
+        extra = tuple((str(k), v) for k, v in item.items() if k not in _NOTE_KEYS)
+        for key, _ in extra:
+            if unknown is not None:
+                unknown.append(f"{where}: notes[{i}]: unknown field {key!r}")
         nid = str(item.get("id", "") or "")
         if not nid:
             k = i + 1
@@ -414,31 +425,46 @@ def _parse_notes(raw: Any, where: str, errors: list[str]) -> tuple[Note, ...]:
                 author=str(item.get("author", "")),
                 created=str(item.get("created", "")),
                 id=nid,
+                extra=extra,
             )
         )
     return tuple(notes)
 
 
-def _parse_verified_by(raw: Any, where: str, errors: list[str]) -> tuple[VerifiedBy, ...]:
+def _parse_verified_by(
+    raw: Any, where: str, errors: list[str], unknown: list[str] | None = None
+) -> tuple[VerifiedBy, ...]:
     if raw is None:
         return ()
     items = raw if isinstance(raw, list) else [raw]
     out = []
-    for item in items:
+    for i, item in enumerate(items):
         if isinstance(item, str):
             out.append(VerifiedBy(target=item))
         elif isinstance(item, Mapping) and item.get("target"):
-            out.append(VerifiedBy(target=str(item["target"]), level=str(item.get("level", ""))))
+            extra = tuple((str(k), v) for k, v in item.items() if k not in ("target", "level"))
+            for key, _ in extra:
+                if unknown is not None:
+                    unknown.append(f"{where}: verified_by[{i}]: unknown field {key!r}")
+            out.append(VerifiedBy(target=str(item["target"]), level=str(item.get("level", "")), extra=extra))
         else:
             errors.append(f"{where}: verified_by items must be a label or {{target, level}}")
     return tuple(out)
 
 
 def parse_entity(
-    kind: str, raw: Mapping[str, Any], location: Location, errors: list[str], unknown: list[str]
+    kind: str,
+    raw: Mapping[str, Any],
+    location: Location,
+    errors: list[str],
+    unknown: list[str],
+    nested: list[str] | None = None,
 ) -> Entity | None:
     """Build one entity from its YAML mapping. Shape errors go to ``errors``,
-    unknown keys to ``unknown`` (reported under the ``unknown-field`` rule)."""
+    unknown keys to ``unknown`` (reported under the ``unknown-field`` rule);
+    unknown keys inside notes and ``verified_by`` items go to ``nested`` if
+    given, else to ``unknown`` (they are kept on the item either way)."""
+    nested = unknown if nested is None else nested
     where = f"{location}"
     if not isinstance(raw, Mapping):
         errors.append(f"{where}: {cfg.SECTIONS[kind]} entries must be mappings")
@@ -461,7 +487,7 @@ def parse_entity(
         status=str(raw.get("status", "") or "").strip(),
         owner=str(raw.get("owner", "") or "").strip(),
         tags=_as_tuple(raw.get("tags")),
-        notes=_parse_notes(raw.get("notes"), where, errors),
+        notes=_parse_notes(raw.get("notes"), where, errors, nested),
         location=location,
     )
 
@@ -478,7 +504,7 @@ def parse_entity(
             satisfies=_as_tuple(raw.get("satisfies")),
             refines=_as_tuple(raw.get("refines")),
             method=text("method"),
-            verified_by=_parse_verified_by(raw.get("verified_by"), where, errors),
+            verified_by=_parse_verified_by(raw.get("verified_by"), where, errors, nested),
             modules=_as_tuple(raw.get("modules")),
         )
     if kind == cfg.RISK:

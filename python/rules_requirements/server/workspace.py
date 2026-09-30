@@ -9,6 +9,7 @@ resolving outside it (or into ``.git``) is refused.
 from __future__ import annotations
 
 import datetime as _dt
+import difflib
 import hashlib
 import json
 import os
@@ -123,44 +124,16 @@ class Workspace:
 
     # ------------------------------------------------------------------ edits
 
-    def _load(self, rel: str) -> tuple[str, bool]:
-        """(LF-normalised text, whether the file uses CRLF); "" for a new file."""
+    def _load(self, rel: str) -> str | None:
+        """The file's text exactly as stored (None if it does not exist)."""
         try:
             with open(self.abspath(rel), encoding="utf-8", newline="") as fh:
-                raw = fh.read()
+                return fh.read()
         except FileNotFoundError:
-            return "", False
-        return raw.replace("\r\n", "\n"), "\r\n" in raw
+            return None
 
     def _read(self, rel: str) -> str:
-        return self._load(rel)[0]
-
-    def _write(self, rel: str, text: str, crlf: bool = False) -> None:
-        """Atomically replace ``rel`` (keeping its mode and line endings)."""
-        path = self.abspath(rel)
-        data = text.replace("\n", "\r\n") if crlf else text
-        try:
-            with open(path, encoding="utf-8", newline="") as fh:
-                if fh.read() == data:
-                    return  # unchanged: leave the file (and its mtime) alone
-            mode: int | None = os.stat(path).st_mode & 0o7777
-        except FileNotFoundError:
-            mode = None
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rr-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-                fh.write(data)
-            if mode is None:
-                umask = os.umask(0)
-                os.umask(umask)
-                mode = 0o666 & ~umask
-            os.chmod(tmp, mode)
-            os.replace(tmp, path)
-        except BaseException:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-            raise
+        return (self._load(rel) or "").replace("\r\n", "\n")
 
     def _txn(self) -> _Transaction:
         return _Transaction(self)
@@ -208,6 +181,18 @@ class Workspace:
     def _covered(self, rel: str) -> bool:
         return any(rel == p or rel.startswith(p.rstrip("/") + "/") for p in self.model_paths)
 
+    def _loadable(self, rel: str) -> bool:
+        """Whether the model loader would read ``rel`` (see ``model_files``):
+        a model path itself, or a YAML file under a model directory that is
+        not inside a dot-directory."""
+        for p in self.model_paths:
+            if rel == p:
+                return True
+            sub = rel if p == "." else rel[len(p) + 1 :] if rel.startswith(p.rstrip("/") + "/") else ""
+            if sub and rel.endswith((".yaml", ".yml")) and not any(x.startswith(".") for x in sub.split("/")[:-1]):
+                return True
+        return False
+
     def create(self, kind: str, data: Mapping[str, Any], file: str = "") -> str:
         if kind not in cfg.KINDS:
             raise WorkspaceError(f"unknown kind {kind!r}")
@@ -224,16 +209,20 @@ class Workspace:
             target = self._rel(file) if file else self.file_for_new(kind)
             if not target.endswith((".yaml", ".yml", ".json")):
                 target = f"{target}/{ent.id}.yaml"
-            if not self._covered(target):
-                raise WorkspaceError(f"{target} is not part of the model paths {self.model_paths}")
+            if not self._loadable(target):
+                raise WorkspaceError(
+                    f"{target} would not be read as part of the model (model paths: {', '.join(self.model_paths)};"
+                    " files in dot-directories are skipped)"
+                )
             txn = self._txn()
             exists = os.path.exists(self.abspath(target))
+            want = {ent.id: {**data, "kind": kind}}
             if exists and not self._single_object(target):
-                txn.edit(target, lambda text: edit.insert_entity(text, kind, edit.entity_to_dict(ent)), {ent.id: data})
+                txn.edit(target, lambda text: edit.insert_entity(text, kind, edit.entity_to_dict(ent)), want)
             elif exists:
                 raise WorkspaceError(f"{target} already exists", 409)
             else:
-                txn.edit(target, lambda _text: edit.render_file(kind, edit.entity_to_dict(ent)), {ent.id: data})
+                txn.edit(target, lambda _text: edit.render_file(kind, edit.entity_to_dict(ent)), want)
             txn.commit()
             return ent.id
 
@@ -263,7 +252,7 @@ class Workspace:
             txn.edit(
                 ent.location.path,
                 lambda t: edit.update_entity(t, entity_id, edit.entity_to_dict(new)),
-                {entity_id: data},
+                {entity_id: {**data, "kind": ent.kind}},
             )
             txn.commit()
 
@@ -290,7 +279,11 @@ class Workspace:
                 data.pop("method")
             else:
                 data["method"] = new
-        txn.edit(holder.location.path, lambda t: edit.update_entity(t, holder_id, data), {holder_id: data})
+        txn.edit(
+            holder.location.path,
+            lambda t: edit.update_entity(t, holder_id, data),
+            {holder_id: {**data, "kind": holder.kind}},
+        )
 
     def delete(self, entity_id: str, force: bool = False) -> None:
         with self._lock:
@@ -304,11 +297,8 @@ class Workspace:
             txn = self._txn()
             for ref_id in dict.fromkeys(i for i, _ in refs):
                 self._retarget(txn, ref_id, entity_id, None)
-            rel = ent.location.path
-            if self._single_object(rel) and len([e for e in self.model.entities() if e.location.path == rel]) == 1:
-                txn.remove(rel, {entity_id: None})
-            else:
-                txn.edit(rel, lambda t: edit.delete_entity(t, entity_id), {entity_id: None})
+            # A file left with no content at all (a one-object file) is removed.
+            txn.edit(ent.location.path, lambda t: edit.delete_entity(t, entity_id), {entity_id: None})
             txn.commit()
 
     def rename(self, old_id: str, new_id: str) -> list[str]:
@@ -332,7 +322,9 @@ class Workspace:
             data = {**edit.entity_to_dict(ent), "id": new_id}
             rel = ent.location.path
             txn.aliases[new_id] = old_id
-            txn.edit(rel, lambda t: edit.update_entity(t, old_id, data), {old_id: None, new_id: data})
+            txn.edit(
+                rel, lambda t: edit.update_entity(t, old_id, data), {old_id: None, new_id: {**data, "kind": ent.kind}}
+            )
             base, ext = os.path.splitext(os.path.basename(rel))
             if base == old_id and self._single_object(rel):
                 txn.move(rel, os.path.join(os.path.dirname(rel), new_id + ext).replace(os.sep, "/"))
@@ -354,7 +346,7 @@ class Workspace:
             self.update(entity_id, edit.entity_to_dict(replace(ent, notes=(*ent.notes, note))))
             return nid
 
-    def update_note(self, entity_id: str, note_id: str, **changes: str) -> None:
+    def update_note(self, entity_id: str, note_id: str, **changes: Any) -> None:
         with self._lock:
             ent = self.model.get(entity_id)
             if ent is None:
@@ -585,16 +577,17 @@ class _Transaction:
 
     Every edited file is re-parsed and checked with :func:`edit.verify`
     (exactly the intended entities changed, nothing else); only if every file
-    passes is anything written.
+    passes is anything written, and the writes themselves are all-or-nothing:
+    every new file is staged first, then all are moved into place, and a
+    failure part-way restores the files already replaced.
     """
 
     def __init__(self, ws: Workspace):
         self.ws = ws
-        self.texts: dict[str, str] = {}
-        self.orig: dict[str, str] = {}
-        self.crlf: dict[str, bool] = {}
+        self.texts: dict[str, str] = {}  # LF-normalised, as edited
+        self.orig: dict[str, str] = {}  # LF-normalised, as read
+        self.raw: dict[str, str | None] = {}  # exactly as read (None: a new file)
         self.expect: dict[str, dict[str, Any]] = {}
-        self.removed: set[str] = set()
         self.moves: dict[str, str] = {}
         self.aliases: dict[str, str] = {}  # renamed ids, new -> old
 
@@ -602,8 +595,12 @@ class _Transaction:
         if rel not in self.texts:
             if rel.endswith(".json"):
                 raise WorkspaceError(f"{rel} is a JSON model file; the editor writes YAML only — edit it by hand", 422)
-            text, crlf = self.ws._load(rel)
-            self.texts[rel], self.orig[rel], self.crlf[rel] = text, text, crlf
+            raw = self.ws._load(rel)
+            text = (raw or "").replace("\r\n", "\n")
+            if "\r" in text:
+                raise WorkspaceError(f"{rel} has bare CR line endings; convert it to LF or CRLF to edit it here", 422)
+            self.texts[rel] = self.orig[rel] = text
+            self.raw[rel] = raw
         return self.texts[rel]
 
     def edit(self, rel: str, fn: Any, expect: Mapping[str, Any]) -> None:
@@ -618,11 +615,6 @@ class _Transaction:
             raise WorkspaceError(f"{rel}: {exc}", 400) from exc
         self.expect.setdefault(rel, {}).update(expect)
 
-    def remove(self, rel: str, expect: Mapping[str, Any]) -> None:
-        self._text(rel)
-        self.removed.add(rel)
-        self.expect.setdefault(rel, {}).update(expect)
-
     def move(self, src: str, dst: str) -> None:
         if os.path.exists(self.ws.abspath(dst)):
             raise WorkspaceError(f"{dst} already exists", 409)
@@ -631,26 +623,108 @@ class _Transaction:
     def commit(self) -> None:
         for rel, text in self.texts.items():
             try:
-                if rel in self.removed:
-                    left = [
-                        e
-                        for e in edit._parse(self.orig[rel], rel).entities()
-                        if self.expect[rel].get(e.id, 1) is not None
-                    ]
-                    if left:
-                        raise edit.EditError(f"removing the file would also remove {left[0].id}")
-                else:
-                    edit.verify(self.orig[rel], text, self.expect.get(rel, {}), rel, aliases=self.aliases)
+                edit.verify(self.orig[rel], text, self.expect.get(rel, {}), rel, aliases=self.aliases)
             except edit.EditError as exc:
                 raise WorkspaceError(f"{rel}: {exc}", 422) from exc
+        writes: list[tuple[str, str, int | None]] = []  # (path, content, mode of a new file)
+        removes: list[str] = []
         for rel, text in self.texts.items():
-            if rel in self.removed:
-                os.remove(self.ws.abspath(rel))
+            src, dst = self.ws.abspath(rel), self.ws.abspath(self.moves.get(rel, rel))
+            if edit.is_blank(text) and self.raw[rel] is not None:
+                removes.append(src)  # nothing left in it (a one-object file)
                 continue
-            dst = self.moves.get(rel, rel)
-            self.ws._write(dst, text, self.crlf[rel])
-            if dst != rel:
-                os.remove(self.ws.abspath(rel))
+            data = with_line_endings(self.raw[rel] or "", text)
+            if dst == src and data == self.raw[rel]:
+                continue  # unchanged: leave the file (and its mtime) alone
+            writes.append((dst, data, _mode(src) if dst != src else None))
+            if dst != src:
+                removes.append(src)
+        _write_all(writes, removes)
+
+
+def with_line_endings(orig: str, text: str) -> str:
+    """``text`` (LF line endings) with the line endings of ``orig`` restored:
+    every line kept or changed from ``orig`` keeps its own ending; added lines
+    get the ending most of ``orig`` uses."""
+    if "\r\n" not in orig:
+        return text
+    parts = orig.split("\n")
+    crlf = [p.endswith("\r") for p in parts[:-1]]
+    old = [p[:-1] if c else p for p, c in zip(parts[:-1], crlf)] + parts[-1:]
+    new = text.split("\n")
+    use = [2 * sum(crlf) >= len(crlf)] * (len(new) - 1)
+    matcher = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("equal", "replace"):  # a replaced line keeps its line's ending
+            for k in range(j2 - j1):
+                i = i1 + min(k, i2 - i1 - 1)
+                if i < len(crlf) and j1 + k < len(use):
+                    use[j1 + k] = crlf[i]
+    return "".join(line + ("\r\n" if c else "\n") for line, c in zip(new[:-1], use)) + new[-1]
+
+
+def _mode(path: str) -> int:
+    try:
+        return os.stat(path).st_mode & 0o7777
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
+def _write_all(writes: list[tuple[str, str, int | None]], removes: list[str]) -> None:
+    """Replace, create and remove files as one unit: stage every new content
+    in a temporary file next to its target, then move them all into place and
+    remove files; on any failure, restore what was already changed."""
+    staged: list[tuple[str, str]] = []  # (temporary file, target)
+    try:
+        for path, data, mode in writes:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rr-", suffix=".tmp")
+            staged.append((tmp, path))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(data)
+            os.chmod(tmp, _mode(path) if mode is None else mode)
+    except OSError as exc:
+        _discard(tmp for tmp, _ in staged)
+        raise WorkspaceError(f"could not write {exc.filename or 'a model file'}: {exc.strerror or exc}", 500) from exc
+    backups: list[tuple[str, bytes | None, int]] = []  # (path, previous content or None, mode)
+    try:
+        for tmp, path in staged:
+            backups.append(_backup(path))
+            os.replace(tmp, path)
+        for path in removes:
+            backups.append(_backup(path))
+            os.remove(path)
+    except OSError as exc:
+        for path, content, mode in reversed(backups):
+            try:
+                if content is None:
+                    os.remove(path)
+                else:
+                    with open(path, "wb") as fh:
+                        fh.write(content)
+                    os.chmod(path, mode)
+            except OSError:
+                pass
+        _discard(tmp for tmp, _ in staged)
+        raise WorkspaceError(f"could not write {exc.filename or 'a model file'}: {exc.strerror or exc}", 500) from exc
+
+
+def _backup(path: str) -> tuple[str, bytes | None, int]:
+    try:
+        with open(path, "rb") as fh:
+            return path, fh.read(), _mode(path)
+    except FileNotFoundError:
+        return path, None, 0
+
+
+def _discard(paths: Iterable[str]) -> None:
+    for tmp in paths:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 
 def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:

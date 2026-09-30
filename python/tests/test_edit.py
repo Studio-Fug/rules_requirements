@@ -215,3 +215,118 @@ def test_verify_catches_collateral_changes_and_tolerates_line_shifts():
         edit.verify(text, text.replace("title: one", "title: one\n    flavour: x"), {})
     with pytest.raises(edit.EditError, match="not be valid YAML"):
         edit.verify(text, "requirements: [\n", {})
+
+
+# --- second review round ------------------------------------------------------------
+
+
+def unknown(text):
+    return sorted(parse(text).unknown_fields)
+
+
+def test_whole_entity_rewrites_never_lose_custom_fields_or_comments():
+    flow = "requirements:\n  - {id: REQ-1, title: one, jira: ABC-1}  # from the 2024 audit\n"
+    with pytest.raises(edit.EditError, match="jira"):
+        edit.update_entity(flow, "REQ-1", {"id": "REQ-1", "title": "two"})
+    commented = "requirements:\n  - {id: REQ-1,  # first\n     title: one}\n"
+    with pytest.raises(edit.EditError, match="comments"):
+        edit.update_entity(commented, "REQ-1", {"id": "REQ-1", "title": "two"})
+    # without them the flow item is rewritten, and a comment after it is kept
+    plain = "requirements:\n  - {id: REQ-1, title: one}  # from the 2024 audit\n  - id: REQ-2\n    title: t\n"
+    out = edit.update_entity(plain, "REQ-1", {"id": "REQ-1", "title": "two"})
+    edit.verify(plain, out, {"REQ-1": {"id": "REQ-1", "title": "two"}})
+    assert "# from the 2024 audit" in out and parse(out).get("REQ-1").title == "two"
+    merged = "base: &b\n  owner: alice\nrequirements:\n  - <<: *b\n    id: REQ-1\n    title: one\n    jira: ABC-1\n"
+    with pytest.raises(edit.EditError, match="merge keys"):
+        edit.update_entity(merged, "REQ-1", {"id": "REQ-1", "title": "two", "owner": "alice"})
+
+
+def test_removing_the_first_key_keeps_everything_else():
+    text = (
+        "config: {rules: {unknown-field: warning}}\n"
+        "requirements:\n"
+        "  - owner: alice  # set by the audit\n"
+        "    # about the id\n"
+        "    id: REQ-1\n"
+        "    jira: ABC-1\n"
+        "    title: one\n"
+    )
+    out = edit.update_entity(text, "REQ-1", {"id": "REQ-1", "title": "one"})
+    edit.verify(text, out, {"REQ-1": {"id": "REQ-1", "title": "one", "kind": "requirement"}})
+    assert "    # about the id\n  - id: REQ-1\n    jira: ABC-1\n" in out
+    assert parse(out).get("REQ-1").owner == "" and unknown(out) == unknown(text)
+    anchored = "requirements:\n  - &r1\n    owner: x\n    id: REQ-1\n    title: one\n  - <<: *r1\n    id: REQ-2\n    title: two\n"
+    out = edit.update_entity(anchored, "REQ-1", {"id": "REQ-1", "title": "uno", "owner": "x"})
+    assert out.count("&r1") == 1 and parse(out).get("REQ-1").title == "uno"
+
+
+def test_custom_keys_in_notes_and_verified_by_items_survive():
+    text = (
+        "config: {rules: {unknown-field: warning}}\n"
+        "user_needs: [{id: UN-1, title: n}]\n"
+        "requirements:\n"
+        "  - id: REQ-1\n"
+        "    title: one\n"
+        "    satisfies: [UN-1]\n"
+        "    verified_by:\n"
+        "      - {target: '//t:a', level: sil, ticket: QA-7}\n"
+        "    notes:\n"
+        "      - {id: n1, text: first, priority: high, link: 'https://x/1'}\n"
+    )
+    assert any("notes[0]: unknown field 'priority'" in u for u in unknown(text))
+    assert any("verified_by[0]: unknown field 'ticket'" in u for u in unknown(text))
+    data = edit.entity_to_dict(parse(text).get("REQ-1"))
+    data["notes"].append({"id": "n2", "text": "second"})
+    data["verified_by"].append("//t:b")
+    out = edit.update_entity(text, "REQ-1", data)
+    edit.verify(text, out, {"REQ-1": data})
+    req = parse(out).get("REQ-1")
+    assert dict(req.notes[0].extra) == {"priority": "high", "link": "https://x/1"} and req.notes[1].text == "second"
+    assert dict(req.verified_by[0].extra) == {"ticket": "QA-7"} and req.verified_by[1].target == "//t:b"
+
+
+def test_verify_sees_lost_custom_fields_comments_and_wrong_kinds():
+    text = (
+        "config: {rules: {unknown-field: warning}}\nrequirements:\n  - id: REQ-1\n    title: one  # keep\n    jira: A\n"
+    )
+    same = {"REQ-1": {"id": "REQ-1", "title": "one"}}
+    with pytest.raises(edit.EditError, match="lose"):
+        edit.verify(text, text.replace("    jira: A\n", ""), same)
+    with pytest.raises(edit.EditError, match="comment"):
+        edit.verify(text, text.replace("  # keep", ""), same)
+    # a changed field may drop its own comment
+    edit.verify(text, text.replace("one  # keep", "uno"), {"REQ-1": {"id": "REQ-1", "title": "uno"}})
+    moved = text.replace("requirements:", "user_needs:")
+    with pytest.raises(edit.EditError, match="user_need, not a requirement"):
+        edit.verify(text, moved, {"REQ-1": {"id": "REQ-1", "title": "one", "kind": "requirement"}})
+
+
+def test_insert_goes_to_its_own_section_despite_duplicate_ids():
+    text = (
+        "user_needs:\n  - id: X-1\n    title: need\nrequirements:\n  - id: X-1\n    title: req\n    satisfies: [X-1]\n"
+    )
+    out = edit.insert_entity(text, "requirement", {"id": "REQ-2", "title": "two", "satisfies": ["X-1"]})
+    edit.verify(text, out, {"REQ-2": {"id": "REQ-2", "title": "two", "satisfies": ["X-1"], "kind": "requirement"}})
+    assert out.endswith("    satisfies: [X-1]\n  - id: REQ-2\n    title: two\n    satisfies: [X-1]\n")
+    # the duplicate's "(first defined at …)" line number shifts: still accepted
+    shifted = edit.update_entity(text, "X-1", {"id": "X-1", "title": "need", "description": "one\ntwo\nthree"})
+    edit.verify(text, shifted, {"X-1": {"id": "X-1", "title": "need", "description": "one\ntwo\nthree"}})
+
+
+def test_insert_after_an_anchored_item_and_into_commented_empty_sections():
+    anchored = "requirements:\n  - &r1 id: REQ-1\n    title: one\n"
+    out = edit.insert_entity(anchored, "requirement", {"id": "REQ-2", "title": "two"})
+    assert out.count("&r1") == 1 and parse(out).get("REQ-2").title == "two"
+    for empty in ("requirements: ~  # none yet\n", "requirements: []  # none yet\n"):
+        out = edit.insert_entity(empty, "requirement", {"id": "REQ-1", "title": "one"})
+        edit.verify(empty, out, {"REQ-1": {"id": "REQ-1", "title": "one"}})
+        assert "# none yet" in out
+
+
+def test_deleting_a_document_keeps_the_others():
+    text = "project: {name: P}\n---\nkind: requirement\nid: REQ-1\ntitle: one\n"
+    out = edit.delete_entity(text, "REQ-1")
+    edit.verify(text, out, {"REQ-1": None})
+    assert parse(out).project["name"] == "P" and not edit.is_blank(out)
+    alone = "# SPDX header\nkind: requirement\nid: REQ-1\ntitle: one\n"
+    assert edit.is_blank(edit.delete_entity(alone, "REQ-1"))

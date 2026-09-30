@@ -106,7 +106,7 @@ def test_one_object_per_file_layout(tmp_path):
     ws.delete("REQ-2")
     assert not os.path.exists(tmp_path / "m/req/REQ-2.yaml")
     assert uid == "UN-3"
-    with pytest.raises(WorkspaceError, match="not part of the model"):
+    with pytest.raises(WorkspaceError, match="not be read as part of the model"):
         ws.create("risk", {"title": "r"}, file="elsewhere/risks.yaml")
 
 
@@ -282,3 +282,86 @@ def test_next_id_keeps_the_number_width(tmp_path):
     ws = Workspace(root=str(tmp_path), model_paths=["m.yaml"], scan=False)
     assert ws.next_id("requirement") == "SW-REQ-003"
     assert ws.next_id("risk") == "RISK-1"
+
+
+def test_delete_from_a_one_object_file_keeps_other_documents(tmp_path):
+    write(tmp_path, "m/un.yaml", "user_needs: [{id: UN-1, title: n}]\n")
+    write(
+        tmp_path, "m/REQ-1.yaml", "project: {name: P}\n---\nkind: requirement\nid: REQ-1\ntitle: r\nsatisfies: [UN-1]\n"
+    )
+    write(tmp_path, "m/REQ-2.yaml", "# SPDX header\nkind: requirement\nid: REQ-2\ntitle: s\nsatisfies: [UN-1]\n")
+    ws = Workspace(root=str(tmp_path), model_paths=["m"], scan=False)
+    ws.delete("REQ-1")
+    assert ws.model.project["name"] == "P" and "kind: requirement" not in (tmp_path / "m/REQ-1.yaml").read_text()
+    ws.delete("REQ-2")  # nothing left but a comment: the file goes
+    assert not (tmp_path / "m/REQ-2.yaml").exists()
+
+
+def test_a_failed_write_changes_nothing(repo, monkeypatch):
+    write(
+        repo,
+        "req/refs.yaml",
+        "requirements:\n  - id: REQ-9\n    title: r\n    refines: [REQ-3]\n    satisfies: [UN-1]\n",
+    )
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    before = {p: (repo / "req" / p).read_bytes() for p in ("model.yaml", "refs.yaml")}
+    real, calls = os.replace, []
+
+    def flaky(src, dst):
+        calls.append(dst)
+        if len(calls) == 2:
+            raise PermissionError(13, "Permission denied", dst)
+        return real(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    with pytest.raises(WorkspaceError, match="Permission denied") as exc:
+        ws.rename("REQ-3", "REQ-30")
+    assert exc.value.status == 500 and len(calls) == 2
+    assert {p: (repo / "req" / p).read_bytes() for p in before} == before
+    assert not [f for f in os.listdir(repo / "req") if f.startswith(".rr-")]
+
+
+def test_mixed_line_endings_are_kept_line_by_line(repo):
+    path = repo / "req" / "model.yaml"
+    lines = path.read_bytes().split(b"\n")
+    mixed = b"".join(line + (b"\r\n" if i % 2 else b"\n") for i, line in enumerate(lines[:-1]))
+    path.write_bytes(mixed)
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    ws.update("REQ-2", {**edit_dict(ws, "REQ-2"), "title": "Accept 5..30 C"})
+    new = path.read_bytes().splitlines(keepends=True)
+    old = mixed.splitlines(keepends=True)
+    i = next(k for k, line in enumerate(old) if line.startswith(b"    title: Accept setpoints"))
+    assert len(new) == len(old) and [k for k, (a, b) in enumerate(zip(old, new)) if a != b] == [i]
+    assert new[i] == b"    title: Accept 5..30 C\r\n" and old[i].endswith(b"\r\n")
+    # an LF line in the same file keeps LF when it changes
+    j = next(k for k, line in enumerate(old) if line.startswith(b"    title: Keep the room"))
+    assert not old[j].endswith(b"\r\n")
+    ws.update("UN-1", {**edit_dict(ws, "UN-1"), "title": "Stay comfortable"})
+    assert path.read_bytes().splitlines(keepends=True)[j] == b"    title: Stay comfortable\n"
+
+
+def test_with_line_endings():
+    from rules_requirements.server.workspace import with_line_endings
+
+    assert with_line_endings("a\nb\n", "a\nc\n") == "a\nc\n"
+    assert with_line_endings("a\r\nb\r\n", "a\nx\nb\n") == "a\r\nx\r\nb\r\n"
+    assert with_line_endings("a\r\nb\nc\n", "a\nb\nd\nc") == "a\r\nb\nd\nc"
+    assert with_line_endings("a\r\nb\nc\r\n", "a\nB\nc\n") == "a\r\nB\nc\r\n"  # B keeps b's LF
+
+
+def test_create_refuses_files_the_model_would_not_load(repo):
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    for target in ("req/.drafts/x.yaml", "req/.drafts", "elsewhere/x.yaml"):
+        with pytest.raises(WorkspaceError, match="would not be read"):
+            ws.create("user_need", {"title": "N"}, file=target)
+    assert not (repo / "req" / ".drafts").exists()
+
+
+def test_rename_with_move_keeps_the_file_mode(tmp_path):
+    write(tmp_path, "m/UN-1.yaml", "kind: user_need\nid: UN-1\ntitle: n\n")
+    write(tmp_path, "m/UN-2.yaml", "kind: user_need\nid: UN-2\ntitle: o\n")
+    os.chmod(tmp_path / "m/UN-1.yaml", 0o640)
+    ws = Workspace(root=str(tmp_path), model_paths=["m"], scan=False)
+    ws.rename("UN-1", "UN-7")
+    assert not (tmp_path / "m/UN-1.yaml").exists()
+    assert oct(os.stat(tmp_path / "m/UN-7.yaml").st_mode & 0o777) == "0o640"

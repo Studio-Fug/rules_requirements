@@ -23,6 +23,7 @@ JSON files — are refused with :class:`EditError` instead of being rewritten.
 
 from __future__ import annotations
 
+import bisect
 import re
 import textwrap
 from dataclasses import dataclass
@@ -60,7 +61,7 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
         if key == "notes":
             value = [_note_dict(n) for n in ent.notes]
         elif key == "verified_by":
-            value = [v.target if not v.level else {"target": v.target, "level": v.level} for v in value or ()]
+            value = [_verified_by_item(v) for v in value or ()]
         elif isinstance(value, tuple):
             value = list(value)
         if value in (None, "", [], ()):
@@ -69,20 +70,36 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
     return out
 
 
-def _note_dict(n: Note) -> dict[str, str]:
+def _verified_by_item(v: VerifiedBy) -> Any:
+    if not v.level and not v.extra:
+        return v.target
+    item: dict[str, Any] = {"target": v.target}
+    if v.level:
+        item["level"] = v.level
+    item.update(dict(v.extra))
+    return item
+
+
+def _note_dict(n: Note) -> dict[str, Any]:
     d = {"id": n.id, "text": n.text, "kind": n.kind, "status": n.status, "author": n.author, "created": n.created}
-    return {
+    out: dict[str, Any] = {
         k: v for k, v in d.items() if v and not (k == "kind" and v == "comment") and not (k == "status" and v == "open")
     }
+    out.update(dict(n.extra))
+    return out
 
 
 def dict_to_entity(
     kind: str, data: Mapping[str, Any], location: Location | None = None
 ) -> tuple[Entity | None, list[str]]:
-    """Parse plain data into an entity; returns (entity, problems)."""
+    """Parse plain data into an entity; returns (entity, problems).
+
+    Keys this model does not define are problems at the top level; inside
+    notes and ``verified_by`` items they are kept (a file may carry them).
+    """
     errors: list[str] = []
     unknown: list[str] = []
-    ent = parse_entity(kind, dict(data), location or Location(), errors, unknown)
+    ent = parse_entity(kind, dict(data), location or Location(), errors, unknown, nested=[])
     return ent, errors + unknown
 
 
@@ -149,6 +166,19 @@ def _scalar(value: Any) -> str:
     return text if _plain_ok(text) else _dq(text)
 
 
+def _value(value: Any) -> str:
+    """Any plain YAML value in flow form (for keys this model does not define)."""
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_value(v) for v in value) + "]"
+    if isinstance(value, Mapping):
+        return "{" + ", ".join(f"{_scalar(k)}: {_value(v)}" for k, v in value.items()) + "}"
+    if value is None:
+        return "null"
+    if isinstance(value, (bool, int, float)):
+        return _scalar(value)
+    return _scalar(str(value)) if not hasattr(value, "isoformat") else _dq(value.isoformat())
+
+
 def _reads_back(snippet: str, expected: Any) -> bool:
     try:
         return bool(yaml.safe_load(snippet) == expected)
@@ -160,7 +190,7 @@ def _flow_list(items: list[Any]) -> str:
     parts = []
     for item in items:
         if isinstance(item, Mapping):
-            parts.append("{" + ", ".join(f"{k}: {_scalar(v)}" for k, v in item.items()) + "}")
+            parts.append("{" + ", ".join(f"{k}: {_value(v)}" for k, v in item.items()) + "}")
         else:
             parts.append(_scalar(item))
     return "[" + ", ".join(parts) + "]"
@@ -205,11 +235,13 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
         for note in value:
             note = {"text": note} if isinstance(note, str) else dict(note)
             first = True
-            for nk in ("id", "text", "kind", "status", "author", "created"):
-                if not note.get(nk):
+            known = ("id", "text", "kind", "status", "author", "created")
+            for nk in [*known, *(k for k in note if k not in known)]:
+                if note.get(nk) in (None, ""):
                     continue
                 prefix = f"{pad}  - " if first else f"{pad}    "
-                block = _text_block(nk, str(note[nk]), "")
+                # a key this model does not define keeps its value as-is
+                block = _text_block(nk, str(note[nk]), "") if nk in known else [f"{nk}: {_value(note[nk])}"]
                 lines.append(prefix + block[0])
                 lines += [f"{pad}    {ln}" if ln else "" for ln in block[1:]]
                 first = False
@@ -222,7 +254,7 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
         out = [f"{pad}{key}:"]
         for item in items:
             if isinstance(item, Mapping):
-                out.append(f"{pad}  - {{" + ", ".join(f"{k}: {_dq(str(v))}" for k, v in item.items()) + "}")
+                out.append(f"{pad}  - {{" + ", ".join(f"{k}: {_value(v)}" for k, v in item.items()) + "}")
             else:
                 out.append(f"{pad}  - {_scalar(item)}")
         return out
@@ -323,6 +355,40 @@ def _compose(text: str) -> list[yaml.Node]:
         raise EditError(f"the file is not valid YAML: {exc}") from exc
 
 
+def _field_range(text: str, knode: yaml.Node, vnode: yaml.Node) -> tuple[int, int]:
+    """The text an edit of one field replaces: from the start of the key's line
+    to the end of the value's last line (with its newline and any comment on it)."""
+    return _line_start(text, knode.start_mark.index), _content_end(text, max(_node_end(vnode), knode.end_mark.index))
+
+
+def _item_span(text: str, item: yaml.MappingNode, seq: yaml.SequenceNode, kind: str) -> Span:
+    """The span of one list item of a section."""
+    start = _line_start(text, item.start_mark.index)
+    first_key = item.value[0][0] if item.value else item
+    dash = text.find("-", start, item.start_mark.index)
+    indent = (dash - start) if dash != -1 else max(0, item.start_mark.column - 2)
+    end = _content_end(text, _node_end(item))
+    flow = bool(seq.flow_style)
+    prefix = text[start : first_key.start_mark.index]
+    pad = " " * first_key.start_mark.column
+    if item.flow_style:
+        # A flow mapping on its own line(s) inside a block list can be replaced
+        # whole; anything else sharing those lines cannot.
+        before = text[start : item.start_mark.index]
+        after = text[item.end_mark.index : _line_end(text, item.end_mark.index)].strip()
+        flow = flow or not re.fullmatch(r"\s*-\s*", before) or bool(after and not after.startswith("#"))
+        end = _line_end(text, item.end_mark.index)
+        prefix, pad = " " * indent + "- ", " " * (indent + 2)
+    return Span(start, end, indent, True, kind, prefix=prefix, pad=pad, flow=flow)
+
+
+def _clean_prefix(span: Span) -> str:
+    """The item prefix for a *new* item: never copy an anchor or tag."""
+    if re.fullmatch(r"[ \t]*-[ \t]*", span.prefix):
+        return span.prefix
+    return (" " * span.indent + "-").ljust(max(len(span.pad), span.indent + 2))
+
+
 def _find(text: str, entity_id: str) -> tuple[Span, yaml.MappingNode] | None:
     """The entity's span and (unflattened) mapping node."""
     for doc in _compose(text):
@@ -339,30 +405,12 @@ def _find(text: str, entity_id: str) -> tuple[Span, yaml.MappingNode] | None:
             section_kind = cfg.KIND_BY_SECTION.get(section)
             if section_kind is None or not isinstance(seq, yaml.SequenceNode):
                 continue
-            kind = section_kind
             for item in seq.value:
                 if not isinstance(item, yaml.MappingNode):
                     continue
                 ids = [_scalar_value(v) for k, v in item.value if _scalar_value(k) == "id"]
-                if not ids or ids[0] != entity_id:
-                    continue
-                start = _line_start(text, item.start_mark.index)
-                first_key = item.value[0][0] if item.value else item
-                dash = text.find("-", start, item.start_mark.index)
-                indent = (dash - start) if dash != -1 else max(0, item.start_mark.column - 2)
-                end = _content_end(text, _node_end(item))
-                flow = bool(seq.flow_style)
-                prefix = text[start : first_key.start_mark.index]
-                if item.flow_style:
-                    # A flow mapping on its own line(s) inside a block list can be
-                    # replaced whole; anything else sharing those lines cannot.
-                    before = text[start : item.start_mark.index]
-                    after = text[item.end_mark.index : _line_end(text, item.end_mark.index)].strip()
-                    flow = flow or not re.fullmatch(r"\s*-\s*", before) or bool(after and not after.startswith("#"))
-                    end = _line_end(text, item.end_mark.index)
-                    prefix = " " * indent + "- "
-                pad = " " * first_key.start_mark.column if not item.flow_style else " " * (indent + 2)
-                return Span(start, end, indent, True, kind, prefix=prefix, pad=pad, flow=flow), item
+                if ids and ids[0] == entity_id:
+                    return _item_span(text, item, seq, section_kind), item
     return None
 
 
@@ -395,6 +443,14 @@ def _refuse_flow(span: Span, entity_id: str) -> None:
         )
 
 
+def _unknown_keys(node: yaml.MappingNode, kind: str) -> list[str]:
+    return [
+        _scalar_value(k) for k, _ in node.value if k.tag != _MERGE and _scalar_value(k) not in (*FIELDS[kind], "kind")
+    ]
+
+
+_MERGE = "tag:yaml.org,2002:merge"
+
 # --------------------------------------------------------------------------- #
 # Edits                                                                       #
 # --------------------------------------------------------------------------- #
@@ -407,7 +463,8 @@ def update_entity(text: str, entity_id: str, data: Mapping[str, Any]) -> str:
     comments); changed fields are re-rendered in place; removed fields are
     dropped; new fields are appended after the last existing one. A flow
     mapping on its own line, or an entity using merge keys (``<<: *base``), is
-    re-rendered as a whole.
+    re-rendered as a whole — unless that would lose keys this model does not
+    define or comments inside it, in which case the edit is refused.
     """
     found = _find(text, entity_id)
     if found is None:
@@ -419,34 +476,48 @@ def update_entity(text: str, entity_id: str, data: Mapping[str, Any]) -> str:
     after = normalize(kind, data)
     if before == after:
         return text
-    merged = any(k.tag == "tag:yaml.org,2002:merge" for k, _ in node.value)
-    if span.list_item and (node.flow_style or merged):
-        rendered = render_entity(kind, after, indent=span.indent, list_item=True)
+    merged = any(k.tag == _MERGE for k, _ in node.value)
+    if node.flow_style or merged:
+        unknown = _unknown_keys(node, kind)
+        # a comment after a flow mapping's closing brace is carried over
+        limit = node.end_mark.index if node.flow_style else span.end
+        inner = [c for pos, c in _comments(text) if span.start <= pos < limit]
+        if unknown or inner:
+            what = f"fields the editor does not know ({', '.join(unknown)})" if unknown else "comments"
+            style = "flow style" if node.flow_style else "merge keys (<<)"
+            raise EditError(f"{entity_id} uses {style} and has {what}; rewriting it would lose them — edit it by hand")
+        if span.list_item:
+            rendered = render_entity(kind, after, indent=span.indent, list_item=True, prefix=span.prefix, pad=span.pad)
+        else:
+            rendered = render_entity(kind, after, list_item=False, with_kind=True)
+        tail = text[node.end_mark.index : _line_end(text, node.end_mark.index)].strip() if node.flow_style else ""
+        if tail.startswith("#"):
+            first, _, rest = rendered.partition("\n")
+            rendered = f"{first}  {tail}\n{rest}"
         return text[: span.start] + rendered + text[span.end :]
-    if not span.list_item and merged:
-        return text[: span.start] + render_entity(kind, after, list_item=False, with_kind=True) + text[span.end :]
     pad = span.pad if span.list_item else ""
     edits: list[tuple[int, int, str]] = []
     present: set[str] = set()
     last_end = span.start
-    for idx, (knode, vnode) in enumerate(node.value):
+    carry = ""  # the "- " (and any anchor) of a removed key that opened the item
+    for knode, vnode in node.value:
         key = _scalar_value(knode)
         present.add(key)
-        first_of_item = span.list_item and idx == 0
-        kstart = span.start if first_of_item else _line_start(text, knode.start_mark.index)
-        vend = _content_end(text, max(_node_end(vnode), int(knode.end_mark.index)))
+        kstart, vend = _field_range(text, knode, vnode)
         last_end = max(last_end, vend)
+        own = text[kstart : knode.start_mark.index]  # "  - ", "  - &a " or the key indentation
         if key == "kind" or before.get(key) == after.get(key):
+            if carry:  # the key that opened the item was removed: this one takes over
+                edits.append((kstart, knode.start_mark.index, carry))
+                carry = ""
             continue
         if key not in after:
-            if first_of_item:  # the "- " line cannot go: re-render the whole item
-                rendered = render_entity(kind, after, indent=span.indent, list_item=True, prefix=span.prefix, pad=pad)
-                return text[: span.start] + rendered + text[span.end :]
-            edits.append((kstart, vend, ""))
+            edits.append((kstart, vend, ""))  # whole lines; comments around it stay
+            carry = carry or (own if own.strip() else "")
             continue
         lines = render_field(key, after[key], pad)
-        if first_of_item:
-            lines[0] = span.prefix + lines[0][len(pad) :]
+        lines[0] = (carry or own) + lines[0][len(pad) :]
+        carry = ""
         edits.append((kstart, vend, "\n".join(lines) + "\n"))
     new_keys = [k for k in FIELDS[kind] if k in after and k not in present]
     if new_keys:
@@ -459,13 +530,25 @@ def update_entity(text: str, entity_id: str, data: Mapping[str, Any]) -> str:
 
 
 def delete_entity(text: str, entity_id: str) -> str:
-    """Remove ``entity_id`` (and one now-redundant blank line)."""
+    """Remove ``entity_id`` (and one now-redundant blank line).
+
+    A one-object document is removed together with its ``---`` separator;
+    other documents in the same file stay.
+    """
     found = _find(text, entity_id)
     if found is None:
         raise KeyError(f"{entity_id} is not defined in this file")
     span, _ = found
     _refuse_flow(span, entity_id)
     start, end = span.start, span.end
+    if not span.list_item:
+        # take a document separator with it: the one before, else the one after
+        prev = text.rfind("\n", 0, max(0, start - 1)) + 1
+        if start and text[prev:start].strip() == "---":
+            start = prev
+        elif re.match(r"---[ \t]*(\n|$)", text[end:]):
+            end = _line_end(text, end)
+        return text[:start] + text[end:]
     if text[end : end + 1] == "\n":
         end += 1  # swallow the blank separator line after it
     elif start >= 2 and text[start - 2 : start] == "\n\n":
@@ -484,25 +567,28 @@ def insert_entity(text: str, kind: str, data: Mapping[str, Any]) -> str:
             if _scalar_value(knode) != section:
                 continue
             item_indent = knode.start_mark.column + 2
-            if isinstance(seq, yaml.ScalarNode) and seq.tag == "tag:yaml.org,2002:null":
-                # `requirements:` (null) — give it a block list
+            empty_scalar = isinstance(seq, yaml.ScalarNode) and seq.tag == "tag:yaml.org,2002:null"
+            empty_flow = isinstance(seq, yaml.SequenceNode) and seq.flow_style and not seq.value
+            if empty_scalar or empty_flow:
+                # `requirements:` / `requirements: ~` / `requirements: []`: give it
+                # a block list, keeping a comment that followed the value.
                 colon = text.index(":", knode.end_mark.index)
                 end = _line_end(text, max(colon, seq.end_mark.index))
+                rest = text[max(colon + 1, seq.end_mark.index) : end].strip()
+                comment = f"  {rest}" if rest.startswith("#") else ""
                 rendered = render_entity(kind, body, indent=item_indent, list_item=True)
-                return text[: colon + 1] + "\n" + rendered + text[end:]
-            if isinstance(seq, yaml.SequenceNode) and seq.flow_style and not seq.value:
-                colon = text.index(":", knode.end_mark.index)  # `requirements: []`
-                rendered = render_entity(kind, body, indent=item_indent, list_item=True)
-                return text[: colon + 1] + "\n" + rendered + text[_line_end(text, seq.end_mark.index) :]
+                return text[: colon + 1] + comment + "\n" + rendered + text[end:]
             if not isinstance(seq, yaml.SequenceNode) or seq.flow_style:
                 raise EditError(f"the {section} section is not a block list; add the entity by hand")
             items = [i for i in seq.value if isinstance(i, yaml.MappingNode)]
-            last_ids = [_scalar_value(v) for k, v in items[-1].value if _scalar_value(k) == "id"] if items else []
-            found = _find(text, last_ids[0]) if last_ids else None
-            if found is None:
+            if not items:
+                raise EditError(f"the {section} section has no entries to follow; add the entity by hand")
+            span = _item_span(text, items[-1], seq, kind)
+            if span.flow and not items[-1].flow_style:
                 raise EditError(f"cannot find where the {section} section ends; add the entity by hand")
-            span = found[0]
-            rendered = render_entity(kind, body, indent=span.indent, list_item=True, prefix=span.prefix, pad=span.pad)
+            rendered = render_entity(
+                kind, body, indent=span.indent, list_item=True, prefix=_clean_prefix(span), pad=span.pad
+            )
             end = span.end
             lead = "" if text[end - 1 : end] == "\n" else "\n"
             sep = "\n" if text[end : end + 1] == "\n" or _items_spaced(text, section) else ""
@@ -520,20 +606,95 @@ def _items_spaced(text: str, section: str) -> bool:
 # Verification                                                                #
 # --------------------------------------------------------------------------- #
 
-
 _LOCATION = re.compile(r"^.*?:\d+: ")
+_FIRST_DEFINED = re.compile(r"\s*\(first defined at [^)]*\)")
+
+
+def _scalar_ranges(text: str) -> list[tuple[int, int]]:
+    ranges: list[tuple[int, int]] = []
+
+    def walk(node: yaml.Node) -> None:
+        if isinstance(node, yaml.ScalarNode):
+            ranges.append((node.start_mark.index, node.end_mark.index))
+        elif isinstance(node, yaml.SequenceNode):
+            for child in node.value:
+                walk(child)
+        elif isinstance(node, yaml.MappingNode):
+            for k, v in node.value:
+                walk(k)
+                walk(v)
+
+    for doc in _compose(text):
+        walk(doc)
+    return sorted(ranges)
+
+
+def _comments(text: str) -> list[tuple[int, str]]:
+    """(offset, text) of every comment: a ``#`` outside all scalars that starts
+    a line or follows whitespace, up to the end of its line."""
+    ranges = _scalar_ranges(text)
+    starts = [r[0] for r in ranges]
+    out = []
+    pos = 0
+    while pos < len(text):
+        line_end = _line_end(text, pos)
+        i = text.find("#", pos, line_end)
+        while i != -1:
+            k = bisect.bisect_right(starts, i) - 1
+            inside = k >= 0 and ranges[k][0] <= i < ranges[k][1]
+            if not inside and (i == pos or text[i - 1] in " \t"):
+                out.append((i, text[i:line_end].strip()))
+                break
+            i = text.find("#", i + 1, line_end)
+        pos = line_end
+    return out
+
+
+def _droppable(
+    old_text: str, old: Model, expect: Mapping[str, Any], aliases: Mapping[str, str]
+) -> list[tuple[int, int]]:
+    """Old-text ranges whose comments an edit may drop: removed entities, and
+    the fields of edited entities whose value changes (or that are removed)."""
+    out = []
+    renamed = set(aliases.values())
+    for eid, want in expect.items():
+        old_id = aliases.get(eid, eid)
+        found, ent = _find(old_text, old_id), old.get(old_id)
+        if found is None or ent is None:
+            continue
+        span, node = found
+        if want is None:
+            if eid not in renamed:
+                out.append((span.start, span.end))
+            continue
+        before = entity_to_dict(ent)
+        try:
+            after = normalize(ent.kind, want)
+        except EditError:
+            continue
+        for knode, vnode in node.value:
+            key = _scalar_value(knode)
+            if key != "kind" and before.get(key) != after.get(key):
+                out.append(_field_range(old_text, knode, vnode))
+    return out
 
 
 def _problems(messages: Any, aliases: Mapping[str, str]) -> list[str]:
-    """Problem messages without their (shifting) file:line prefix, with
-    renamed ids mapped back to their old names."""
+    """Problem messages without their (shifting) file:line parts, with renamed
+    ids mapped back to their old names."""
     out = []
     for msg in messages:
-        msg = _LOCATION.sub("", msg)
+        msg = _FIRST_DEFINED.sub("", _LOCATION.sub("", msg))
         for new_id, old_id in aliases.items():
             msg = re.sub(rf"(?<![\w-]){re.escape(new_id)}(?![\w-])", old_id, msg)
         out.append(msg)
     return sorted(out)
+
+
+def _owner(msg: str) -> tuple[str, str]:
+    """(entity id, rest) of an ``"<id>: ..."`` problem message ("" if none)."""
+    head, sep, rest = msg.partition(": ")
+    return (head, rest) if sep and " " not in head else ("", msg)
 
 
 def verify(
@@ -545,23 +706,39 @@ def verify(
 ) -> None:
     """Check that ``new_text`` differs from ``old_text`` exactly as intended.
 
-    ``expect`` maps entity ids to their intended data (``None`` = removed);
-    every other entity, the configuration and the project metadata must read
-    back unchanged, and the edit must not introduce parse errors or unknown
-    fields (``aliases`` maps renamed ids, new -> old, for that comparison).
-    Raises :class:`EditError` otherwise — the caller then leaves the file
-    untouched.
+    ``expect`` maps entity ids to their intended data (``None`` = removed; a
+    ``kind`` key pins the entity kind). Every other entity, the configuration
+    and the project metadata must read back unchanged; the edit must not add
+    parse errors; keys this model does not define must survive (except inside
+    removed entities); and no comment may disappear except from removed
+    entities and from the fields the edit changes. ``aliases`` maps renamed ids
+    (new -> old). Raises :class:`EditError` otherwise — the caller then leaves
+    the file untouched.
     """
     aliases = aliases or {}
     old = _parse(old_text, rel) if old_text.strip() else Model()
     new = _parse(new_text, rel)
     before, after = _problems(old.parse_errors, aliases), _problems(new.parse_errors, aliases)
-    fresh = [e for e in after if e not in before or after.count(e) > before.count(e)]
+    fresh = [e for e in after if after.count(e) > before.count(e)]
     if fresh:
-        raise EditError("the edit would introduce model errors: " + "; ".join(fresh[:3]))
-    before_u, after_u = _problems(old.unknown_fields, aliases), _problems(new.unknown_fields, aliases)
-    if any(u not in before_u or after_u.count(u) > before_u.count(u) for u in after_u):
-        raise EditError("the edit would introduce unknown fields")
+        raise EditError("the edit would introduce model errors: " + "; ".join(dict.fromkeys(fresh[:3])))
+    renamed = set(aliases.values())
+    removed = {eid for eid, want in expect.items() if want is None and eid not in renamed}
+    edited = {aliases.get(eid, eid) for eid, want in expect.items() if want is not None}
+
+    # Unknown keys must survive, except inside removed entities; those inside
+    # notes / verified_by items of edited entities are part of their data.
+    def keep(msg: str) -> bool:
+        owner, rest = _owner(msg)
+        return owner not in removed and not (owner in edited and rest.startswith(("notes[", "verified_by[")))
+
+    old_u = [m for m in _problems(old.unknown_fields, aliases) if keep(m)]
+    new_u = [m for m in _problems(new.unknown_fields, aliases) if keep(m)]
+    if old_u != new_u:
+        lost = [m for m in old_u if old_u.count(m) > new_u.count(m)]
+        raise EditError(
+            f"the edit would {f'lose {lost[0]}' if lost else 'introduce unknown fields'}; refusing to write"
+        )
     old_ents = {e.id: e for e in old.entities()}
     new_ents = {e.id: e for e in new.entities()}
     for eid in sorted(set(old_ents) | set(new_ents) | set(expect)):
@@ -574,12 +751,32 @@ def verify(
                 continue
             if b is None:
                 raise EditError(f"{eid} is missing after the edit")
+            kind = str(want.get("kind") or "")
+            if kind and b.kind != cfg.KIND_BY_SECTION.get(kind, kind):
+                raise EditError(f"{eid} would be written as a {b.kind}, not a {kind}")
             if entity_to_dict(b) != normalize(b.kind, want):
                 raise EditError(f"{eid} does not read back as intended after the edit")
         elif a is None or b is None or a.kind != b.kind or entity_to_dict(a) != entity_to_dict(b):
             raise EditError(f"the edit would also change {eid}; refusing to write")
     if old.config != new.config or dict(old.project) != dict(new.project):
         raise EditError("the edit would change the configuration or project metadata; refusing to write")
+    if old_text.strip():
+        allowed = _droppable(old_text, old, expect, aliases)
+        kept = [c for pos, c in _comments(new_text)]
+        for pos, c in _comments(old_text):
+            if any(s <= pos < e for s, e in allowed):
+                continue
+            if c not in kept:
+                raise EditError(f"the edit would lose the comment {c!r}; refusing to write")
+            kept.remove(c)
+
+
+def is_blank(text: str) -> bool:
+    """Whether ``text`` holds no YAML content at all (only comments, ``---``)."""
+    try:
+        return all(doc is None for doc in yaml.safe_load_all(text))
+    except yaml.YAMLError:
+        return False
 
 
 def verified_by_from(items: Any) -> tuple[VerifiedBy, ...]:
@@ -588,5 +785,6 @@ def verified_by_from(items: Any) -> tuple[VerifiedBy, ...]:
         if isinstance(item, str):
             out.append(VerifiedBy(item))
         else:
-            out.append(VerifiedBy(str(item["target"]), str(item.get("level", ""))))
+            extra = tuple((k, v) for k, v in item.items() if k not in ("target", "level"))
+            out.append(VerifiedBy(str(item["target"]), str(item.get("level", "")), extra))
     return tuple(out)

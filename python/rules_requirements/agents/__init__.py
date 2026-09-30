@@ -157,5 +157,15 @@ class JobManager:
                     return job, f
         raise KeyError(finding_id)
 
+    def transition(self, finding_id: str, allowed: tuple[str, ...], to: str) -> Finding:
+        """Atomically move a finding from one of ``allowed`` states to ``to``;
+        raises ``ValueError`` (with the current state) otherwise."""
+        _, f = self.finding(finding_id)
+        with self._lock:
+            if f.status not in allowed:
+                raise ValueError(f.status)
+            f.status = to
+        return f
+
 
 __all__ = ["Finding", "Job", "JobManager", "Workflow"]

@@ -32,20 +32,29 @@ every reference in the model follows — and deleting an entity that is still
 referenced asks first (and can remove the references).
 
 Edits are **surgical**: only the changed fields of the changed entity are
-rewritten. Comments, section banners, field order, line endings, file mode and
-the formatting of every untouched field stay as they were, so a change made in
-the editor produces the same small diff a person would write by hand.
+rewritten. Comments, section banners, field order, line endings (per line, in
+files that mix them), file mode, keys the model does not define and the
+formatting of every untouched field stay as they were, so a change made in the
+editor produces the same small diff a person would write by hand.
 
 Every write is also **verified** before it happens: the edited files are
 re-read with the model loader and must differ from the originals exactly as
-intended — the edited entities as requested, every other entity, the
-configuration and the project metadata unchanged, no new errors. Otherwise
-nothing is written and the editor explains why. Layouts that cannot be edited
-in place without touching neighbours — flow-style sections
-(`requirements: [{...}, {...}]`) and JSON model files — are refused the same
-way; edit those by hand or convert them to block style. An entity carries a
-version, so saving a form over a change someone made in the meantime is a
-conflict, not a silent overwrite.
+intended — the edited entities as requested (and of the requested kind), every
+other entity, the configuration and the project metadata unchanged, no new
+errors, no key the model does not define lost, and no comment gone except from
+a field the edit changes or an entity it deletes. Otherwise nothing is written
+and the editor explains why. A change spanning several files (a rename, a
+delete that removes references) is written all-or-nothing, and deleting the
+only entity of a one-object file removes the file unless other documents
+(say, `project:`) live in it.
+
+Some layouts cannot be edited in place without touching their neighbours:
+flow-style sections (`requirements: [{...}, {...}]`), JSON model files, and
+entities written as a flow mapping or with merge keys (`<<: *base`) that carry
+comments or custom keys. The editor refuses those the same way; edit them by
+hand or convert them to block style. An entity carries a version, so saving a
+form over a change someone made in the meantime is a conflict, not a silent
+overwrite.
 
 ```{image} ../_static/editor-graph.png
 :alt: The trace graph: needs, requirements, mitigations and risks coloured by status

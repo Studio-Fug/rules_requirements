@@ -138,7 +138,7 @@ def test_agents_endpoints(api):
     if loose:
         with pytest.raises(HttpError):
             call(api, "POST", f"/api/findings/{loose['id']}/apply", {"action": "note"})
-    other = next(f for f in job["findings"] if f["status"] == "open")
+    other = next(f for f in job["findings"] if f["id"] != target["id"])
     assert call(api, "POST", f"/api/findings/{other['id']}/dismiss")["status"] == "dismissed"
     with pytest.raises(HttpError):
         call(api, "POST", f"/api/findings/{other['id']}/apply", {"action": "explode"})
@@ -311,3 +311,52 @@ def test_allow_host_is_case_insensitive(api):
         assert http(base, "GET", "/api/state", headers={"Host": "rr.example"})[0] == 200
     finally:
         httpd.shutdown()
+
+
+def test_concurrent_applies_of_one_finding_apply_it_once(api):
+    import threading
+
+    job = call(api, "POST", "/api/agents/run", {"workflow": "completeness", "params": {}, "wait": True})
+    f = next(x for x in job["findings"] if x["entity"])
+    before = len(api.ws.model.get(f["entity"]).notes)
+    barrier, outcomes = threading.Barrier(4), []
+
+    def apply():
+        barrier.wait()
+        try:
+            call(api, "POST", f"/api/findings/{f['id']}/apply", {"action": "note"})
+            outcomes.append(200)
+        except HttpError as exc:
+            outcomes.append(exc.status)
+
+    threads = [threading.Thread(target=apply) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(outcomes) == [200, 409, 409, 409]
+    assert len(api.ws.model.get(f["entity"]).notes) == before + 1
+    with pytest.raises(HttpError) as exc:
+        call(api, "POST", f"/api/findings/{f['id']}/dismiss")
+    assert exc.value.status == 409
+    with pytest.raises(HttpError) as exc:
+        call(api, "POST", "/api/findings/nope/apply", {"action": "note"})
+    assert exc.value.status == 404
+
+
+def test_a_failed_apply_can_be_retried(api):
+    job = call(api, "POST", "/api/agents/run", {"workflow": "completeness", "params": {}, "wait": True})
+    f = next(x for x in job["findings"] if x["entity"])
+    with pytest.raises(HttpError):
+        call(api, "POST", f"/api/findings/{f['id']}/apply", {"action": "note", "entity": "NOPE-1"})
+    call(api, "POST", f"/api/findings/{f['id']}/apply", {"action": "note"})
+
+
+def test_ipv6_urls_are_bracketed(api):
+    urls = []
+    try:
+        httpd = serve(api, host="::1", port=0, ready=urls.append)
+    except OSError:
+        pytest.skip("no IPv6 loopback here")
+    httpd.shutdown()
+    assert urls[0].startswith("http://[::1]:")
