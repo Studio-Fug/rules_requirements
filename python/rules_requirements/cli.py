@@ -277,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--root", default="", help="source tree to scan (default: workspace)")
         sp.add_argument("--include", action="append", help="glob of files to scan (repeatable)")
         sp.add_argument("--exclude", action="append", help="glob of files to skip (repeatable)")
+        sp.add_argument("--files", nargs="+", help="scan exactly these files (relative to --root)")
 
     v = sub.add_parser("validate", help="validate the model")
     v.add_argument("model", nargs="*", default=[DEFAULT_MODEL])
@@ -288,7 +289,6 @@ def build_parser() -> argparse.ArgumentParser:
     model_arg(s)
     scan_args(s)
     s.add_argument("--list", action="store_true", help="print every annotation found")
-    s.add_argument("--files", nargs="+", help="scan exactly these files (relative to --root)")
     s.add_argument("--json", default="", help="write annotations as JSON")
     s.add_argument("--ignore-model-errors", action="store_true")
     s.set_defaults(func=cmd_scan)

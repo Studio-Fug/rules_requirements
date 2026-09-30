@@ -1,0 +1,37 @@
+"""Example: a thermostat developed requirements-first with rules_requirements."""
+
+module(name = "thermostat_example")
+
+bazel_dep(name = "rules_requirements", version = "0.1.0")
+local_path_override(
+    module_name = "rules_requirements",
+    path = "../..",
+)
+
+bazel_dep(name = "rules_python", version = "2.0.3")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+python.toolchain(
+    is_default = True,
+    python_version = "3.11",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+pip.parse(
+    hub_name = "pypi",
+    python_version = "3.11",
+    requirements_lock = "//:requirements.lock",
+)
+use_repo(pip, "pypi")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.85.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")

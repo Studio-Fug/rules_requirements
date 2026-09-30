@@ -1,0 +1,141 @@
+# The thermostat example: model -> implementation -> tests -> evidence -> report.
+#
+#   bazel test //...                      # unit tests, model validation, golden report
+#   bazel build //:report                 # bazel-bin/report.{html,json,md}
+#   bazel run //:report_json_golden_test.update   # after an intended change
+
+load("@pypi//:requirements.bzl", "requirement")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_requirements//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+# --------------------------------------------------------------------------- #
+# The requirements model (validated by :model_test).                          #
+# --------------------------------------------------------------------------- #
+
+rr_model(
+    name = "model",
+    srcs = glob(["requirements/*.yaml"]),
+    strict = True,
+)
+
+# --------------------------------------------------------------------------- #
+# Implementation.                                                              #
+# --------------------------------------------------------------------------- #
+
+py_library(
+    name = "thermostat",
+    srcs = glob(["thermostat/*.py"]),
+)
+
+py_binary(
+    name = "thermostat_cli",
+    srcs = ["thermostat/cli.py"],
+    main = "thermostat/cli.py",
+    deps = [":thermostat"],
+)
+
+cc_library(
+    name = "interlock",
+    srcs = ["interlock/interlock.cc"],
+    hdrs = ["interlock/interlock.h"],
+)
+
+rust_library(
+    name = "setpoint",
+    srcs = ["setpoint/src/lib.rs"],
+    edition = "2021",
+)
+
+# --------------------------------------------------------------------------- #
+# Tests, one per hook.                                                         #
+# --------------------------------------------------------------------------- #
+
+rr_py_test(
+    name = "controller_test",
+    srcs = ["tests/test_controller.py"],
+    deps = [
+        ":thermostat",
+        requirement("pytest"),
+    ],
+)
+
+py_test(
+    name = "display_test",
+    srcs = ["tests/display_test.py"],
+    deps = [
+        ":thermostat",
+        "@rules_requirements//python",
+    ],
+)
+
+cc_test(
+    name = "interlock_test",
+    srcs = ["interlock/interlock_test.cc"],
+    deps = [
+        ":interlock",
+        "@googletest//:gtest_main",
+        "@rules_requirements//cc:gtest",
+    ],
+)
+
+rr_rust_test(
+    name = "setpoint_test",
+    crate = ":setpoint",
+    rule = rust_test,
+    deps = ["@rules_requirements//rust:rr"],
+)
+
+SOURCES = glob([
+    "thermostat/*.py",
+    "interlock/*",
+    "setpoint/src/*.rs",
+    "tests/*.py",
+])
+
+# Every @rr(...) annotation must name an entity that exists.
+rr_annotations_test(
+    name = "annotations_test",
+    srcs = SOURCES,
+    model = ":model",
+)
+
+# --------------------------------------------------------------------------- #
+# Evidence and the traceability report, pinned by goldens.                     #
+# --------------------------------------------------------------------------- #
+
+rr_evidence(
+    name = "evidence",
+    tests = [
+        ":controller_test",
+        ":display_test",
+        ":interlock_test",
+        ":setpoint_test",
+    ],
+)
+
+rr_report(
+    name = "report",
+    evidence = [
+        ":evidence",
+        "evidence/panel_inspection.rr.yaml",
+    ],
+    model = [":model"],
+    srcs = SOURCES,
+)
+
+rr_golden_test(
+    name = "report_json_golden_test",
+    golden = "report.golden.json",
+    src = ":report.json",
+)
+
+rr_golden_test(
+    name = "report_md_golden_test",
+    golden = "report.golden.md",
+    src = ":report.md",
+)

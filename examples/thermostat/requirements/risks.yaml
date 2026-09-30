@@ -1,0 +1,46 @@
+# Risk analysis (ISO 14971 §5) and risk control (§7). Each mitigation is a
+# risk control measure implemented by requirements, so its effectiveness is
+# verified by the same tests (§7.2).
+risks:
+  - id: RISK-1
+    title: Room overheats
+    hazard: Heater energised continuously
+    hazardous_situation: >-
+      A control fault or a sensor reading stuck low keeps the heater on while
+      the room is occupied.
+    harm: Heat stress; burns from surfaces near the heater
+    severity: high
+    likelihood: possible
+    residual_severity: high
+    residual_likelihood: rare
+    residual: >-
+      Two independent controls (interlock + sensor plausibility) must both
+      fail. Accepted.
+
+  - id: RISK-2
+    title: Implausible setpoint accepted
+    hazard: Setpoint far above comfort range
+    hazardous_situation: >-
+      "80" meant as °F is taken as °C, or a typo like "250C", and the
+      controller drives the room towards it.
+    harm: Heat stress
+    severity: medium
+    likelihood: likely
+    residual_likelihood: unlikely
+
+mitigations:
+  - id: MIT-1
+    title: Independent over-temperature protection
+    type: protective
+    description: >-
+      A hardware-near interlock and a sensor plausibility check, each able to
+      de-energise the heater on its own.
+    mitigates: [RISK-1]
+    implemented_by: [REQ-5, REQ-6]
+
+  - id: MIT-2
+    title: Validate setpoints at entry
+    type: inherent
+    description: Require an explicit unit and a bounded range for every setpoint.
+    mitigates: [RISK-2]
+    implemented_by: [REQ-3, REQ-4]

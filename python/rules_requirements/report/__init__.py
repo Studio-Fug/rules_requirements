@@ -278,6 +278,21 @@ def render_markdown(matrix: Matrix, title: str = "") -> str:
             ["ID", "Method", "Level", "Used by"],
             [[t["id"], t["title"], t["level"], ", ".join(t["used_by"])] for t in d["test_methods"]],
         )
+    if matrix.annotations_scanned:
+
+        def where(refs: list[dict[str, Any]]) -> str:
+            return "<br>".join(
+                f"{r['path']}:{r['line']}" + (f" ({r['symbol']})" if r.get("symbol") else "") for r in refs
+            )
+
+        out += ["## Implementation — source annotations", ""]
+        table(
+            ["ID", "Implemented in", "Verified in"],
+            [
+                [x["id"], where(x["implemented_in"]) or "—", where(x["verified_in"]) or "—"]
+                for x in d["requirements"] + d["mitigations"]
+            ],
+        )
     if d["modules"]:
         out += ["## Modules", ""]
         table(["Module", "Status"], [[k, _badge(v)] for k, v in d["modules"].items()])

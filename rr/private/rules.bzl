@@ -153,10 +153,14 @@ def _rr_report_impl(ctx):
         args.add("--strict")
     for k, v in ctx.attr.current_build.items():
         args.add("--current-build", "%s=%s" % (k, v))
+    if ctx.files.srcs:
+        # Implementation links: scan these sources for @rr(...) annotations.
+        args.add_all(["--scan", "--root", ".", "--files"])
+        args.add_all(ctx.files.srcs)
     ctx.actions.run(
         executable = ctx.executable._rr,
         arguments = [args],
-        inputs = ctx.files.model + evidence,
+        inputs = ctx.files.model + evidence + ctx.files.srcs,
         outputs = outs,
         mnemonic = "RrReport",
         progress_message = "Building traceability report %{label}",
@@ -171,6 +175,7 @@ _rr_report = rule(
         "title": attr.string(),
         "strict": attr.bool(),
         "current_build": attr.string_dict(),
+        "srcs": attr.label_list(allow_files = True),
         "html_out": attr.output(),
         "json_out": attr.output(),
         "md_out": attr.output(),
@@ -178,7 +183,7 @@ _rr_report = rule(
     },
 )
 
-def rr_report(name, model, evidence = [], formats = _FORMATS, title = "", strict = False, current_build = {}, testonly = True, **kwargs):
+def rr_report(name, model, evidence = [], srcs = [], formats = _FORMATS, title = "", strict = False, current_build = {}, testonly = True, **kwargs):
     """Renders the traceability report for a model and its evidence.
 
     Outputs `<name>.html`, `<name>.json` and/or `<name>.md` (addressable as
@@ -189,6 +194,8 @@ def rr_report(name, model, evidence = [], formats = _FORMATS, title = "", strict
       name: target name; also the output file stem.
       model: `rr_model` target(s) or model files.
       evidence: `rr_evidence` targets and/or JUnit / records files.
+      srcs: source files to scan for `@rr(...)` annotations; the report then
+        links each requirement to the code that implements and verifies it.
       formats: any of "html", "json", "md".
       title: report title (default: the project name).
       strict: fail on model warnings too.
@@ -209,6 +216,7 @@ def rr_report(name, model, evidence = [], formats = _FORMATS, title = "", strict
         title = title,
         strict = strict,
         current_build = current_build,
+        srcs = srcs,
         testonly = testonly,
         **dict(kwargs, **outs)
     )
