@@ -46,10 +46,14 @@ def diff_models(old: Model, new: Model, ignore: tuple[str, ...] = ()) -> list[En
         if a is None and b is not None:
             changes.append(EntityChange(eid, b.kind, ADDED, b.title, {k: (None, v) for k, v in _d(b, ignore).items()}))
         elif b is None and a is not None:
-            changes.append(EntityChange(eid, a.kind, REMOVED, a.title, {k: (v, None) for k, v in _d(a, ignore).items()}))
+            changes.append(
+                EntityChange(eid, a.kind, REMOVED, a.title, {k: (v, None) for k, v in _d(a, ignore).items()})
+            )
         elif a is not None and b is not None:
             da, db = _d(a, ignore), _d(b, ignore)
-            fields = {k: (da.get(k), db.get(k)) for k in list(da) + [k for k in db if k not in da] if da.get(k) != db.get(k)}
+            fields = {
+                k: (da.get(k), db.get(k)) for k in list(da) + [k for k in db if k not in da] if da.get(k) != db.get(k)
+            }
             if a.kind != b.kind:
                 fields["kind"] = (a.kind, b.kind)
             if fields:

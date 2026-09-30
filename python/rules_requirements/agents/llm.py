@@ -27,7 +27,7 @@ class LLMError(Exception):
     """The model could not produce a usable answer."""
 
 
-class LLMUnavailable(LLMError):
+class LLMUnavailable(LLMError):  # noqa: N818 — reads better than LLMUnavailableError
     """No LLM is configured (SDK missing, or disabled)."""
 
 
@@ -48,7 +48,7 @@ class ClaudeLLM:
         self.max_tokens = max_tokens
         if client is None:
             try:
-                import anthropic
+                import anthropic  # type: ignore[import-not-found,unused-ignore]
             except ImportError as exc:
                 raise LLMUnavailable(
                     'the "anthropic" package is not installed (pip install "rules-requirements[agents]")'
@@ -75,7 +75,7 @@ class ClaudeLLM:
         try:
             with self.client.beta.messages.stream(**kwargs) as stream:
                 message = stream.get_final_message()
-        except Exception as exc:  # noqa: BLE001 — surface any SDK/API error to the job log
+        except Exception as exc:
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
         if message.stop_reason == "refusal":
             details = getattr(message, "stop_details", None)
@@ -108,5 +108,8 @@ def llm_status(llm: LLM | None, enabled: bool = True) -> dict[str, Any]:
     try:
         import anthropic  # noqa: F401
     except ImportError:
-        return {"available": False, "reason": 'install the optional "anthropic" package: pip install "rules-requirements[agents]"'}
+        return {
+            "available": False,
+            "reason": 'install the optional "anthropic" package: pip install "rules-requirements[agents]"',
+        }
     return {"available": False, "reason": "the Claude client could not be created"}

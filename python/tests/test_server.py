@@ -49,9 +49,13 @@ def test_crud_notes_rename(api):
     assert call(api, "GET", "/api/next-id", kind="risk") == {"id": "RISK-2", "file": "req/model.yaml"}
     e = call(api, "POST", "/api/entities", {"kind": "risk", "data": {"title": "Fire", "severity": "critical"}})
     assert e["id"] == "RISK-2" and e["status"] == "OPEN"
-    e = call(api, "PUT", "/api/entities/RISK-2", {"data": {"title": "Fire!", "severity": "critical", "likelihood": "rare"}})
+    e = call(
+        api, "PUT", "/api/entities/RISK-2", {"data": {"title": "Fire!", "severity": "critical", "likelihood": "rare"}}
+    )
     assert e["data"]["likelihood"] == "rare"
-    e = api.dispatch("POST", "/api/entities/RISK-2/notes", {}, {"text": "Needs a mitigation", "kind": "todo"}, author="Bob <b@x>")
+    e = api.dispatch(
+        "POST", "/api/entities/RISK-2/notes", {}, {"text": "Needs a mitigation", "kind": "todo"}, author="Bob <b@x>"
+    )
     assert e["note"] == "n1" and e["data"]["notes"][0]["author"] == "Bob <b@x>"
     e = call(api, "PATCH", "/api/entities/RISK-2/notes/n1", {"status": "resolved"})
     assert e["data"]["notes"][0]["status"] == "resolved"
@@ -144,7 +148,9 @@ def test_agents_endpoints(api):
 
 def http(base, method, path, body=None, headers=None):
     h = {"Content-Type": "application/json", **(headers or {})}
-    req = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None, method=method, headers=h)
+    req = urllib.request.Request(
+        base + path, data=json.dumps(body).encode() if body is not None else None, method=method, headers=h
+    )
     try:
         with urllib.request.urlopen(req) as r:
             return r.status, r.headers, r.read()
@@ -162,13 +168,17 @@ def test_http_security_and_static(api):
         assert status == 200 and json.loads(body)["counts"]["requirements"] == 3
         # mutations need the anti-CSRF header
         assert http(base, "POST", "/api/entities", {"kind": "user_need", "data": {"title": "x"}}, auth)[0] == 403
-        status, _, body = http(base, "POST", "/api/entities", {"kind": "user_need", "data": {"title": "x"}}, {**auth, "X-RR-Request": "1"})
+        status, _, body = http(
+            base, "POST", "/api/entities", {"kind": "user_need", "data": {"title": "x"}}, {**auth, "X-RR-Request": "1"}
+        )
         assert status == 200 and json.loads(body)["id"] == "UN-3"
         # DNS rebinding: foreign Host header refused
         assert http(base, "GET", "/api/state", headers={**auth, "Host": "evil.example"})[0] == 403
         status, _, body = http(base, "GET", "/api/nope", headers=auth)
         assert status == 404 and "no such endpoint" in json.loads(body)["error"]
-        req = urllib.request.Request(base + "/api/entities", data=b"{bad", method="POST", headers={**auth, "X-RR-Request": "1"})
+        req = urllib.request.Request(
+            base + "/api/entities", data=b"{bad", method="POST", headers={**auth, "X-RR-Request": "1"}
+        )
         with pytest.raises(urllib.error.HTTPError) as exc:
             urllib.request.urlopen(req)
         assert exc.value.code == 400
@@ -183,9 +193,16 @@ def test_http_security_and_static(api):
 
 def test_followups_from_the_ui(api):
     # a level-name method is not shown as a broken reference
-    call(api, "POST", "/api/entities", {"kind": "requirement", "data": {"title": "Bench", "satisfies": ["UN-1"], "method": "hil"}})
+    call(
+        api,
+        "POST",
+        "/api/entities",
+        {"kind": "requirement", "data": {"title": "Bench", "satisfies": ["UN-1"], "method": "hil"}},
+    )
     out = call(api, "GET", "/api/entities/REQ-4")["outgoing"]
-    assert {"id": "hil", "level": True, "missing": False}.items() <= next(o for o in out if o["relation"] == "method").items()
+    assert {"id": "hil", "level": True, "missing": False}.items() <= next(
+        o for o in out if o["relation"] == "method"
+    ).items()
     # diff against an empty model, unknown refs are 404s
     d = call(api, "GET", "/api/diff", **{"from": "EMPTY", "to": "HEAD"})
     assert d["summary"]["added"] == 8 and d["summary"]["removed"] == 0
@@ -197,7 +214,9 @@ def test_followups_from_the_ui(api):
     assert exc.value.status == 404
     # the UI can show the config it needs
     cfg = call(api, "GET", "/api/state")["config"]
-    assert cfg["default_level"] == "simulation" and cfg["high_severities"] == ["high", "critical"] and "id_pattern" in cfg
+    assert (
+        cfg["default_level"] == "simulation" and cfg["high_severities"] == ["high", "critical"] and "id_pattern" in cfg
+    )
     # tag author from the body
     refs = call(api, "POST", "/api/git/tag", {"name": "b1", "author": "Zoë <z@x>"})
     assert refs["tags"][0]["name"] == "b1"
@@ -221,5 +240,6 @@ def test_ui_assets_are_packaged():
 
     names = set(os.listdir(app.STATIC))
     assert {"index.html", "app.js", "app.css"} <= names
-    html = open(os.path.join(app.STATIC, "index.html"), encoding="utf-8").read()
+    with open(os.path.join(app.STATIC, "index.html"), encoding="utf-8") as fh:
+        html = fh.read()
     assert 'type="module"' in html and "<script>" not in html  # no inline scripts (CSP)

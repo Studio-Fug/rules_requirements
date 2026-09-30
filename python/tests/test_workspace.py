@@ -11,7 +11,9 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAM
 
 
 def git(root, *args):
-    return subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True, env={**os.environ, **GIT_ENV}).stdout
+    return subprocess.run(
+        ["git", "-C", str(root), *args], check=True, capture_output=True, text=True, env={**os.environ, **GIT_ENV}
+    ).stdout
 
 
 @pytest.fixture

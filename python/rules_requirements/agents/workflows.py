@@ -97,7 +97,10 @@ class Context:
         start = max(0, line - 1)
         # Walk to the definition itself if the line is a comment/decorator above it.
         for i in range(start, min(len(lines), start + 8)):
-            if re.match(r"\s*(?:(?:pub\s+)?(?:async\s+)?(?:def|fn|class|struct|impl|func|function)\b|TEST(?:_F|_P)?\s*\()", lines[i]):
+            if re.match(
+                r"\s*(?:(?:pub\s+)?(?:async\s+)?(?:def|fn|class|struct|impl|func|function)\b|TEST(?:_F|_P)?\s*\()",
+                lines[i],
+            ):
                 start = i
                 break
         # Include decorators / attributes / comments immediately above.
@@ -111,9 +114,17 @@ class Context:
         """Best-effort source location of a test case from its name."""
         name = re.sub(r"\[.*\]$", "", case.name)
         classname = case.classname or ""
-        patterns = [re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b"), re.compile(rf"^\s*(?:pub\s+)?fn\s+{re.escape(name)}\b")]
+        patterns = [
+            re.compile(rf"^\s*(?:async\s+)?def\s+{re.escape(name)}\b"),
+            re.compile(rf"^\s*(?:pub\s+)?fn\s+{re.escape(name)}\b"),
+        ]
         if classname:
-            patterns.insert(0, re.compile(rf"^\s*(?:TEST|TEST_F|TEST_P|TYPED_TEST)\s*\(\s*{re.escape(classname.split('.')[-1])}\s*,\s*{re.escape(name)}\s*\)"))
+            patterns.insert(
+                0,
+                re.compile(
+                    rf"^\s*(?:TEST|TEST_F|TEST_P|TYPED_TEST)\s*\(\s*{re.escape(classname.split('.')[-1])}\s*,\s*{re.escape(name)}\s*\)"
+                ),
+            )
         candidates = []
         if classname:
             mod = classname.split("::")[0].replace(".", "/")
@@ -181,7 +192,19 @@ def _block_end(lines: list[str], start: int, max_lines: int) -> int:
 PROPOSAL_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["kind", "title", "description", "satisfies", "refines", "mitigates", "implemented_by", "severity", "likelihood", "method", "type"],
+    "required": [
+        "kind",
+        "title",
+        "description",
+        "satisfies",
+        "refines",
+        "mitigates",
+        "implemented_by",
+        "severity",
+        "likelihood",
+        "method",
+        "type",
+    ],
     "properties": {
         "kind": {"type": "string", "enum": ["none", "user_need", "requirement", "risk", "mitigation"]},
         "title": {"type": "string"},
@@ -197,29 +220,29 @@ PROPOSAL_SCHEMA = {
     },
 }
 
-FINDINGS_SCHEMA = {
+FINDINGS_ITEMS: dict[str, Any] = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["severity", "category", "entity", "refs", "title", "detail", "proposal"],
+        "properties": {
+            "severity": {"type": "string", "enum": ["info", "warning", "error"]},
+            "category": {"type": "string"},
+            "entity": {"type": "string", "description": "id of the entity the finding is about, or empty"},
+            "refs": {"type": "array", "items": {"type": "string"}},
+            "title": {"type": "string"},
+            "detail": {"type": "string"},
+            "proposal": PROPOSAL_SCHEMA,
+        },
+    },
+}
+
+FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["findings"],
-    "properties": {
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["severity", "category", "entity", "refs", "title", "detail", "proposal"],
-                "properties": {
-                    "severity": {"type": "string", "enum": ["info", "warning", "error"]},
-                    "category": {"type": "string"},
-                    "entity": {"type": "string", "description": "id of the entity the finding is about, or empty"},
-                    "refs": {"type": "array", "items": {"type": "string"}},
-                    "title": {"type": "string"},
-                    "detail": {"type": "string"},
-                    "proposal": PROPOSAL_SCHEMA,
-                },
-            },
-        }
-    },
+    "properties": {"findings": FINDINGS_ITEMS},
 }
 
 
@@ -243,8 +266,10 @@ def to_proposal(raw: dict[str, Any] | None, model: Model) -> dict[str, Any] | No
                 data.pop(key)
     if kind == cfg.MITIGATION and data.get("type") not in cfg.MITIGATION_TYPES:
         data.pop("type", None)
-    if kind == cfg.REQUIREMENT and data.get("method") and not (
-        data["method"] in model.test_methods or model.config.level(data["method"])
+    if (
+        kind == cfg.REQUIREMENT
+        and data.get("method")
+        and not (data["method"] in model.test_methods or model.config.level(data["method"]))
     ):
         data.pop("method")
     return {"kind": kind, "data": data}
@@ -259,7 +284,9 @@ def _llm_findings(workflow: str, raw: Any, model: Model, default_entity: str = "
         out.append(
             Finding(
                 workflow=workflow,
-                severity=item.get("severity", "info") if item.get("severity") in ("info", "warning", "error") else "info",
+                severity=item.get("severity", "info")
+                if item.get("severity") in ("info", "warning", "error")
+                else "info",
                 category=str(item.get("category", "review")),
                 title=str(item.get("title", "")).strip() or "(untitled finding)",
                 detail=str(item.get("detail", "")).strip(),
@@ -281,7 +308,9 @@ def completeness(ctx: Context, job: Job, llm: LLM | None, use_llm: bool = True, 
     findings: list[Finding] = []
     for issue in ctx.issues:
         findings.append(
-            Finding("completeness", issue.severity, f"validation:{issue.code}", issue.message, entity=issue.entity or "")
+            Finding(
+                "completeness", issue.severity, f"validation:{issue.code}", issue.message, entity=issue.entity or ""
+            )
         )
     job.say(f"model validation: {len(ctx.issues)} issue(s)")
     for gap in ctx.matrix.gaps:
@@ -305,7 +334,8 @@ def completeness(ctx: Context, job: Job, llm: LLM | None, use_llm: bool = True, 
         "1. user needs whose satisfying requirements do not fully cover the need (propose the missing requirement);\n"
         "2. requirements that are ambiguous, compound, or not objectively verifiable as written (say how to fix);\n"
         "3. behaviors implied by the requirements that introduce hazards the risk analysis lacks (propose a risk);\n"
-        "4. traces that look wrong (a requirement attached to an unrelated need, a mitigation that does not address its risk).\n"
+        "4. traces that look wrong (a requirement attached to an unrelated need, a mitigation that does not\n"
+        "   address its risk).\n"
         "Only report real problems. For proposals, reference existing ids in satisfies/mitigates/implemented_by; "
         'use kind "none" when no new object is warranted.\n\n' + ctx.digest()
     )
@@ -381,7 +411,9 @@ def _targets(ctx: Context, entities: Any, kind: str) -> list[str]:
     return ids or sorted(ctx.model.section(kind), key=natural_key)
 
 
-def test_adequacy(ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any) -> list[Finding]:
+def test_adequacy(
+    ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any
+) -> list[Finding]:
     assert llm is not None
     findings: list[Finding] = []
     for req_id in _targets(ctx, entities, cfg.REQUIREMENT)[: int(limit)]:
@@ -423,14 +455,23 @@ def test_adequacy(ctx: Context, job: Job, llm: LLM | None, entities: Any = None,
                     "warning",
                     "test-adequacy:missing-checks",
                     f"{req_id}: tests do not check everything the requirement states",
-                    detail="\n".join(f"- {m}" for m in missing) + (f"\n\n{raw.get('summary', '')}" if raw.get("summary") else ""),
+                    detail="\n".join(f"- {m}" for m in missing)
+                    + (f"\n\n{raw.get('summary', '')}" if raw.get("summary") else ""),
                     entity=req_id,
                     source="llm",
                 )
             )
         if not weak and not missing:
             findings.append(
-                Finding("test_adequacy", "info", "test-adequacy:ok", f"{req_id}: tests prove the requirement", detail=str(raw.get("summary", "")), entity=req_id, source="llm")
+                Finding(
+                    "test_adequacy",
+                    "info",
+                    "test-adequacy:ok",
+                    f"{req_id}: tests prove the requirement",
+                    detail=str(raw.get("summary", "")),
+                    entity=req_id,
+                    source="llm",
+                )
             )
     return findings
 
@@ -447,7 +488,9 @@ IMPLEMENTATION_SCHEMA = {
 }
 
 
-def implementation_review(ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any) -> list[Finding]:
+def implementation_review(
+    ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any
+) -> list[Finding]:
     assert llm is not None
     findings: list[Finding] = []
     for req_id in _targets(ctx, entities, cfg.REQUIREMENT)[: int(limit)]:
@@ -497,18 +540,23 @@ MITIGATION_SCHEMA = {
                 "required": ["mitigation", "verdict", "rationale"],
                 "properties": {
                     "mitigation": {"type": "string"},
-                    "verdict": {"type": "string", "enum": ["effective", "partially-effective", "ineffective", "cannot-tell"]},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["effective", "partially-effective", "ineffective", "cannot-tell"],
+                    },
                     "rationale": {"type": "string"},
                 },
             },
         },
         "residual_assessment": {"type": "string"},
-        "findings": FINDINGS_SCHEMA["properties"]["findings"],
+        "findings": FINDINGS_ITEMS,
     },
 }
 
 
-def mitigation_adequacy(ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any) -> list[Finding]:
+def mitigation_adequacy(
+    ctx: Context, job: Job, llm: LLM | None, entities: Any = None, limit: int = 25, **_: Any
+) -> list[Finding]:
     assert llm is not None
     findings: list[Finding] = []
     for risk_id in _targets(ctx, entities, cfg.RISK)[: int(limit)]:
@@ -554,7 +602,15 @@ def mitigation_adequacy(ctx: Context, job: Job, llm: LLM | None, entities: Any =
                 )
         if str(raw.get("residual_assessment", "")).strip():
             findings.append(
-                Finding("mitigation_adequacy", "info", "mitigation:residual", f"{risk_id}: residual risk assessment", detail=str(raw["residual_assessment"]), entity=risk_id, source="llm")
+                Finding(
+                    "mitigation_adequacy",
+                    "info",
+                    "mitigation:residual",
+                    f"{risk_id}: residual risk assessment",
+                    detail=str(raw["residual_assessment"]),
+                    entity=risk_id,
+                    source="llm",
+                )
             )
         findings += _llm_findings("mitigation_adequacy", raw, ctx.model, default_entity=risk_id)
     return findings
@@ -566,11 +622,11 @@ def risk_discovery(ctx: Context, job: Job, llm: LLM | None, **_: Any) -> list[Fi
     prompt = (
         "Perform a preliminary hazard analysis of the product described by this model. Identify hazards and "
         "hazardous situations that the existing risks do not cover — foreseeable misuse, failure modes of the "
-        "specified behavior, and sequences of events (ISO 14971 §5.4). For each, propose a risk (kind \"risk\" "
+        'specified behavior, and sequences of events (ISO 14971 §5.4). For each, propose a risk (kind "risk" '
         "with severity/likelihood from the model's scales) and describe candidate controls in the detail. "
         "Do not repeat risks that are already present.\n\n"
-        f"Severity scale: {', '.join(ctx.model.config.severities)}. Likelihood scale: {', '.join(ctx.model.config.likelihoods)}.\n\n"
-        + ctx.digest()
+        f"Severity scale: {', '.join(ctx.model.config.severities)}. "
+        f"Likelihood scale: {', '.join(ctx.model.config.likelihoods)}.\n\n" + ctx.digest()
     )
     raw = llm.json(SYSTEM, prompt, FINDINGS_SCHEMA)
     return _llm_findings("risk_discovery", raw, ctx.model)
@@ -601,7 +657,9 @@ OPERATIONS_SCHEMA = {
 }
 
 
-def assistant(ctx: Context, job: Job, llm: LLM | None, instruction: str = "", focus: Any = None, **_: Any) -> list[Finding]:
+def assistant(
+    ctx: Context, job: Job, llm: LLM | None, instruction: str = "", focus: Any = None, **_: Any
+) -> list[Finding]:
     """Turn a free-form instruction into proposed operations (never applied here)."""
     assert llm is not None
     if not instruction.strip():
@@ -609,13 +667,13 @@ def assistant(ctx: Context, job: Job, llm: LLM | None, instruction: str = "", fo
     focus_ids = [f for f in (focus or []) if ctx.model.get(f)]
     detail = ""
     if focus_ids:
-        detail = "\n\nFocus entities (full data):\n" + "\n".join(
-            f"- {entity_to_dict(ctx.model.get(f))}" for f in focus_ids  # type: ignore[arg-type]
-        )
+        focused = [e for f in focus_ids if (e := ctx.model.get(f)) is not None]
+        detail = "\n\nFocus entities (full data):\n" + "\n".join(f"- {entity_to_dict(e)}" for e in focused)
     prompt = (
         "You help maintain this requirements model. Carry out the user's instruction by proposing operations: "
-        '"create" a new entity (fill entity), "update" an existing entity (id + the complete new field values in entity; '
-        'fields you leave empty are removed, so repeat unchanged values), or "note" to attach a note to an entity. '
+        '"create" a new entity (fill entity), "update" an existing entity (id + the complete new field values '
+        'in entity; fields you leave empty are removed, so repeat unchanged values), or "note" to attach a note '
+        "to an entity. "
         "Keep ids out of new entities (they are assigned on save). Reply briefly with what you propose and why.\n\n"
         f"Instruction: {instruction}{detail}\n\nModel:\n" + ctx.digest()
     )
@@ -625,7 +683,17 @@ def assistant(ctx: Context, job: Job, llm: LLM | None, instruction: str = "", fo
     for op in raw.get("operations", []):
         kind = op.get("op")
         if kind == "note" and ctx.model.get(op.get("id", "")):
-            findings.append(Finding("assistant", "info", "assistant:note", f"Note on {op['id']}", detail=op.get("note", ""), entity=op["id"], source="llm"))
+            findings.append(
+                Finding(
+                    "assistant",
+                    "info",
+                    "assistant:note",
+                    f"Note on {op['id']}",
+                    detail=op.get("note", ""),
+                    entity=op["id"],
+                    source="llm",
+                )
+            )
             ops.append(op)
         elif kind in ("create", "update"):
             prop = to_proposal(op.get("entity"), ctx.model)
@@ -641,7 +709,8 @@ def assistant(ctx: Context, job: Job, llm: LLM | None, instruction: str = "", fo
                     "assistant",
                     "info",
                     f"assistant:{kind}",
-                    (f"Update {target}" if kind == "update" else f"New {prop['kind'].replace('_', ' ')}") + f": {prop['data'].get('title', '')}",
+                    (f"Update {target}" if kind == "update" else f"New {prop['kind'].replace('_', ' ')}")
+                    + f": {prop['data'].get('title', '')}",
                     detail=op.get("rationale", ""),
                     entity=target,
                     proposal={**prop, "op": kind},

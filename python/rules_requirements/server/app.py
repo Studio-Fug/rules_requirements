@@ -114,7 +114,9 @@ class Api:
 
     def _context(self, job: Any) -> Context:
         snap = self.ws.snapshot()
-        return Context(model=snap.model, matrix=snap.matrix, root=self.ws.root, references=snap.references, issues=snap.issues)
+        return Context(
+            model=snap.model, matrix=snap.matrix, root=self.ws.root, references=snap.references, issues=snap.issues
+        )
 
     @staticmethod
     def _q(query: dict[str, list[str]], key: str, default: str = "") -> str:
@@ -153,7 +155,14 @@ class Api:
             },
             "counts": snap.matrix.counts(),
             "issues": [
-                {"severity": i.severity, "code": i.code, "message": i.message, "entity": i.entity, "path": i.location.path, "line": i.location.line}
+                {
+                    "severity": i.severity,
+                    "code": i.code,
+                    "message": i.message,
+                    "entity": i.entity,
+                    "path": i.location.path,
+                    "line": i.location.line,
+                }
                 for i in snap.issues
             ],
             "warnings": snap.warnings,
@@ -290,7 +299,12 @@ class Api:
     def git_tag(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         body = _obj(body)
         author = str(body.get("author") or self._author(params))
-        self.ws.tag(str(body.get("name", "")), str(body.get("message", "")), str(body.get("ref", "HEAD") or "HEAD"), author=author)
+        self.ws.tag(
+            str(body.get("name", "")),
+            str(body.get("message", "")),
+            str(body.get("ref", "HEAD") or "HEAD"),
+            author=author,
+        )
         return self.ws.refs()
 
     def git_commit(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
@@ -301,7 +315,10 @@ class Api:
     # ------------------------------------------------------------------ agents
 
     def agents(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        return {"llm": llm_status(self.llm, self.llm_enabled), "workflows": [w.to_dict(self.llm is not None) for w in WORKFLOWS.values()]}
+        return {
+            "llm": llm_status(self.llm, self.llm_enabled),
+            "workflows": [w.to_dict(self.llm is not None) for w in WORKFLOWS.values()],
+        }
 
     def run_agent(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         body = _obj(body)
@@ -309,7 +326,12 @@ class Api:
         return job.to_dict()
 
     def list_jobs(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        return {"jobs": [{k: v for k, v in j.to_dict().items() if k not in ("findings", "log")} | {"findings": len(j.findings)} for j in reversed(list(self.jobs.jobs.values()))]}
+        return {
+            "jobs": [
+                {k: v for k, v in j.to_dict().items() if k not in ("findings", "log")} | {"findings": len(j.findings)}
+                for j in reversed(list(self.jobs.jobs.values()))
+            ]
+        }
 
     def get_job(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         job = self.jobs.jobs.get(params["job"])
@@ -432,7 +454,7 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
                     result = api.dispatch(method, url.path, parse_qs(url.query), body, author=author)
                 except HttpError as exc:
                     return self._json(exc.status, {"error": str(exc)})
-                except Exception as exc:  # noqa: BLE001 — never kill the server thread
+                except Exception as exc:
                     return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
                 return self._json(200, result)
             if method not in ("GET", "HEAD"):
@@ -455,22 +477,22 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
             )
             self._send(200, data, ctype, {"Content-Security-Policy": csp})
 
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             self._handle("GET")
 
-        def do_HEAD(self) -> None:  # noqa: N802
+        def do_HEAD(self) -> None:
             self._handle("HEAD")
 
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             self._handle("POST")
 
-        def do_PUT(self) -> None:  # noqa: N802
+        def do_PUT(self) -> None:
             self._handle("PUT")
 
-        def do_PATCH(self) -> None:  # noqa: N802
+        def do_PATCH(self) -> None:
             self._handle("PATCH")
 
-        def do_DELETE(self) -> None:  # noqa: N802
+        def do_DELETE(self) -> None:
             self._handle("DELETE")
 
     return RequestHandler
@@ -486,16 +508,16 @@ def serve(
 ) -> ThreadingHTTPServer:
     """Start the server on a background thread and return it (``.shutdown()`` to stop)."""
     extra = set(allowed_hosts or ())
-    if host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::"):
+    if host not in ("127.0.0.1", "localhost", "::1", "0.0.0.0", "::"):  # noqa: S104 — only a comparison
         extra.add(host.lower())
     httpd = ThreadingHTTPServer((host, port), make_handler(api, token, extra))
     httpd.daemon_threads = True
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     if ready:
-        shown = "localhost" if host in ("127.0.0.1", "0.0.0.0", "::") else host
+        shown = "localhost" if host in ("127.0.0.1", "0.0.0.0", "::") else host  # noqa: S104
         ready(f"http://{shown}:{httpd.server_address[1]}/")
     return httpd
 
 
-__all__ = ["Api", "HttpError", "HTTPStatus", "serve"]
+__all__ = ["Api", "HTTPStatus", "HttpError", "serve"]

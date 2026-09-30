@@ -88,7 +88,9 @@ def test_delete_and_insert():
     assert parse(out).get("RISK-1").severity == "high"
     with pytest.raises(KeyError):
         edit.delete_entity(out, "NOPE-1")
-    assert edit.insert_entity("", "user_need", {"id": "UN-1", "title": "t"}) == "user_needs:\n  - id: UN-1\n    title: t\n"
+    assert (
+        edit.insert_entity("", "user_need", {"id": "UN-1", "title": "t"}) == "user_needs:\n  - id: UN-1\n    title: t\n"
+    )
 
 
 def test_single_object_documents():
@@ -115,7 +117,7 @@ def test_render_scalars_and_blocks():
         },
         indent=2,
     )
-    assert rendered.startswith("  - id: REQ-1\n    title: \"Needs: quoting\"\n    description: >-\n")
+    assert rendered.startswith('  - id: REQ-1\n    title: "Needs: quoting"\n    description: >-\n')
     assert "    rationale: |-\n      line one\n      line two\n" in rendered
     assert "verified_by: [//pkg:test, {target: //pkg:hw, level: hil}]" in rendered
     assert 'tags: ["yes", "2026-01-01"]' in rendered

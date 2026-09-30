@@ -141,7 +141,7 @@ class JobManager:
             job.findings = findings
             job.status = "done"
             job.say(f"finished: {len(findings)} finding(s)")
-        except Exception as exc:  # noqa: BLE001 — report any failure on the job
+        except Exception as exc:
             job.status, job.error = "failed", f"{type(exc).__name__}: {exc}"
             job.say(f"failed: {job.error}")
             job.log.extend(traceback.format_exc().splitlines()[-6:])

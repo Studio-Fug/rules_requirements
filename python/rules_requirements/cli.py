@@ -263,7 +263,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 def cmd_diff(args: argparse.Namespace) -> int:
     from rules_requirements.server.workspace import Workspace, WorkspaceError
 
-    ws = Workspace(root=_path(args.root) if args.root else _root(), model_paths=[_path(p) for p in args.model], scan=False)
+    ws = Workspace(
+        root=_path(args.root) if args.root else _root(), model_paths=[_path(p) for p in args.model], scan=False
+    )
     try:
         changes = ws.diff(args.old, args.new)
     except WorkspaceError as exc:
@@ -311,7 +313,9 @@ def cmd_serve(args: argparse.Namespace) -> int:
         port=args.port,
         token=args.token,
         allowed_hosts=set(args.allow_host or ()),
-        ready=lambda url: print(f"rr serve: open {url}" + (f"#token={args.token}" if args.token else ""), file=sys.stderr),
+        ready=lambda url: print(
+            f"rr serve: open {url}" + (f"#token={args.token}" if args.token else ""), file=sys.stderr
+        ),
     )
     try:
         while True:

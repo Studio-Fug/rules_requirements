@@ -9,10 +9,19 @@ def model(text):
 
 
 def test_diff_models():
-    a = model("user_needs: [{id: UN-1, title: A}, {id: UN-2, title: B}]\nrequirements: [{id: REQ-1, title: R, satisfies: [UN-1]}]\n")
-    b = model("user_needs: [{id: UN-1, title: A2}, {id: UN-3, title: C}]\nrequirements: [{id: REQ-1, title: R, satisfies: [UN-1, UN-3], notes: [x]}]\n")
+    a = model(
+        "user_needs: [{id: UN-1, title: A}, {id: UN-2, title: B}]\nrequirements: [{id: REQ-1, title: R, satisfies: [UN-1]}]\n"
+    )
+    b = model(
+        "user_needs: [{id: UN-1, title: A2}, {id: UN-3, title: C}]\nrequirements: [{id: REQ-1, title: R, satisfies: [UN-1, UN-3], notes: [x]}]\n"
+    )
     changes = diff.diff_models(a, b)
-    assert [(c.id, c.change) for c in changes] == [("UN-1", "modified"), ("UN-2", "removed"), ("UN-3", "added"), ("REQ-1", "modified")]
+    assert [(c.id, c.change) for c in changes] == [
+        ("UN-1", "modified"),
+        ("UN-2", "removed"),
+        ("UN-3", "added"),
+        ("REQ-1", "modified"),
+    ]
     assert changes[0].fields == {"title": ("A", "A2")}
     assert changes[3].fields["satisfies"] == (["UN-1"], ["UN-1", "UN-3"])
     assert "notes" in changes[3].fields

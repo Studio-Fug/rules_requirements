@@ -154,7 +154,9 @@ class Workspace:
         prefix = model.config.prefix(kind)
         existing = [e.id for e in model.section(kind).values()]
         nums = [int(m.group(1)) for i in existing if (m := re.match(re.escape(prefix) + r"-(\d+)$", i))]
-        width = max((len(i.split("-", 1)[1]) for i in existing if re.match(re.escape(prefix) + r"-0\d+$", i)), default=0)
+        width = max(
+            (len(i.split("-", 1)[1]) for i in existing if re.match(re.escape(prefix) + r"-0\d+$", i)), default=0
+        )
         return f"{prefix}-{(max(nums) + 1 if nums else 1):0{width}d}"
 
     def file_for_new(self, kind: str) -> str:
@@ -199,7 +201,11 @@ class Workspace:
             target = self._rel(file) if file else self.file_for_new(kind)
             if not target.endswith((".yaml", ".yml", ".json")):
                 target = f"{target}/{ent.id}.yaml"
-            if os.path.exists(self.abspath(target)) and target.endswith((".yaml", ".yml")) and not self._single_object(target):
+            if (
+                os.path.exists(self.abspath(target))
+                and target.endswith((".yaml", ".yml"))
+                and not self._single_object(target)
+            ):
                 text = edit.insert_entity(self._read(target), kind, edit.entity_to_dict(ent))
             elif os.path.exists(self.abspath(target)):
                 raise WorkspaceError(f"{target} already exists", 409)
@@ -320,7 +326,9 @@ class Workspace:
                 raise WorkspaceError(f"{entity_id} does not exist", 404)
             used = {n.id for n in ent.notes}
             nid = next(f"n{i}" for i in range(1, len(used) + 2) if f"n{i}" not in used)
-            note = Note(text=text.strip(), kind=kind, author=author or self.author, created=_dt.date.today().isoformat(), id=nid)
+            note = Note(
+                text=text.strip(), kind=kind, author=author or self.author, created=_dt.date.today().isoformat(), id=nid
+            )
             data = edit.entity_to_dict(replace(ent, notes=(*ent.notes, note)))
             self.update(entity_id, data)
             return nid
@@ -332,7 +340,10 @@ class Workspace:
                 raise WorkspaceError(f"{entity_id} does not exist", 404)
             if note_id not in {n.id for n in ent.notes}:
                 raise WorkspaceError(f"{entity_id} has no note {note_id}", 404)
-            notes = tuple(replace(n, **{k: v for k, v in changes.items() if v is not None}) if n.id == note_id else n for n in ent.notes)
+            notes = tuple(
+                replace(n, **{k: v for k, v in changes.items() if v is not None}) if n.id == note_id else n
+                for n in ent.notes
+            )
             self.update(entity_id, edit.entity_to_dict(replace(ent, notes=notes)))
 
     def delete_note(self, entity_id: str, note_id: str) -> None:
@@ -402,23 +413,58 @@ class Workspace:
         changed = [line[3:] for line in porcelain.splitlines() if line.strip()]
         name = self.git("config", "user.name", check=False).strip()
         email = self.git("config", "user.email", check=False).strip()
-        return {"git": True, "branch": branch, "head": head, "changed": changed, "user": f"{name} <{email}>" if name else ""}
+        return {
+            "git": True,
+            "branch": branch,
+            "head": head,
+            "changed": changed,
+            "user": f"{name} <{email}>" if name else "",
+        }
 
     def refs(self) -> dict[str, Any]:
         if not self.is_git():
             return {"branches": [], "tags": [], "head": ""}
-        branches = [b.strip() for b in self.git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes").splitlines() if b.strip() and not b.endswith("/HEAD")]
+        branches = [
+            b.strip()
+            for b in self.git("for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes").splitlines()
+            if b.strip() and not b.endswith("/HEAD")
+        ]
         tags = []
-        for line in self.git("for-each-ref", "--sort=-creatordate", "--format=%(refname:short)\t%(objectname:short)\t%(creatordate:short)\t%(contents:subject)", "refs/tags").splitlines():
+        for line in self.git(
+            "for-each-ref",
+            "--sort=-creatordate",
+            "--format=%(refname:short)\t%(objectname:short)\t%(creatordate:short)\t%(contents:subject)",
+            "refs/tags",
+        ).splitlines():
             parts = line.split("\t")
             if parts and parts[0]:
-                tags.append({"name": parts[0], "sha": parts[1] if len(parts) > 1 else "", "date": parts[2] if len(parts) > 2 else "", "message": parts[3] if len(parts) > 3 else ""})
-        return {"branches": branches, "tags": tags, "head": self.git("rev-parse", "--abbrev-ref", "HEAD", check=False).strip()}
+                tags.append(
+                    {
+                        "name": parts[0],
+                        "sha": parts[1] if len(parts) > 1 else "",
+                        "date": parts[2] if len(parts) > 2 else "",
+                        "message": parts[3] if len(parts) > 3 else "",
+                    }
+                )
+        return {
+            "branches": branches,
+            "tags": tags,
+            "head": self.git("rev-parse", "--abbrev-ref", "HEAD", check=False).strip(),
+        }
 
     def log(self, limit: int = 30, ref: str = "HEAD") -> list[dict[str, str]]:
         if not self.is_git():
             return []
-        out = self.git("log", f"-n{int(limit)}", "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s", "--date=short", self._resolve(ref), "--", *self.model_paths, check=False)
+        out = self.git(
+            "log",
+            f"-n{int(limit)}",
+            "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s",
+            "--date=short",
+            self._resolve(ref),
+            "--",
+            *self.model_paths,
+            check=False,
+        )
         rows = []
         for line in out.splitlines():
             full, short, author, date, subject = (line.split("\x1f") + ["", "", "", "", ""])[:5]
@@ -460,7 +506,9 @@ class Workspace:
     def tag(self, name: str, message: str = "", ref: str = "HEAD", author: str = "") -> None:
         """Name a baseline: an annotated tag on ``ref``."""
         name = name.strip()
-        if subprocess.run(["git", "check-ref-format", f"refs/tags/{name}"], capture_output=True).returncode != 0 or name.startswith("-"):
+        if subprocess.run(
+            ["git", "check-ref-format", f"refs/tags/{name}"], capture_output=True
+        ).returncode != 0 or name.startswith("-"):
             raise WorkspaceError(f"invalid tag name {name!r}")
         if self.git("tag", "--list", name).strip():
             raise WorkspaceError(f"tag {name} already exists", 409)
@@ -501,9 +549,28 @@ def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
         t = snap.model.get(target)
         if t is None and rel == "method" and snap.model.config.level(target) is not None:
             # A requirement may name a verification level directly: not a trace.
-            outgoing.append({"id": target, "kind": "level", "relation": rel, "title": "verification level", "status": "", "missing": False, "level": True})
+            outgoing.append(
+                {
+                    "id": target,
+                    "kind": "level",
+                    "relation": rel,
+                    "title": "verification level",
+                    "status": "",
+                    "missing": False,
+                    "level": True,
+                }
+            )
             continue
-        outgoing.append({"id": target, "kind": t.kind if t else "", "relation": rel, "title": t.title if t else "", "status": _status(snap, target), "missing": t is None})
+        outgoing.append(
+            {
+                "id": target,
+                "kind": t.kind if t else "",
+                "relation": rel,
+                "title": t.title if t else "",
+                "status": _status(snap, target),
+                "missing": t is None,
+            }
+        )
     return {
         "id": ent.id,
         "kind": ent.kind,
@@ -514,7 +581,9 @@ def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
         "provided": verdict.provided if verdict else "",
         "stale": bool(verdict and verdict.stale),
         "pyramid_violation": bool(verdict and verdict.pyramid_violation),
-        "evidence": [e.to_dict() | ({"source": e.source} if e.source else {}) for e in (verdict.evidence if verdict else [])],
+        "evidence": [
+            e.to_dict() | ({"source": e.source} if e.source else {}) for e in (verdict.evidence if verdict else [])
+        ],
         "implemented_in": [r.to_dict() for r in (verdict.implemented_in if verdict else [])],
         "verified_in": [r.to_dict() for r in (verdict.verified_in if verdict else [])],
         "incoming": sorted(incoming, key=lambda x: natural_key(x["id"])),
@@ -530,7 +599,14 @@ def _status(snap: Snapshot, entity_id: str) -> str:
 
 
 def _issue(i: Issue) -> dict[str, Any]:
-    return {"severity": i.severity, "code": i.code, "message": i.message, "entity": i.entity, "path": i.location.path, "line": i.location.line}
+    return {
+        "severity": i.severity,
+        "code": i.code,
+        "message": i.message,
+        "entity": i.entity,
+        "path": i.location.path,
+        "line": i.location.line,
+    }
 
 
 def summary_rows(ws: Workspace, kinds: Iterable[str] = cfg.KINDS) -> list[dict[str, Any]]:

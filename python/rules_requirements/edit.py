@@ -50,10 +50,14 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
 
 def _note_dict(n: Note) -> dict[str, str]:
     d = {"id": n.id, "text": n.text, "kind": n.kind, "status": n.status, "author": n.author, "created": n.created}
-    return {k: v for k, v in d.items() if v and not (k == "kind" and v == "comment") and not (k == "status" and v == "open")}
+    return {
+        k: v for k, v in d.items() if v and not (k == "kind" and v == "comment") and not (k == "status" and v == "open")
+    }
 
 
-def dict_to_entity(kind: str, data: Mapping[str, Any], location: Location | None = None) -> tuple[Entity | None, list[str]]:
+def dict_to_entity(
+    kind: str, data: Mapping[str, Any], location: Location | None = None
+) -> tuple[Entity | None, list[str]]:
     """Parse plain data into an entity; returns (entity, problems)."""
     errors: list[str] = []
     unknown: list[str] = []
@@ -81,7 +85,13 @@ def _scalar(value: Any) -> str:
     if isinstance(value, (int, float)):
         return repr(value)
     text = str(value)
-    if _PLAIN.match(text) and not _RESERVED.match(text) and not text.endswith((" ", ":")) and ": " not in text and " #" not in text:
+    if (
+        _PLAIN.match(text)
+        and not _RESERVED.match(text)
+        and not text.endswith((" ", ":"))
+        and ": " not in text
+        and " #" not in text
+    ):
         return text
     return json.dumps(text, ensure_ascii=False)
 
@@ -148,7 +158,9 @@ def _dash(lines: list[str], indent: int) -> list[str]:
     return lines
 
 
-def render_entity(kind: str, data: Mapping[str, Any], indent: int = 0, list_item: bool = True, with_kind: bool = False) -> str:
+def render_entity(
+    kind: str, data: Mapping[str, Any], indent: int = 0, list_item: bool = True, with_kind: bool = False
+) -> str:
     """Canonical YAML text for one entity (ends with a newline).
 
     ``list_item`` renders it as a ``- id: ...`` sequence entry whose dash sits
@@ -217,9 +229,11 @@ def locate(text: str, entity_id: str) -> Span | None:
             continue
         keys = {_scalar_value(k): v for k, v in doc.value}
         if "kind" in keys and _scalar_value(keys.get("id", yaml.ScalarNode("", ""))) == entity_id:
-            kind = cfg.KIND_BY_SECTION.get(_scalar_value(keys["kind"]), _scalar_value(keys["kind"]))
+            doc_kind = _scalar_value(keys["kind"])
             start = _line_start(text, doc.start_mark.index)
-            return Span(start, _content_end(text, _node_end(doc)), 0, False, kind)
+            return Span(
+                start, _content_end(text, _node_end(doc)), 0, False, cfg.KIND_BY_SECTION.get(doc_kind, doc_kind)
+            )
         for section, seq in keys.items():
             kind = cfg.KIND_BY_SECTION.get(section)
             if kind is None or not isinstance(seq, yaml.SequenceNode):
@@ -346,7 +360,11 @@ def insert_entity(text: str, kind: str, data: Mapping[str, Any]) -> str:
             if seq.flow_style or not seq.value:
                 continue
             ids = [
-                _scalar_value(v) for item in seq.value if isinstance(item, yaml.MappingNode) for kk, v in item.value if _scalar_value(kk) == "id"
+                _scalar_value(v)
+                for item in seq.value
+                if isinstance(item, yaml.MappingNode)
+                for kk, v in item.value
+                if _scalar_value(kk) == "id"
             ]
             if ids:
                 last = locate(text, ids[-1])
