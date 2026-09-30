@@ -260,6 +260,67 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_diff(args: argparse.Namespace) -> int:
+    from rules_requirements.server.workspace import Workspace, WorkspaceError
+
+    ws = Workspace(root=_path(args.root) if args.root else _root(), model_paths=[_path(p) for p in args.model], scan=False)
+    try:
+        changes = ws.diff(args.old, args.new)
+    except WorkspaceError as exc:
+        print(f"rr diff: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps([c.to_dict() for c in changes], indent=2))
+    else:
+        from rules_requirements.diff import render_text, summarize
+
+        sys.stdout.write(render_text(changes))
+        s = summarize(changes)
+        print(f"{s['added']} added, {s['removed']} removed, {s['modified']} modified", file=sys.stderr)
+    return 1 if (changes and args.exit_code) else 0
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    import time
+
+    from rules_requirements.agents.llm import default_llm, llm_status
+    from rules_requirements.server.app import Api, serve
+    from rules_requirements.server.workspace import Workspace
+
+    ws = Workspace(
+        root=_path(args.root) if args.root else _root(),
+        model_paths=[_path(p) for p in args.model],
+        evidence_paths=[_path(p) for p in args.evidence],
+        current_build=_kv(args.current_build),
+        scan=not args.no_scan,
+        author=args.author,
+    )
+    snap = ws.snapshot()
+    llm = default_llm(enabled=not args.no_llm, model=args.agent_model, effort=args.agent_effort)
+    api = Api(ws, llm=llm, llm_enabled=not args.no_llm, author=args.author)
+    status = llm_status(llm, not args.no_llm)
+    print(
+        f"rr serve: {len(ws.files())} model file(s), {len(snap.model.ids())} entities, "
+        f"{len(snap.matrix.evidence.cases)} test case(s); agents: "
+        + (status["name"] if status["available"] else f"deterministic only ({status['reason']})"),
+        file=sys.stderr,
+    )
+    httpd = serve(
+        api,
+        host=args.host,
+        port=args.port,
+        token=args.token,
+        allowed_hosts=set(args.allow_host or ()),
+        ready=lambda url: print(f"rr serve: open {url}" + (f"#token={args.token}" if args.token else ""), file=sys.stderr),
+    )
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        httpd.shutdown()
+    return 0
+
+
 def cmd_wrap(args: argparse.Namespace) -> int:
     from rules_requirements.hooks import wrap
 
@@ -331,6 +392,31 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--format", action="append")
     i.add_argument("--ingestor", action="append")
     i.set_defaults(func=cmd_ingest)
+
+    d = sub.add_parser("diff", help="semantic diff of the model between two git refs")
+    model_arg(d)
+    d.add_argument("old", help="git ref (e.g. main, v1.0, HEAD~3)")
+    d.add_argument("new", nargs="?", default="WORKTREE", help="git ref, or WORKTREE (default)")
+    d.add_argument("--root", default="", help="repository root (default: workspace)")
+    d.add_argument("--json", action="store_true")
+    d.add_argument("--exit-code", action="store_true", help="exit 1 when the model changed")
+    d.set_defaults(func=cmd_diff)
+
+    sv = sub.add_parser("serve", help="interactive web editor with tracing, versioning and agents")
+    model_arg(sv)
+    sv.add_argument("--evidence", nargs="*", default=[], help="test evidence (e.g. bazel-testlogs)")
+    sv.add_argument("--root", default="", help="repository root (default: workspace)")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8080)
+    sv.add_argument("--token", default="", help="require this bearer token on API requests")
+    sv.add_argument("--allow-host", action="append", help="extra Host header value to accept (e.g. behind a proxy)")
+    sv.add_argument("--author", default="", help='default author for edits and commits, "Name <email>"')
+    sv.add_argument("--current-build", action="append", metavar="KEY=VALUE")
+    sv.add_argument("--no-scan", action="store_true", help="skip the source annotation scan")
+    sv.add_argument("--no-llm", action="store_true", help="disable LLM-backed agent workflows")
+    sv.add_argument("--agent-model", default="", help="Claude model for agents (default claude-opus-5-5)")
+    sv.add_argument("--agent-effort", default="", help="effort for agent requests (default high)")
+    sv.set_defaults(func=cmd_serve)
 
     w = sub.add_parser("wrap", help="run a test binary and emit traceability JUnit", add_help=False)
     w.add_argument("rest", nargs=argparse.REMAINDER)

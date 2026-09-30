@@ -524,6 +524,14 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
                 ROUTE_HUMAN,
             )
         )
+    # Open notes are work items too: an agent's gap finding, a reviewer's
+    # question or a TODO recorded on an entity drives the next cycle.
+    for ent in m.entities():
+        for note in ent.notes:
+            if note.status == "open" and note.kind in ("gap", "todo", "question"):
+                v = matrix.verdicts.get(ent.id)
+                route = ROUTE_HUMAN if note.kind == "question" else route_for(v.demanded, c) if v and v.demanded else ROUTE_AUTONOMOUS
+                gaps.append(Gap(f"note:{note.kind}", ent.id, note.text.splitlines()[0][:200], route))
     for rid, cases in matrix.unknown_evidence.items():
         gaps.append(
             Gap("unknown-id", rid, f"evidence references an undefined id: {', '.join(cases)}", ROUTE_AUTONOMOUS)
