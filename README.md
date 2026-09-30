@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/_static/logo/rules_requirements_logo-dark.svg">
+  <img align="right" width="112" src="docs/_static/logo/rules_requirements_logo.svg" alt="rules_requirements logo: three verified nodes joined by directed edges">
+</picture>
+
 # rules_requirements
 
 [![CI](https://github.com/Studio-Fug/rules_requirements/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/Studio-Fug/rules_requirements/actions/workflows/ci.yaml)

@@ -34,17 +34,22 @@ extensions = [
 ]
 
 source_suffix = {".md": "markdown", ".rst": "restructuredtext"}
-exclude_patterns = ["_build", "_generated", "Thumbs.db", ".DS_Store", "requirements.txt"]
+exclude_patterns = ["_build", "_generated", "_static", "Thumbs.db", ".DS_Store", "requirements.txt"]
 
 myst_enable_extensions = ["colon_fence", "deflist", "fieldlist", "attrs_inline"]
 myst_heading_anchors = 3
 
 html_theme = "furo"
 html_title = f"rules_requirements {release}"
+html_favicon = "_static/logo/rules_requirements_logo.svg"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_extra_path = ["_generated/extra"]
 html_theme_options = {
+    # The logo's black and white are swapped for dark backgrounds, where the
+    # original's black edges would disappear.
+    "light_logo": "logo/rules_requirements_logo.svg",
+    "dark_logo": "logo/rules_requirements_logo-dark.svg",
     "source_repository": "https://github.com/Studio-Fug/rules_requirements/",
     "source_branch": "main",
     "source_directory": "docs/",

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">rules_requirements logo (for dark backgrounds)</title>
+  <desc id="desc">Three verified nodes connected bottom-left to top-left to top-right.</desc>
+
+  <defs>
+    <!-- Canonical right-pointing arrow: shaft begins at source circle edge (x=98),
+         head tip reaches x=164, overlapping destination outer edge x=158 by 6. -->
+    <g id="arrow-right" fill="#ffffff">
+      <rect x="98" y="57" width="48" height="14"/>
+      <path d="M140 43 L164 64 L140 85 Z"/>
+    </g>
+
+    <!-- Canonical check centered around local origin. -->
+    <path id="check"
+          d="M-17 0 L-6 11 L17 -12"
+          fill="none" stroke="#16b84e" stroke-width="10"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </defs>
+
+  <!-- Edges first -->
+  <use href="#arrow-right"/>
+  <!-- Exact 90° rotation of the same arrow: bottom-left -> top-left -->
+  <g fill="#ffffff">
+    <rect x="57" y="110" width="14" height="48"/>
+    <path d="M43 116 L64 92 L85 116 Z"/>
+  </g>
+
+  <!-- Nodes -->
+  <g fill="#111111" stroke="#ffffff" stroke-width="12">
+    <circle cx="64" cy="64" r="34"/>
+    <circle cx="192" cy="64" r="34"/>
+    <circle cx="64" cy="192" r="34"/>
+  </g>
+
+  <!-- Identical centered checks -->
+  <use href="#check" transform="translate(64 64)"/>
+  <use href="#check" transform="translate(192 64)"/>
+  <use href="#check" transform="translate(64 192)"/>
+</svg>
