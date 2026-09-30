@@ -501,8 +501,10 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
 
         def _static(self, path: str) -> None:
             rel = "index.html" if path in ("", "/") else path.lstrip("/")
-            full = os.path.realpath(os.path.join(STATIC, rel))
-            if not full.startswith(os.path.realpath(STATIC) + os.sep) or not os.path.isfile(full):
+            # Confine lexically: the files themselves may be symlinks (Bazel
+            # runfiles), and the static directory is ours.
+            full = os.path.normpath(os.path.join(STATIC, rel))
+            if not full.startswith(STATIC + os.sep) or "\0" in rel or not os.path.isfile(full):
                 return self._json(404, {"error": "not found"})
             ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
             if ctype.startswith("text/") or ctype in ("application/javascript", "application/json"):

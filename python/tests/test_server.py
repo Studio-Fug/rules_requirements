@@ -360,3 +360,26 @@ def test_ipv6_urls_are_bracketed(api):
         pytest.skip("no IPv6 loopback here")
     httpd.shutdown()
     assert urls[0].startswith("http://[::1]:")
+
+
+def test_static_files_may_be_symlinks_but_never_escape(api, tmp_path, monkeypatch):
+    from rules_requirements.server import app as app_module
+
+    real = tmp_path / "src"
+    (real / "js").mkdir(parents=True)
+    (real / "index.html").write_text("<html>ok</html>")
+    (real / "js" / "a.js").write_text("export {};")
+    (tmp_path / "secret.txt").write_text("secret")
+    runfiles = tmp_path / "runfiles" / "static"  # like Bazel: a tree of symlinks
+    (runfiles / "js").mkdir(parents=True)
+    os.symlink(real / "index.html", runfiles / "index.html")
+    os.symlink(real / "js" / "a.js", runfiles / "js" / "a.js")
+    monkeypatch.setattr(app_module, "STATIC", str(runfiles))
+    httpd = serve(api, port=0)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        assert http(base, "GET", "/")[0] == 200 and http(base, "GET", "/js/a.js")[0] == 200
+        for path in ("/../secret.txt", "/js/../../secret.txt", "/js/../../../secret.txt", "/%2e%2e/secret.txt"):
+            assert http(base, "GET", path)[0] == 404, path
+    finally:
+        httpd.shutdown()
