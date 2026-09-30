@@ -1,0 +1,14 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# `#include "rr_gtest.h"` — RR_VERIFIES / RR_LEVEL / RR_ARTIFACT for googletest.
+#
+# Header-only and deliberately without a googletest dependency, so this module
+# never adds googletest (and its abseil/re2 closure) to a consumer's graph: the
+# cc_test using it already depends on the consumer's own googletest.
+cc_library(
+    name = "gtest",
+    hdrs = ["rr_gtest.h"],
+    includes = ["."],
+)

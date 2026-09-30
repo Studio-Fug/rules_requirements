@@ -1,0 +1,38 @@
+load("@rules_python//python:pip.bzl", "compile_pip_requirements")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# The whole toolkit: model, validation, ingestion, tracing, reports and the
+# test-framework hooks. Pure standard library (YAML is vendored), so it works
+# with any Python toolchain and any pip hub in the consuming workspace.
+#
+#   deps = ["@rules_requirements//python"]
+py_library(
+    name = "python",
+    srcs = glob(["rules_requirements/**/*.py"]),
+    data = ["rules_requirements/_vendor/yaml/LICENSE"],
+    imports = ["."],
+)
+
+alias(
+    name = "rules_requirements",
+    actual = ":python",
+)
+
+# `bazel run @rules_requirements//python:rr -- report ...`
+py_binary(
+    name = "rr",
+    srcs = ["//rr/private:rr_main.py"],
+    main = "//rr/private:rr_main.py",
+    deps = [":python"],
+)
+
+# `bazel run //python:requirements_dev.update` regenerates the dev lockfile.
+compile_pip_requirements(
+    name = "requirements_dev",
+    src = "requirements_dev.in",
+    requirements_txt = "requirements_dev.lock",
+    tags = ["manual"],
+)

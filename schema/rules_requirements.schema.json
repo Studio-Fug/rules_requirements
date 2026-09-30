@@ -1,0 +1,1401 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studio-fug.github.io/rules_requirements/schema/rules_requirements.schema.json",
+  "title": "rules_requirements model file",
+  "description": "A requirements model document: either sections (user_needs, requirements, risks, mitigations, test_methods, config, project) or one object with a `kind`. Referential integrity and coverage rules are checked by `rr validate`, not by this schema.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "not": {
+        "required": [
+          "kind"
+        ]
+      },
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "prefixes": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "id_pattern": {
+              "type": "string"
+            },
+            "levels": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "name"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "ordered": {
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "default_level": {
+              "type": "string"
+            },
+            "default_provided_level": {
+              "type": "string"
+            },
+            "autonomous_max_level": {
+              "type": "string"
+            },
+            "pyramid_min_level": {
+              "type": "string"
+            },
+            "pyramid_cheap_levels": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "severities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "likelihoods": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "acceptable_risk_score": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "high_severities": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "rules": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "error",
+                  "warning",
+                  "off"
+                ]
+              }
+            },
+            "annotation_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "project": {
+          "type": "object"
+        },
+        "meta": {
+          "type": "object"
+        },
+        "user_needs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/user_need"
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/requirement"
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/risk"
+          }
+        },
+        "mitigations": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/mitigation"
+          }
+        },
+        "test_methods": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/test_method"
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "description": "What a user must be able to do (validated).",
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "user_need"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "description": "A verifiable product requirement.",
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "satisfies": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "User need ids."
+        },
+        "refines": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Parent requirement ids."
+        },
+        "method": {
+          "type": "string",
+          "description": "Test method id or verification level the verification demands."
+        },
+        "verified_by": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "target"
+                ],
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "level": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "modules": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "kind": {
+          "const": "requirement"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "description": "A hazard -> harm chain (ISO 14971).",
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "hazard": {
+          "type": "string"
+        },
+        "hazardous_situation": {
+          "type": "string"
+        },
+        "harm": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "likelihood": {
+          "type": "string"
+        },
+        "residual_severity": {
+          "type": "string"
+        },
+        "residual_likelihood": {
+          "type": "string"
+        },
+        "residual": {
+          "type": "string"
+        },
+        "mitigated_by": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "kind": {
+          "const": "risk"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "description": "A risk control measure.",
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "type": {
+          "enum": [
+            "inherent",
+            "protective",
+            "information"
+          ]
+        },
+        "mitigates": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "implemented_by": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "kind": {
+          "const": "mitigation"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "description": "A named verification procedure at a rigor level.",
+      "required": [
+        "kind",
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "level": {
+          "type": "string"
+        },
+        "procedure": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "test_method"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "user_need": {
+      "type": "object",
+      "description": "What a user must be able to do (validated).",
+      "required": [
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rationale": {
+          "type": "string"
+        }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "description": "A verifiable product requirement.",
+      "required": [
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "satisfies": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "User need ids."
+        },
+        "refines": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ],
+          "description": "Parent requirement ids."
+        },
+        "method": {
+          "type": "string",
+          "description": "Test method id or verification level the verification demands."
+        },
+        "verified_by": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "target"
+                ],
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "level": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "modules": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "risk": {
+      "type": "object",
+      "description": "A hazard -> harm chain (ISO 14971).",
+      "required": [
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "hazard": {
+          "type": "string"
+        },
+        "hazardous_situation": {
+          "type": "string"
+        },
+        "harm": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "likelihood": {
+          "type": "string"
+        },
+        "residual_severity": {
+          "type": "string"
+        },
+        "residual_likelihood": {
+          "type": "string"
+        },
+        "residual": {
+          "type": "string"
+        },
+        "mitigated_by": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "mitigation": {
+      "type": "object",
+      "description": "A risk control measure.",
+      "required": [
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "type": {
+          "enum": [
+            "inherent",
+            "protective",
+            "information"
+          ]
+        },
+        "mitigates": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "implemented_by": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "test_method": {
+      "type": "object",
+      "description": "A named verification procedure at a rigor level.",
+      "required": [
+        "id",
+        "title"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique id, e.g. REQ-12 (prefix configurable)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "draft",
+            "proposed",
+            "approved",
+            "implemented",
+            "obsolete"
+          ]
+        },
+        "owner": {
+          "type": "string"
+        },
+        "tags": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "comment",
+                      "gap",
+                      "question",
+                      "todo"
+                    ]
+                  },
+                  "status": {
+                    "enum": [
+                      "open",
+                      "resolved"
+                    ]
+                  },
+                  "author": {
+                    "type": "string"
+                  },
+                  "created": {
+                    "type": "string"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "level": {
+          "type": "string"
+        },
+        "procedure": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

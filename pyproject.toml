@@ -1,0 +1,95 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rules-requirements"
+version = "0.1.0"
+description = "Requirements-driven development and traceability: user needs, requirements, risks, mitigations, tests."
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+requires-python = ">=3.9"
+authors = [{ name = "Studio Fug" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Quality Assurance",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7", "pytest-cov", "jsonschema"]
+
+[project.scripts]
+rr = "rules_requirements.cli:main"
+
+[project.entry-points.pytest11]
+# Named after the module so an explicit `plugins=[...]` registration and the
+# entry point never collide.
+"rules_requirements.hooks.pytest_plugin" = "rules_requirements.hooks.pytest_plugin"
+
+[project.urls]
+Homepage = "https://github.com/Studio-Fug/rules_requirements"
+Documentation = "https://studio-fug.github.io/rules_requirements/"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+include = ["rules_requirements*"]
+
+[tool.setuptools.package-data]
+rules_requirements = ["_vendor/yaml/LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.coverage.run]
+source = ["rules_requirements"]
+omit = ["*/_vendor/*"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = ["if __name__ == .__main__.:", "raise NotImplementedError"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+extend-exclude = ["python/rules_requirements/_vendor"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "S", "SIM", "RUF"]
+ignore = [
+  "S101",   # assert is how tests assert
+  "S603",   # subprocess without shell is deliberate (test runners, git)
+  "S607",   # `git` from PATH
+  "S108",   # /tmp in test fixtures
+  "UP006", "UP007", "UP035", "UP045",  # keep 3.9-compatible typing spellings
+  "RUF001", "RUF002", "RUF003",  # typographic unicode in reports is intended
+  "SIM105",
+  "RUF005", # `a + [b]` reads fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"python/tests/*" = ["N802", "S", "B011", "E501", "RUF059"]
+# HTML/SVG templates: long literal lines are clearer unbroken.
+"python/rules_requirements/report/html.py" = ["E501"]
+"python/rules_requirements/graph.py" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["rules_requirements"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["python/rules_requirements"]
+exclude = ["_vendor/"]
+strict = true
+warn_unused_ignores = false
+disallow_any_generics = false
+
+[[tool.mypy.overrides]]
+module = ["rules_requirements._vendor.*"]
+follow_imports = "skip"
+ignore_errors = true

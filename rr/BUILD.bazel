@@ -1,0 +1,2 @@
+# Public Starlark API: load("@rules_requirements//rr:defs.bzl", ...)
+exports_files(["defs.bzl"])

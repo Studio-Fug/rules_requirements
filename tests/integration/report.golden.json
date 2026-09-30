@@ -1,0 +1,298 @@
+{
+  "schema": "rules_requirements/report/v1",
+  "title": "rules_requirements hook integration",
+  "project": {
+    "name": "rules_requirements hook integration"
+  },
+  "summary": {
+    "user_needs": 1,
+    "user_needs_validated": 0,
+    "requirements": 6,
+    "requirements_verified": 4,
+    "requirements_under_verified": 1,
+    "requirements_partial": 0,
+    "requirements_failed": 1,
+    "requirements_unverified": 0,
+    "risks": 1,
+    "risks_mitigated": 1,
+    "mitigations": 1,
+    "mitigations_verified": 1,
+    "test_cases": 13,
+    "gaps": 2
+  },
+  "levels": [
+    {
+      "name": "analysis",
+      "rank": 1
+    },
+    {
+      "name": "simulation",
+      "rank": 2
+    },
+    {
+      "name": "sil",
+      "rank": 3
+    },
+    {
+      "name": "hil",
+      "rank": 4
+    },
+    {
+      "name": "hitl",
+      "rank": 5
+    },
+    {
+      "name": "inspection",
+      "rank": null
+    }
+  ],
+  "user_needs": [
+    {
+      "id": "UN-1",
+      "title": "Trace tests in every supported framework",
+      "status": "FAILED",
+      "requirements": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3",
+        "REQ-4",
+        "REQ-5",
+        "REQ-6"
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "title": "pytest markers are traced",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "GtestHook::IdsAccumulateAcrossCalls",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "NextSuite::OnlyItsOwnSuiteIds",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "tests.integration.test_pytest_hook::test_marker_is_traced",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:pytest_hook_test"
+        },
+        {
+          "name": "rust_hook_test::multiple_ids",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:rust_hook_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ]
+    },
+    {
+      "id": "REQ-2",
+      "title": "unittest decorators are traced",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "unittest_hook_test.UnittestHook::test_decorator_is_traced",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:unittest_hook_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ]
+    },
+    {
+      "id": "REQ-3",
+      "title": "googletest RR_VERIFIES is traced",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "GtestHook::IdsAccumulateAcrossCalls",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "GtestHook::VerifiesIsTraced",
+          "status": "passed",
+          "level": "sil",
+          "target": "//tests/integration:gtest_hook_test"
+        },
+        {
+          "name": "SuiteLevel::InheritsSuiteIds",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:gtest_hook_test"
+        }
+      ],
+      "demanded_level": "sil",
+      "provided_level": "sil",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ],
+      "method": "sil"
+    },
+    {
+      "id": "REQ-4",
+      "title": "Rust rr::verifies! is traced",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "rust_hook_test::multiple_ids",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:rust_hook_test"
+        },
+        {
+          "name": "rust_hook_test::verifies_is_traced",
+          "status": "passed",
+          "level": "sil",
+          "target": "//tests/integration:rust_hook_test"
+        }
+      ],
+      "demanded_level": "sil",
+      "provided_level": "sil",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [
+        "MIT-1"
+      ],
+      "method": "sil"
+    },
+    {
+      "id": "REQ-5",
+      "title": "A failing test marks its requirement FAILED",
+      "status": "FAILED",
+      "evidence": [
+        {
+          "name": "unittest_hook_test.UnittestHook::test_failure_is_recorded",
+          "status": "failed",
+          "level": "simulation",
+          "target": "//tests/integration:unittest_hook_test",
+          "message": "+ expected"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": null,
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": []
+    },
+    {
+      "id": "REQ-6",
+      "title": "Hardware-only requirement stays under-verified without a bench",
+      "status": "UNDER-VERIFIED",
+      "evidence": [
+        {
+          "name": "tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:pytest_hook_test"
+        }
+      ],
+      "demanded_level": "hil",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": [],
+      "method": "TM-1"
+    }
+  ],
+  "mitigations": [
+    {
+      "id": "MIT-1",
+      "title": "Golden report over all hooks",
+      "status": "VERIFIED",
+      "type": "protective",
+      "mitigates": [
+        "RISK-1"
+      ],
+      "implemented_by": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3",
+        "REQ-4"
+      ]
+    }
+  ],
+  "risks": [
+    {
+      "id": "RISK-1",
+      "title": "A hook silently drops traces, so the report over-claims coverage",
+      "status": "MITIGATED",
+      "severity": "high",
+      "likelihood": "possible",
+      "residual_severity": null,
+      "residual_likelihood": null,
+      "mitigations": [
+        "MIT-1"
+      ],
+      "score": 12
+    }
+  ],
+  "test_methods": [
+    {
+      "id": "TM-1",
+      "title": "Bench run on real hardware",
+      "status": "PARTIAL",
+      "level": "hil",
+      "used_by": [
+        "REQ-6"
+      ]
+    }
+  ],
+  "modules": {},
+  "high_open_risks": [],
+  "pyramid_violations": [],
+  "unknown_evidence": {},
+  "gaps": [
+    {
+      "kind": "failed",
+      "entity": "REQ-5",
+      "message": "failing evidence: unittest_hook_test.UnittestHook::test_failure_is_recorded",
+      "route": "autonomous",
+      "demanded_level": "simulation"
+    },
+    {
+      "kind": "under-verified",
+      "entity": "REQ-6",
+      "message": "demands hil, best passing evidence is simulation",
+      "route": "human-gate",
+      "demanded_level": "hil",
+      "provided_level": "simulation"
+    }
+  ]
+}

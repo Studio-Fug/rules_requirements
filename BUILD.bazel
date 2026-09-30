@@ -1,0 +1,17 @@
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "LICENSE",
+    "schema/rules_requirements.schema.json",
+])
+
+# `bazel run @rules_requirements -- validate requirements/`
+alias(
+    name = "rules_requirements",
+    actual = "//python:rr",
+)
+
+alias(
+    name = "rr",
+    actual = "//python:rr",
+)

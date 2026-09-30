@@ -1,0 +1,14 @@
+load("@rr_dev_pip//:requirements.bzl", "requirement")
+load("//rr:defs.bzl", "rr_py_test")
+
+rr_py_test(
+    name = "unit_tests",
+    size = "medium",
+    srcs = glob(["*.py"]),
+    data = ["//:schema/rules_requirements.schema.json"],
+    imports = ["."],  # tests import their shared helpers from conftest
+    deps = [
+        requirement("pytest"),
+        requirement("jsonschema"),
+    ],
+)

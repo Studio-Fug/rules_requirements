@@ -1,0 +1,83 @@
+# End-to-end test of every hook: each framework's traces must reach the report.
+#
+# `unittest_hook_test` contains one deliberate failure (REQ-5) so the report
+# shows a FAILED requirement; it is tagged manual and only runs inside
+# rr_evidence, where a failing test is evidence rather than a broken build.
+
+load("@rr_dev_pip//:requirements.bzl", "requirement")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_rust//rust:defs.bzl", "rust_test")
+load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+
+rr_model(
+    name = "model",
+    srcs = ["model.yaml"],
+)
+
+rr_py_test(
+    name = "pytest_hook_test",
+    srcs = ["test_pytest_hook.py"],
+    deps = [requirement("pytest")],
+)
+
+py_test(
+    name = "unittest_hook_test",
+    srcs = ["unittest_hook_test.py"],
+    tags = ["manual"],
+    deps = ["//python"],
+)
+
+cc_test(
+    name = "gtest_hook_test",
+    srcs = ["gtest_hook_test.cc"],
+    deps = [
+        "//cc:gtest",
+        "@googletest//:gtest_main",
+    ],
+)
+
+rr_rust_test(
+    name = "rust_hook_test",
+    srcs = ["rust_hook_test.rs"],
+    rule = rust_test,
+    deps = ["//rust:rr"],
+)
+
+rr_annotations_test(
+    name = "annotations_test",
+    srcs = glob([
+        "*.py",
+        "*.cc",
+        "*.rs",
+    ]),
+    model = ":model",
+)
+
+rr_evidence(
+    name = "evidence",
+    tests = [
+        ":gtest_hook_test",
+        ":pytest_hook_test",
+        ":rust_hook_test",
+        ":unittest_hook_test",
+    ],
+)
+
+rr_report(
+    name = "report",
+    evidence = [":evidence"],
+    model = [":model"],
+)
+
+rr_golden_test(
+    name = "report_json_golden_test",
+    src = ":report.json",
+    golden = "report.golden.json",
+)
+
+rr_golden_test(
+    name = "report_md_golden_test",
+    src = ":report.md",
+    golden = "report.golden.md",
+)

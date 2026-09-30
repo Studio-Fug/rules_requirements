@@ -1,0 +1,44 @@
+# Integration model: one requirement per language hook, so the golden report
+# proves each hook's traces survive the trip through JUnit into the report.
+project:
+  name: rules_requirements hook integration
+user_needs:
+  - id: UN-1
+    title: Trace tests in every supported framework
+requirements:
+  - id: REQ-1
+    title: pytest markers are traced
+    satisfies: [UN-1]
+  - id: REQ-2
+    title: unittest decorators are traced
+    satisfies: [UN-1]
+  - id: REQ-3
+    title: googletest RR_VERIFIES is traced
+    satisfies: [UN-1]
+    method: sil
+  - id: REQ-4
+    title: Rust rr::verifies! is traced
+    satisfies: [UN-1]
+    method: sil
+  - id: REQ-5
+    title: A failing test marks its requirement FAILED
+    satisfies: [UN-1]
+  - id: REQ-6
+    title: Hardware-only requirement stays under-verified without a bench
+    satisfies: [UN-1]
+    method: TM-1
+risks:
+  - id: RISK-1
+    title: A hook silently drops traces, so the report over-claims coverage
+    severity: high
+    likelihood: possible
+mitigations:
+  - id: MIT-1
+    title: Golden report over all hooks
+    type: protective
+    mitigates: [RISK-1]
+    implemented_by: [REQ-1, REQ-2, REQ-3, REQ-4]
+test_methods:
+  - id: TM-1
+    title: Bench run on real hardware
+    level: hil

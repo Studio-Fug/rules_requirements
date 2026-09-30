@@ -1,0 +1,4 @@
+# Test-only dependencies for this repository's Bazel tests. The library itself
+# has no third-party runtime dependencies.
+pytest
+jsonschema
