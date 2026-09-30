@@ -1,0 +1,244 @@
+# Bazel rules
+
+```starlark
+load(
+    "@rules_requirements//rr:defs.bzl",
+    "rr_annotations_test",
+    "rr_evidence",
+    "rr_golden_test",
+    "rr_model",
+    "rr_py_test",
+    "rr_report",
+    "rr_rust_test",
+    "rr_wrapped_test",
+)
+```
+
+See {doc}`../getting-started` for the `MODULE.bazel` setup. Besides the rules,
+the module provides these targets:
+
+| Target | What |
+| ------ | ---- |
+| `@rules_requirements//python` | The Python library (`py_library`, standard library only). |
+| `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
+| `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
+| `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
+| `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
+
+Under `bazel run`, the CLI resolves relative paths against the directory you ran
+Bazel from.
+
+## Model
+
+### `rr_model`
+
+```starlark
+rr_model(
+    name = "model",
+    srcs = glob(["requirements/**/*.yaml"]),
+    strict = False,
+)
+```
+
+Declares the model files and, unless `validate = False`, a `<name>_test` that
+runs `rr validate` on them.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `srcs` | required | Model files (`.yaml`, `.yml`, `.json`), merged. |
+| `strict` | `False` | Treat validation warnings as errors in `<name>_test`. |
+| `validate` | `True` | Create `<name>_test`. |
+| `visibility` | | Visibility of the model target. |
+| `**kwargs` | | Forwarded to the validation test (`tags`, `size`, ...). |
+
+The target provides `RrModelInfo(srcs)` and its files as `DefaultInfo`.
+
+(rr-annotations-test)=
+### `rr_annotations_test`
+
+```starlark
+rr_annotations_test(
+    name = "annotations_test",
+    model = ":model",
+    srcs = glob(["src/**/*.py", "src/**/*.rs"]),
+)
+```
+
+Fails if an annotation in `srcs` names an id the model does not define
+({doc}`annotations`). Only the listed files are scanned, so the test is
+hermetic and cached.
+
+## Test hooks
+
+### `rr_py_test`
+
+```starlark
+rr_py_test(
+    name = "controller_test",
+    srcs = ["tests/test_controller.py", "tests/conftest.py"],
+    deps = [":thermostat", requirement("pytest")],
+)
+```
+
+A `py_test` that runs pytest with the `rr` marker plugin and writes JUnit to
+`$XML_OUTPUT_FILE`. pytest is not bundled: add your workspace's pytest to
+`deps`.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `srcs` | required | Files named `test_*.py` or `*_test.py` are passed to pytest; other files (`conftest.py`, helpers) are support files. If no file matches, all `srcs` are passed. |
+| `deps` | `[]` | Dependencies, including pytest. `@rules_requirements//python` is added. |
+| `args` | `[]` | Extra pytest arguments, baked into the generated main (see [below](#generated-mains)). |
+| `data` | `[]` | Runtime data. |
+| `**kwargs` | | Forwarded to `py_test` (`size`, `imports`, `tags`, ...). |
+
+(rr-wrapped-test)=
+### `rr_wrapped_test`
+
+```starlark
+rr_wrapped_test(
+    name = "parser_test",
+    test = ":parser_test_bin",     # usually tagged "manual"
+    level = "sil",
+)
+```
+
+Runs a test executable through `rr wrap` ({doc}`hooks`), converting its output
+to traceability JUnit and preserving its exit code.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `test` | required | The test executable. |
+| `format` | `"libtest"` | Its output format. |
+| `level` | `""` | Level for cases that do not declare one. |
+| `args` | `[]` | Extra arguments for the executable. |
+| `**kwargs` | | Forwarded to the wrapper `py_test`. |
+
+(rr-rust-test)=
+### `rr_rust_test`
+
+```starlark
+load("@rules_rust//rust:defs.bzl", "rust_test")
+
+rr_rust_test(
+    name = "setpoint_test",
+    rule = rust_test,
+    crate = ":setpoint",
+    deps = ["@rules_requirements//rust:rr"],
+)
+```
+
+A Rust test whose `rr::verifies!(...)` calls become JUnit traces. Creates
+`<name>_bin` — the real `rust_test`, tagged `manual` — and `<name>`, the wrapper
+that `bazel test` runs. rules_requirements does not load rules_rust itself:
+pass the `rust_test` rule as `rule`.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `rule` | required | The `rust_test` rule. |
+| `level` | `""` | Level for cases that do not declare one. |
+| `tags`, `size`, `timeout`, `flaky` | | Applied to the wrapper test. |
+| `**kwargs` | | Forwarded to the `rust_test` (`srcs`, `crate`, `deps`, `edition`, ...). |
+
+googletest needs no macro: a `cc_test` depending on
+`@rules_requirements//cc:gtest` writes traced JUnit by itself.
+
+## Evidence and reports
+
+### `rr_evidence`
+
+```starlark
+rr_evidence(
+    name = "evidence",
+    tests = [":controller_test", ":interlock_test", ":setpoint_test"],
+)
+```
+
+Runs the tests **inside a build action** and collects their JUnit in a directory
+laid out like `bazel-testlogs` (`<name>/testlogs/<pkg>/<test>/test.xml`, with
+each test's output in a `test.log` beside it), so every result keeps its test's
+label. Failing tests do not fail the build — they are evidence, and the report
+shows them as FAILED. The output is cached like any other action: the tests run
+again only when something they depend on changes.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `tests` | required | Test targets to run. |
+| `timeout` | `300` | Per-test timeout in seconds; a test that exceeds it is recorded as failed. |
+| `local` | `False` | Add `no-remote-exec` to the action. |
+| `testonly` | `True` | |
+
+Each test runs with its runfiles directory (`<exe>.runfiles/<workspace>`) as
+working directory and an environment modelled on `bazel test`: `TEST_SRCDIR`,
+`RUNFILES_DIR`, `TEST_WORKSPACE`, `TEST_TARGET`, `XML_OUTPUT_FILE`,
+`TEST_TMPDIR` (also `HOME` and `TMPDIR`), `TEST_UNDECLARED_OUTPUTS_DIR`,
+`PATH` and `LANG`. A test that writes no JUnit gets one synthetic test case
+carrying its exit status, as under `bazel test`.
+
+The tests are built in the **exec** configuration, because the action runs them
+on the build machine. Tests that need the network, devices, or anything else
+the sandbox does not provide — hardware-in-the-loop suites, typically — do not
+belong in `rr_evidence`: run them with `bazel test` and aggregate the real
+`bazel-testlogs` with the CLI (see {doc}`integration`). The target provides
+`RrEvidenceInfo(testlogs)`.
+
+### `rr_report`
+
+```starlark
+rr_report(
+    name = "report",
+    model = [":model"],
+    evidence = [":evidence", "evidence/panel_inspection.rr.yaml"],
+    srcs = glob(["src/**/*.py"]),
+)
+```
+
+Renders the report as `<name>.html`, `<name>.json` and `<name>.md`, addressable
+as `:<name>.json` and so on.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `model` | required | `rr_model` targets or model files. |
+| `evidence` | `[]` | `rr_evidence` targets, JUnit files, records files. |
+| `srcs` | `[]` | Sources to scan for annotations: adds implementation links and `no-implementation` gaps. |
+| `formats` | `["html", "json", "md"]` | Which outputs to build. |
+| `title` | `""` | Report title (default: the project name). |
+| `strict` | `False` | Fail on model warnings too. |
+| `current_build` | `{}` | Current artifact identity; evidence recorded against another is stale. |
+| `testonly` | `True` | The evidence comes from tests. |
+
+The build fails if the model is invalid.
+
+### `rr_golden_test`
+
+```starlark
+rr_golden_test(
+    name = "report_golden_test",
+    src = ":report.json",
+    golden = "report.golden.json",
+)
+```
+
+Compares a generated file with a checked-in golden and prints a unified diff
+when they differ. `bazel run :report_golden_test.update` rewrites the golden
+from the current output. Pinning `report.json` (or `report.md`) this way makes
+every change to traceability — a requirement losing its evidence, a test
+starting to fail, a risk's status changing — show up in code review.
+
+(generated-mains)=
+## Generated mains
+
+The helper tests (`<model>_test`, `rr_annotations_test`, `rr_py_test`,
+`rr_wrapped_test`, `rr_golden_test`) do not use the `args` attribute: Bazel
+passes `args` only under `bazel test` / `bazel run`, so a test run by
+`rr_evidence` would silently lose them. Instead each macro generates a small
+`<name>.rr_main.py` with the arguments baked in (runfiles-relative paths,
+resolved against the working directory at run time), and uses it as the test's
+`main`. The tests therefore behave identically under `bazel test`, `bazel run`
+and `rr_evidence`.
+
+## Compatibility
+
+Tested with Bazel 7.7.1 and 8.8.1 using bzlmod. The module's dependency floors
+are `rules_python` 2.0.3, `rules_cc` 0.2.22, `rules_rust` 0.71.3 and `googletest`
+1.17.0; newer versions in your workspace win. Python 3.9 or newer.

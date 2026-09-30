@@ -1,0 +1,20 @@
+/* Trace graphs are inline SVG so their text follows the theme colour. */
+.rr-graph-wrap {
+  overflow-x: auto;
+  margin: 1rem 0 1.5rem;
+  padding: 0.5rem;
+  border: 1px solid var(--color-background-border);
+  border-radius: 8px;
+}
+.rr-graph-wrap svg {
+  max-width: 100%;
+  height: auto;
+  color: var(--color-foreground-primary);
+}
+/* Status badges used in prose tables. */
+.rr-status {
+  font-family: var(--font-stack--monospace);
+  font-size: 0.85em;
+  font-weight: 700;
+  white-space: nowrap;
+}

@@ -1,0 +1,147 @@
+# Reports
+
+One traceability matrix, four renderings: **HTML** to read, **Markdown** for pull
+requests and wikis, **JSON** as the canonical, diffable record, and a **gap
+queue** for whoever — or whatever — closes the gaps.
+
+## Producing a report
+
+With the CLI:
+
+```console
+$ rr report --model requirements/ --evidence bazel-testlogs \
+    --html report.html --json report.json --md report.md \
+    --queue-out gaps.json --title "Thermostat V&V"
+```
+
+`--out FILE` (repeatable) picks the format from the extension (`.html`, `.htm`,
+`.json`, `.md`, `.markdown`); `-` writes to standard output. `--scan` adds the
+source annotations of the workspace (see {doc}`annotations`), and
+`--current-build KEY=VALUE` (repeatable) enables the
+[staleness](../concepts.md#staleness) check.
+
+In Bazel, `rr_report` builds `<name>.html`, `<name>.json` and `<name>.md` as
+ordinary outputs ({doc}`bazel`).
+
+The command prints a one-line summary to standard error and exits with:
+
+| Exit | When |
+| ---- | ---- |
+| `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds. |
+| `1` | `--fail-on failed` and a requirement is FAILED; `--fail-on unverified` and one is FAILED or UNVERIFIED; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
+| `2` | The model is invalid, or an `--out` extension is unknown. |
+
+`--fail-on` defaults to `none`: the report describes the state of the product,
+and whether that state should fail a pipeline is a separate decision.
+
+## JSON (`rules_requirements/report/v1`)
+
+The JSON report is deterministic — entities sorted by id (`REQ-2` before
+`REQ-10`), no timestamps, no machine-specific paths — so it can be checked in as
+a golden file and reviewed as a diff. Top-level keys:
+
+| Key | Content |
+| --- | ------- |
+| `schema` | `"rules_requirements/report/v1"` |
+| `title` | `--title`, else the project's `name`, else `"Requirements traceability"` |
+| `project` | The model's `project:` metadata |
+| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases`, `gaps` |
+| `levels` | The configured levels: `{name, rank}` (`rank` is `null` for unordered levels) |
+| `user_needs`, `requirements`, `mitigations`, `risks`, `test_methods` | One object per entity (below) |
+| `modules` | `{module: status}` rollup |
+| `high_open_risks` | Ids of high-severity risks that are not MITIGATED |
+| `pyramid_violations` | Ids of requirements violating the cost pyramid |
+| `unknown_evidence` | `{id: [test case, ...]}` for evidence naming undefined ids |
+| `gaps` | The gap queue (below) |
+
+Every entity object has `id`, `title` and `status`, plus `description`,
+`open_notes` (`[{kind, text}]`) and `evidence` when present. An `evidence` entry
+is `{name, status, level}` with, when applicable, `target` (the build label),
+`kind: "target"` (whole-target `verified_by` evidence), `stale: true`, and
+`message` (the first line, at most 300 characters, of a failure).
+
+| Section | Additional keys |
+| ------- | --------------- |
+| `user_needs` | `requirements` — ids of the requirements that satisfy it |
+| `requirements` | `demanded_level`, `provided_level` (best passing level or `null`), `satisfies`, `refines`, `implements` (mitigation ids); `method`, `modules`, `stale`, `pyramid_violation` when set; `implemented_in` and `verified_in` when sources were scanned |
+| `mitigations` | `type` (or `null`), `mitigates`, `implemented_by`; `implemented_in` / `verified_in` when scanned |
+| `risks` | `severity`, `likelihood`, `residual_severity`, `residual_likelihood` (each or `null`), `mitigations`; `hazard`, `hazardous_situation`, `harm`, `residual` when set; `score`, and `residual_score` when a residual estimate exists |
+| `test_methods` | `level`, `used_by` — ids of the requirements that demand it |
+
+`implemented_in` / `verified_in` entries are the annotations:
+`{ids, relation, path, line}` plus `text` and `symbol` when known.
+
+## The gap queue
+
+`--queue-out FILE` writes the [gaps](../concepts.md#gaps-and-routing) as
+`{"queue": [...]}`; each gap is
+
+```json
+{
+  "kind": "under-verified",
+  "entity": "REQ-5",
+  "message": "demands hil, best passing evidence is simulation",
+  "route": "human-gate",
+  "demanded_level": "hil",
+  "provided_level": "simulation"
+}
+```
+
+`demanded_level` and `provided_level` are present when they apply. The queue is
+meant to drive work: `autonomous` items are ones an agent can close by writing
+the missing analysis, simulation or software-in-the-loop test; `human-gate`
+items need a bench, a device or a person, and must not be closed by synthesised
+evidence.
+
+## Markdown
+
+A compact rendering for pull-request comments and wikis: the summary line, a
+banner for high-severity risks that are not mitigated, then tables for user
+needs, requirements (with their evidence and demanded level), risks,
+mitigations, test methods, source implementation links (when sources were
+scanned), modules and gaps. The {doc}`tutorial <../tutorial>` shows the complete
+Markdown report of the example project.
+
+## HTML
+
+A single self-contained page (no external assets; light and dark themes) with
+progress tiles, alerts for unmitigated high-severity risks, cost-pyramid
+violations and evidence that names undefined ids, the trace graph, and a table
+per entity kind. Requirement rows show their traces, evidence (with levels,
+staleness and failure messages), demanded and best-provided level, source
+links and open notes; every id is an anchor, so `report.html#REQ-5` links
+straight to a row.
+
+## Graph exports
+
+`rr graph` exports the trace graph on its own:
+
+```console
+$ rr graph --model requirements/ --format mermaid          # to stdout
+$ rr graph --model requirements/ --format svg --evidence bazel-testlogs --out trace.svg
+$ rr graph --model requirements/ --format dot --methods | dot -Tpng -o trace.png
+```
+
+| Format | Content |
+| ------ | ------- |
+| `dot` | Graphviz; needs are ellipses, requirements boxes, mitigations hexagons, risks diamonds, test methods notes. |
+| `mermaid` | A Mermaid `flowchart LR`, for Markdown that renders Mermaid (GitHub does). |
+| `svg` | A self-contained layered drawing: needs, requirements, mitigations and risks in columns, ordered to reduce crossings. |
+| `json` | `{nodes: [{id, kind, title, status}], edges: [{source, target, relation}]}` |
+
+Edges are `satisfies`, `refines` and `method` (dashed or dotted), `mitigates`
+and `implemented_by`. `--methods` adds test methods and `method` edges (the SVG
+layout draws only the four main columns). With `--evidence`, nodes are coloured
+by status. The same graph, coloured from the example's golden report:
+
+```{raw} html
+<div class="rr-graph-wrap">
+```
+
+```{raw} html
+:file: ../_generated/thermostat-graph.svg
+```
+
+```{raw} html
+</div>
+```
