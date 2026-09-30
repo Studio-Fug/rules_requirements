@@ -142,6 +142,26 @@ The prompts contain the model (ids, titles, descriptions, traces and statuses)
 and, for the adequacy and implementation reviews, excerpts of the linked test
 and source files — keep that in mind for confidential code.
 
+## Where the editor fits in the standards
+
+The editor is a working surface for the records the standards ask for
+({doc}`../standards`); the model files under version control remain the record.
+
+| Editor feature | Activity it supports |
+| -------------- | -------------------- |
+| Authoring needs, requirements, risks and mitigations | Design inputs and software requirements analysis (ISO 13485 §7.3.3, IEC 62304 §5.2, IEC 60601-1 §14.7); risk analysis and risk control records (ISO 14971 §5, §7) |
+| Trace view, trace graph, implementation and test links | Traceability from hazardous situation to software item, cause, risk control measure and its verification (IEC 62304 §7.3.3); of design outputs to design inputs (ISO 13485 §7.3.2) |
+| Diffs, baselines (tags), history, commits | Configuration identification and change control, including traceability of change (IEC 62304 §8.1, §8.2); design changes (ISO 13485 §7.3.9) |
+| Completeness check, test adequacy review | Requirements that are traceable, testable and verified (IEC 62304 §5.2.6, §5.7); completeness of risk control (ISO 14971 §7.6) |
+| Mitigation adequacy review | Verification of the implementation *and effectiveness* of risk control measures (ISO 14971 §7.2; IEC 62304 §7.3.1) |
+| Hazard discovery | Identification of hazards and hazardous situations (ISO 14971 §5.4; IEC 62304 §7.1) |
+| Notes and findings | Inputs to software problem resolution (IEC 62304 §9) and to the risk management review (ISO 14971 §9) |
+
+Agent findings are proposals. A person decides what enters the model, as for
+any hand edit, and the commit records who made the change (`--author`, or
+the name the UI sends). The editor does not make a record compliant; it makes
+complete, consistent records cheaper to keep.
+
 ## Security
 
 The server edits files in your checkout and runs `git`, so it is built for
