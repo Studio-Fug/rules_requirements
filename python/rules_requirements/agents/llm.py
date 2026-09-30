@@ -91,7 +91,7 @@ class ClaudeLLM:
 
 
 def default_llm(enabled: bool = True, model: str = "", effort: str = "") -> LLM | None:
-    """A :class:`ClaudeLLM` if possible, else ``None`` (reason via :func:`llm_status`)."""
+    """A :class:`ClaudeLLM` if possible, else ``None`` (``llm_status`` says why)."""
     if not enabled:
         return None
     try:

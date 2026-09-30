@@ -20,6 +20,8 @@ dependencies = []
 
 [project.optional-dependencies]
 test = ["pytest>=7", "pytest-cov", "jsonschema"]
+# LLM-backed agent workflows in `rr serve` (optional; everything else is stdlib).
+agents = ["anthropic>=1"]
 
 [project.scripts]
 rr = "rules_requirements.cli:main"
@@ -38,7 +40,7 @@ where = ["python"]
 include = ["rules_requirements*"]
 
 [tool.setuptools.package-data]
-rules_requirements = ["_vendor/yaml/LICENSE"]
+rules_requirements = ["_vendor/yaml/LICENSE", "server/static/*", "server/static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """``rr serve`` — the interactive requirements editor.
 
-A small standard-library HTTP server: a JSON API over a :class:`Workspace`
-(model, evidence, annotations, git) and the agent :class:`JobManager`, plus a
+A small standard-library HTTP server: a JSON API over a
+:class:`~rules_requirements.server.workspace.Workspace` (model, evidence,
+annotations, git) and the agent :class:`~rules_requirements.agents.JobManager`, plus a
 static single-page UI. It edits files in your checkout, so by default it
 
 * binds to 127.0.0.1 only,
@@ -143,6 +144,12 @@ class Api:
                 "note_kinds": list(NOTE_KINDS),
                 "note_statuses": list(NOTE_STATUSES),
                 "kinds": {k: cfg.SECTIONS[k] for k in cfg.KINDS},
+                "high_severities": list(c.high_severities),
+                "default_level": c.default_level,
+                "default_provided_level": c.default_provided_level,
+                "autonomous_max_level": c.autonomous_max_level,
+                "id_pattern": c.id_pattern,
+                "acceptable_risk_score": c.acceptable_risk_score,
             },
             "counts": snap.matrix.counts(),
             "issues": [
@@ -282,7 +289,8 @@ class Api:
 
     def git_tag(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         body = _obj(body)
-        self.ws.tag(str(body.get("name", "")), str(body.get("message", "")), str(body.get("ref", "HEAD") or "HEAD"), author=self._author(params))
+        author = str(body.get("author") or self._author(params))
+        self.ws.tag(str(body.get("name", "")), str(body.get("message", "")), str(body.get("ref", "HEAD") or "HEAD"), author=author)
         return self.ws.refs()
 
     def git_commit(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
@@ -419,7 +427,9 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
                 except json.JSONDecodeError:
                     return self._json(400, {"error": "invalid JSON body"})
                 try:
-                    result = api.dispatch(method, url.path, parse_qs(url.query), body, author=self.headers.get("X-RR-Author", "").strip())
+                    # Header values are ASCII; the UI percent-encodes non-ASCII names.
+                    author = unquote(self.headers.get("X-RR-Author", "")).strip()
+                    result = api.dispatch(method, url.path, parse_qs(url.query), body, author=author)
                 except HttpError as exc:
                     return self._json(exc.status, {"error": str(exc)})
                 except Exception as exc:  # noqa: BLE001 — never kill the server thread

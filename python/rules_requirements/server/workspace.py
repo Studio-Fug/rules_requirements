@@ -385,6 +385,14 @@ class Workspace:
             raise WorkspaceError(f"invalid ref {ref!r}")
         return ref
 
+    def _resolve(self, ref: str) -> str:
+        """A commit id for ``ref``; unknown refs are a 404, not a server error."""
+        self._check_ref(ref)
+        sha = self.git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False).strip()
+        if not sha:
+            raise WorkspaceError(f"unknown ref {ref!r}", 404)
+        return sha
+
     def git_status(self) -> dict[str, Any]:
         if not self.is_git():
             return {"git": False}
@@ -410,7 +418,7 @@ class Workspace:
     def log(self, limit: int = 30, ref: str = "HEAD") -> list[dict[str, str]]:
         if not self.is_git():
             return []
-        out = self.git("log", f"-n{int(limit)}", "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s", "--date=short", self._check_ref(ref), "--", *self.model_paths, check=False)
+        out = self.git("log", f"-n{int(limit)}", "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s", "--date=short", self._resolve(ref), "--", *self.model_paths, check=False)
         rows = []
         for line in out.splitlines():
             full, short, author, date, subject = (line.split("\x1f") + ["", "", "", "", ""])[:5]
@@ -418,10 +426,16 @@ class Workspace:
         return rows
 
     def model_at(self, ref: str) -> Model:
-        """The model as committed at ``ref`` (``WORKTREE`` = the files on disk)."""
+        """The model as committed at ``ref``.
+
+        ``WORKTREE`` is the files on disk; ``EMPTY`` is no model at all (to
+        diff a repository's first commit, or a model's whole history).
+        """
         if ref in ("", "WORKTREE"):
             return self.model
-        ref = self._check_ref(ref)
+        if ref == "EMPTY":
+            return Model(config=self.model.config)
+        ref = self._resolve(ref)
         listing = self.git("ls-tree", "-r", "--name-only", ref, "--", *self.model_paths)
         docs: list[tuple[str, Any]] = []
         for rel in sorted(p for p in listing.splitlines() if p.endswith((".yaml", ".yml", ".json"))):
@@ -450,7 +464,7 @@ class Workspace:
             raise WorkspaceError(f"invalid tag name {name!r}")
         if self.git("tag", "--list", name).strip():
             raise WorkspaceError(f"tag {name} already exists", 409)
-        args = ["tag", "-a", name, "-m", message or f"requirements baseline {name}", self._check_ref(ref)]
+        args = ["tag", "-a", name, "-m", message or f"requirements baseline {name}", self._resolve(ref)]
         self.git(*args, env=self._identity_env(author or self.author))
 
     def commit(self, message: str, author: str = "") -> str:
@@ -485,6 +499,10 @@ def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
     outgoing = []
     for rel, target in ent.references():
         t = snap.model.get(target)
+        if t is None and rel == "method" and snap.model.config.level(target) is not None:
+            # A requirement may name a verification level directly: not a trace.
+            outgoing.append({"id": target, "kind": "level", "relation": rel, "title": "verification level", "status": "", "missing": False, "level": True})
+            continue
         outgoing.append({"id": target, "kind": t.kind if t else "", "relation": rel, "title": t.title if t else "", "status": _status(snap, target), "missing": t is None})
     return {
         "id": ent.id,

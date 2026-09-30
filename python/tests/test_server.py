@@ -179,3 +179,47 @@ def test_http_security_and_static(api):
         assert http(base, "POST", "/index.html", {})[0] == 405
     finally:
         httpd.shutdown()
+
+
+def test_followups_from_the_ui(api):
+    # a level-name method is not shown as a broken reference
+    call(api, "POST", "/api/entities", {"kind": "requirement", "data": {"title": "Bench", "satisfies": ["UN-1"], "method": "hil"}})
+    out = call(api, "GET", "/api/entities/REQ-4")["outgoing"]
+    assert {"id": "hil", "level": True, "missing": False}.items() <= next(o for o in out if o["relation"] == "method").items()
+    # diff against an empty model, unknown refs are 404s
+    d = call(api, "GET", "/api/diff", **{"from": "EMPTY", "to": "HEAD"})
+    assert d["summary"]["added"] == 8 and d["summary"]["removed"] == 0
+    with pytest.raises(HttpError) as exc:
+        call(api, "GET", "/api/diff", **{"from": "no-such-branch"})
+    assert exc.value.status == 404
+    with pytest.raises(HttpError) as exc:
+        call(api, "GET", "/api/git/log", ref="nope")
+    assert exc.value.status == 404
+    # the UI can show the config it needs
+    cfg = call(api, "GET", "/api/state")["config"]
+    assert cfg["default_level"] == "simulation" and cfg["high_severities"] == ["high", "critical"] and "id_pattern" in cfg
+    # tag author from the body
+    refs = call(api, "POST", "/api/git/tag", {"name": "b1", "author": "Zoë <z@x>"})
+    assert refs["tags"][0]["name"] == "b1"
+
+
+def test_percent_encoded_author_header(api):
+    httpd = serve(api, port=0)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, _, body = http(
+            base, "POST", "/api/entities/REQ-1/notes", {"text": "Umlaut check", "kind": "comment"},
+            {"X-RR-Request": "1", "X-RR-Author": "Zo%C3%AB%20%3Cz%40x%3E"},
+        )  # fmt: skip
+        assert status == 200 and json.loads(body)["data"]["notes"][0]["author"] == "Zoë <z@x>"
+    finally:
+        httpd.shutdown()
+
+
+def test_ui_assets_are_packaged():
+    from rules_requirements.server import app
+
+    names = set(os.listdir(app.STATIC))
+    assert {"index.html", "app.js", "app.css"} <= names
+    html = open(os.path.join(app.STATIC, "index.html"), encoding="utf-8").read()
+    assert 'type="module"' in html and "<script>" not in html  # no inline scripts (CSP)

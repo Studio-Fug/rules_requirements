@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The built-in workflows.
 
-``completeness``          Gaps in the model and its traceability: validation
-                          issues, unverified / under-verified / stale / failing
-                          requirements, uncontrolled risks, missing
-                          implementation links — plus, with an LLM, a review of
-                          whether the requirements cover the needs at all.
-``test_adequacy``         Does test X actually assert what requirement Y states?
-``implementation_review`` Does the annotated code implement requirement Y?
-``mitigation_adequacy``   Do the requirements behind a mitigation actually
-                          control risk W (and is the residual estimate plausible)?
-``risk_discovery``        Hazards the analysis may be missing.
-``assistant``             Free-form instruction -> proposed model operations.
+``completeness``
+    Gaps in the model and its traceability: validation issues, unverified /
+    under-verified / stale / failing requirements, uncontrolled risks, missing
+    implementation links — plus, with an LLM, a review of whether the
+    requirements cover the needs at all.
+``test_adequacy``
+    Does test X actually assert what requirement Y states?
+``implementation_review``
+    Does the annotated code implement requirement Y?
+``mitigation_adequacy``
+    Do the requirements behind a mitigation actually control risk W (and is
+    the residual estimate plausible)?
+``risk_discovery``
+    Hazards the analysis may be missing.
+``assistant``
+    Free-form instruction -> proposed model operations.
 """
 
 from __future__ import annotations
