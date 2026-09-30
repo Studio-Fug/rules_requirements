@@ -60,6 +60,12 @@ reference.
   fail the build.
 - **Hermetic reports in Bazel.** `rr_evidence` runs tests in a build action,
   `rr_report` renders the report, `rr_golden_test` pins it.
+- **A web editor with agents** (`rr serve`) — author and edit the model with
+  surgical, comment-preserving YAML edits; trace it through a live graph; browse
+  to the annotated code; diff the model across branches and tags, name
+  baselines, commit; and run agentic reviews (completeness, *does this test
+  actually prove this requirement?*, *does this requirement enforce this
+  mitigation?*, hazard discovery) whose findings become notes or new entities.
 - **Zero runtime dependencies** — pure Python standard library (YAML parsing is
   vendored), so it works with any Python toolchain and pip hub.
 
@@ -142,6 +148,19 @@ rr validate requirements/
 pytest --junitxml=results.xml -o junit_family=xunit2   # the rr marker auto-registers
 rr report --model requirements/ --evidence results.xml --html report.html
 ```
+
+## The web editor
+
+```sh
+rr serve --model requirements/ --evidence bazel-testlogs     # or: bazel run @rules_requirements//python:rr -- serve ...
+pip install "rules-requirements[agents]"                    # optional: LLM-backed agent workflows (Claude)
+```
+
+![Trace graph in the web editor](docs/_static/editor-graph.png)
+
+Every edit is verified by re-reading the file before it is written, commits
+include only model files, and the server is local-only by default (see the
+[web editor guide](https://studio-fug.github.io/rules_requirements/guides/web-editor.html)).
 
 ## The report
 

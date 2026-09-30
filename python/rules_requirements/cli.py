@@ -289,10 +289,14 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from rules_requirements.server.app import Api, serve
     from rules_requirements.server.workspace import Workspace
 
+    # Relative model and evidence paths are relative to the repository root
+    # (the workspace under `bazel run`): the editor must write the real source
+    # files, never a runfiles copy.
+    root = _path(args.root) if args.root else _root()
     ws = Workspace(
-        root=_path(args.root) if args.root else _root(),
-        model_paths=[_path(p) for p in args.model],
-        evidence_paths=[_path(p) for p in args.evidence],
+        root=root,
+        model_paths=[p if os.path.isabs(p) else os.path.join(root, p) for p in args.model],
+        evidence_paths=[p if os.path.isabs(p) else os.path.join(root, p) for p in args.evidence],
         current_build=_kv(args.current_build),
         scan=not args.no_scan,
         author=args.author,

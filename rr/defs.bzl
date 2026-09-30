@@ -9,6 +9,7 @@ Model:
                             (validation) unless `validate = False`.
   * `rr_annotations_test` — fail on source annotations referencing unknown ids.
   * `rr_annotations_check`— the same over the whole workspace, via `bazel run`.
+  * `rr_editor`           — `bazel run` target for the web editor (`rr serve`).
 
 Test hooks:
   * `rr_py_test`          — pytest with `@pytest.mark.rr(...)` traceability JUnit.
@@ -119,6 +120,32 @@ def rr_annotations_check(name, model, **kwargs):
       **kwargs: forwarded to the underlying `py_binary`.
     """
     _py("binary", name, "cli", baked_args = ["scan", "--model", "$(rootpaths %s)" % model], data = [model], **kwargs)
+
+def rr_editor(name, model, paths = [], evidence = ["bazel-testlogs"], args = [], **kwargs):
+    """`bazel run :<name>` opens the web editor (`rr serve`) on the model.
+
+    The editor edits the real files in the workspace (not runfiles copies):
+    model paths are taken relative to the workspace root.
+
+    Args:
+      name: target name.
+      model: an `rr_model` target (its files are what the editor opens).
+      paths: workspace-relative directories or files to open instead of the
+        model's files — use the model's directory for one-object-per-file
+        layouts, so new entities can be created there.
+      evidence: workspace-relative evidence paths (default `bazel-testlogs`).
+      args: extra `rr serve` arguments (e.g. `--port=9000`, `--no-llm`).
+      **kwargs: forwarded to the underlying `py_binary`.
+    """
+    model_args = ["--model"] + (paths if paths else ["$(rootpaths %s)" % model])
+    _py(
+        "binary",
+        name,
+        "cli",
+        baked_args = ["serve"] + model_args + ["--evidence"] + evidence + args,
+        data = [model],
+        **kwargs
+    )
 
 def rr_py_test(name, srcs, deps = [], args = [], data = [], **kwargs):
     """A pytest `py_test` whose JUnit carries `@pytest.mark.rr(...)` traces.

@@ -16,6 +16,10 @@ Open the printed URL (`http://localhost:8080/` by default). Everything the
 editor changes is written to your checkout as ordinary YAML edits, so the usual
 review loop — diff, commit, pull request — stays the source of truth.
 
+```{image} ../_static/editor-entity.png
+:alt: A risk in the web editor, with its trace chain, hazard analysis and notes
+```
+
 ## What you can do
 
 **Author and edit.** Every entity kind has a list view (status, open notes,
@@ -28,9 +32,24 @@ every reference in the model follows — and deleting an entity that is still
 referenced asks first (and can remove the references).
 
 Edits are **surgical**: only the changed fields of the changed entity are
-rewritten. Comments, section banners, field order and the formatting of every
-untouched field stay byte-for-byte as they were, so a change made in the editor
-produces the same small diff a person would write by hand.
+rewritten. Comments, section banners, field order, line endings, file mode and
+the formatting of every untouched field stay as they were, so a change made in
+the editor produces the same small diff a person would write by hand.
+
+Every write is also **verified** before it happens: the edited files are
+re-read with the model loader and must differ from the originals exactly as
+intended — the edited entities as requested, every other entity, the
+configuration and the project metadata unchanged, no new errors. Otherwise
+nothing is written and the editor explains why. Layouts that cannot be edited
+in place without touching neighbours — flow-style sections
+(`requirements: [{...}, {...}]`) and JSON model files — are refused the same
+way; edit those by hand or convert them to block style. An entity carries a
+version, so saving a form over a change someone made in the meantime is a
+conflict, not a silent overwrite.
+
+```{image} ../_static/editor-graph.png
+:alt: The trace graph: needs, requirements, mitigations and risks coloured by status
+```
 
 **Trace.** Each entity page shows its traces in both directions with their
 verification status — for a risk, the whole chain from user needs through
@@ -116,7 +135,10 @@ and source files — keep that in mind for confidential code.
 The server edits files in your checkout and runs `git`, so it is built for
 local use:
 
-- it binds to `127.0.0.1` by default (`--host` to change);
+- it binds to `127.0.0.1` by default (`--host` to change — any address other
+  than loopback requires a token, and `rr serve` generates one if you give
+  none, because the Host check below is no protection against clients that can
+  reach the port directly);
 - requests whose `Host` header is not a local name are refused, which defeats
   DNS-rebinding attacks from web pages (`--allow-host NAME` adds a name, e.g.
   behind a reverse proxy);

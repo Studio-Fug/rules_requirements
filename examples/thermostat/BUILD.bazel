@@ -10,7 +10,7 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
-load("@rules_requirements//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+load("@rules_requirements//rr:defs.bzl", "rr_annotations_test", "rr_editor", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 # --------------------------------------------------------------------------- #
@@ -138,4 +138,11 @@ rr_golden_test(
     name = "report_md_golden_test",
     src = ":report.md",
     golden = "report.golden.md",
+)
+
+# `bazel run //:editor` — the web editor on this model (see the web editor guide).
+rr_editor(
+    name = "editor",
+    model = ":model",
+    paths = ["requirements"],
 )
