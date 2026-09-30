@@ -120,22 +120,22 @@ rr_evidence(
 
 rr_report(
     name = "report",
+    srcs = SOURCES,
     evidence = [
         ":evidence",
         "evidence/panel_inspection.rr.yaml",
     ],
     model = [":model"],
-    srcs = SOURCES,
 )
 
 rr_golden_test(
     name = "report_json_golden_test",
-    golden = "report.golden.json",
     src = ":report.json",
+    golden = "report.golden.json",
 )
 
 rr_golden_test(
     name = "report_md_golden_test",
-    golden = "report.golden.md",
     src = ":report.md",
+    golden = "report.golden.md",
 )

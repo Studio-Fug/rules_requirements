@@ -72,7 +72,10 @@ def test_markdown(tmp_path, model):
 
 
 def test_markdown_implementation_section(model):
-    refs = [Reference(("REQ-1",), "implements", "src/c.py", 4, "", "def heat"), Reference(("REQ-1",), "verifies", "t.py", 2)]
+    refs = [
+        Reference(("REQ-1",), "implements", "src/c.py", 4, "", "def heat"),
+        Reference(("REQ-1",), "verifies", "t.py", 2),
+    ]
     md = report.render_markdown(build_matrix(model, ingest.Evidence(), references=refs))
     assert "| REQ-1 | src/c.py:4 (def heat) | t.py:2 |" in md
     assert "| REQ-2 | — | — |" in md
