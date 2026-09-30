@@ -1,0 +1,14 @@
+# bzlmod only.
+common --enable_bzlmod
+common --noenable_workspace
+
+# Bazel 7's JDK can SIGILL on some aarch64 hosts; the first flag keeps the
+# second harmless on x86_64 JVMs that do not know it.
+startup --host_jvm_args=-XX:+IgnoreUnrecognizedVMOptions
+startup --host_jvm_args=-XX:UseSVE=0
+
+build --incompatible_strict_action_env
+test --test_output=errors
+
+# Local overrides (disk cache, output base, ...) live in an untracked file.
+try-import %workspace%/user.bazelrc

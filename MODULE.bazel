@@ -1,0 +1,45 @@
+"""rules_requirements — requirements-driven development and traceability for Bazel."""
+
+module(
+    name = "rules_requirements",
+    version = "0.1.0",
+)
+
+# Versions are floors (bzlmod picks the max across the graph). They are kept at
+# or below what known consumers already use so adding this module never forces
+# an upgrade on them.
+bazel_dep(name = "rules_python", version = "2.0.3")
+bazel_dep(name = "rules_cc", version = "0.2.22")
+bazel_dep(name = "rules_rust", version = "0.71.3")
+bazel_dep(name = "googletest", version = "1.17.0.bcr.2")
+
+# --------------------------------------------------------------------------- #
+# Development only: toolchains + test dependencies for this repository's own  #
+# tests and examples. Consumers configure their own.                          #
+# --------------------------------------------------------------------------- #
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python", dev_dependency = True)
+python.toolchain(
+    is_default = True,
+    python_version = "3.11",
+)
+
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip", dev_dependency = True)
+pip.parse(
+    hub_name = "rr_dev_pip",
+    python_version = "3.11",
+    requirements_lock = "//python:requirements_dev.lock",
+)
+use_repo(pip, "rr_dev_pip")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust", dev_dependency = True)
+rust.toolchain(
+    edition = "2021",
+    versions = ["1.85.0"],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains(
+    "@rust_toolchains//:all",
+    dev_dependency = True,
+)

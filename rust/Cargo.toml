@@ -1,0 +1,12 @@
+[package]
+name = "rules_requirements"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-or-later"
+description = "Requirements traceability for Rust tests (rules_requirements)."
+repository = "https://github.com/Studio-Fug/rules_requirements"
+rust-version = "1.70"
+
+[lib]
+name = "rr"
+path = "src/lib.rs"

@@ -1,0 +1,11 @@
+load("@rules_rust//rust:defs.bzl", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# `rr::verifies!("REQ-1")` in Rust tests; see rr_rust_test in //rr:defs.bzl.
+rust_library(
+    name = "rr",
+    srcs = ["src/lib.rs"],
+    crate_name = "rr",
+    edition = "2021",
+)
