@@ -446,3 +446,23 @@ def test_history_reads_the_files_the_working_tree_reads(repo):
     ws = Workspace(root=str(repo), model_paths=["req"])
     assert ws.model.get("REQ-99") is None and ws.model_at("HEAD").get("REQ-99") is None
     assert ws.diff("HEAD") == []
+
+
+def test_commits_need_someone_to_attribute_them_to(repo, monkeypatch):
+    # No git identity anywhere (only this repository's config is read).
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+    ws = Workspace(root=str(repo), model_paths=["req"])
+    ws.create("user_need", {"title": "N"})
+    with pytest.raises(WorkspaceError, match="who is committing") as exc:
+        ws.commit("Add a need")
+    assert exc.value.status == 400
+    with pytest.raises(WorkspaceError, match="who is committing"):
+        ws.tag("baseline/v1")
+    ws.commit("Add a need", author="Ada <ada@example.com>")
+    assert (
+        git(repo, "log", "-1", "--format=%an <%ae> / %cn <%ce>").strip()
+        == "Ada <ada@example.com> / Ada <ada@example.com>"
+    )

@@ -543,6 +543,22 @@ class Workspace:
     def diff(self, old: str, new: str = "WORKTREE") -> list[EntityChange]:
         return diff_models(self.model_at(old), self.model_at(new))
 
+    def _require_identity(self, author: str) -> None:
+        """Refuse up front when neither the editor nor git knows who is committing
+        (git would stop with "Author identity unknown", or record a guess)."""
+        if re.match(r"^\s*(.+?)\s*<([^>]+)>\s*$", author or ""):
+            return
+        if (
+            self.git("config", "user.name", check=False).strip()
+            and self.git("config", "user.email", check=False).strip()
+        ):
+            return
+        raise WorkspaceError(
+            "who is committing? Set your name and e-mail in the editor (top right, as Name <email>), "
+            "or configure git user.name and user.email",
+            400,
+        )
+
     def _identity_env(self, author: str) -> dict[str, str]:
         """Committer/tagger identity from ``author`` when git has none configured."""
         m = re.match(r"^\s*(.+?)\s*<([^>]+)>\s*$", author or "")
@@ -560,6 +576,7 @@ class Workspace:
         if self.git("tag", "--list", name).strip():
             raise WorkspaceError(f"tag {name} already exists", 409)
         args = ["tag", "-a", name, "-m", message or f"requirements baseline {name}", self._resolve(ref)]
+        self._require_identity(author or self.author)
         self.git(*args, env=self._identity_env(author or self.author))
 
     def commit(self, message: str, author: str = "") -> str:
@@ -568,6 +585,7 @@ class Workspace:
         changed = self._changed_model_files()
         if not changed:
             raise WorkspaceError("no model changes to commit", 409)
+        self._require_identity(author or self.author)
         # Stage and commit exactly the model files: never sweep in unrelated
         # edits (a BUILD file, scratch files) that happen to sit alongside.
         self.git("add", "-A", "--", *changed)

@@ -2,7 +2,16 @@
 // rr serve — requirements workbench. Entry point: shell, router, search.
 
 import { captureToken, get, post, settings } from "./js/api.js";
-import { button, clearSourceCache, glyph, icon, idTag, openDialog, reportError, toast } from "./js/components.js";
+import {
+  button,
+  clearSourceCache,
+  glyph,
+  icon,
+  idTag,
+  openDialog,
+  reportError,
+  toast,
+} from "./js/components.js";
 import { h, mount, plural, swap } from "./js/dom.js";
 import { KIND, KIND_BY_ROUTE, KINDS, refresh, store } from "./js/store.js";
 import { stopPolling } from "./js/views/agents.js";
@@ -194,8 +203,11 @@ function drawTopbar() {
     h(
       "a",
       { class: "brand", href: "#/overview" },
-      h("span", { class: "brand-mark", "aria-hidden": "true" }, glyph("requirement", "VERIFIED")),
-      h("span", null, projectName()),
+      // The favicon is the logo, and follows the colour scheme by itself.
+      h("span", { class: "brand-mark", "aria-hidden": "true" },
+        h("img", { class: "logo", src: "favicon.svg", alt: "", width: 24, height: 24 }),
+      ),
+      h("span", { class: "brand-text" }, projectName()),
     ),
     git.git
       ? h(

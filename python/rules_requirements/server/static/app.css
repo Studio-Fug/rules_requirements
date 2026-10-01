@@ -165,6 +165,7 @@ p {
 }
 
 .brand {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 9px;
@@ -173,15 +174,24 @@ p {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
   max-width: 260px;
 }
 .brand:hover {
   text-decoration: none;
 }
-.brand-mark .glyph {
-  width: 18px;
-  height: 18px;
+.brand-mark {
+  display: flex;
+  flex: none;
+}
+.brand-mark .logo {
+  width: 24px;
+  height: 24px;
+}
+.brand-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3; /* room for descenders inside the clip */
 }
 
 .branch {
@@ -2254,6 +2264,22 @@ dialog::backdrop {
   .topbar {
     gap: 8px;
     padding: 0 10px;
+  }
+}
+
+@media (max-width: 640px) {
+  /* Too narrow for the project name: show only the logo, at its full size (the
+     search box absorbs the squeeze), and keep the name for screen readers. */
+  .brand {
+    flex: none;
+  }
+  .brand-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 }
 

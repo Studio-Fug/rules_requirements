@@ -1,1 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect x="2" y="9" width="9" height="14" rx="4.5" fill="none" stroke="#2552C0" stroke-width="2.4"/><rect x="13" y="11" width="10" height="10" rx="1.5" fill="#2552C0"/><path d="M26 10l4 6-4 6-4-6z" fill="none" stroke="#2552C0" stroke-width="2.2" stroke-linejoin="round"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 20 216 216" role="img" aria-labelledby="title desc">
+  <title id="title">rules_requirements logo</title>
+  <desc id="desc">Three verified nodes connected bottom-left to top-left to top-right.</desc>
+
+  <!-- The canonical logo (docs/_static/logo/rules_requirements_logo.svg) with
+       its <use> references expanded and its colours moved into classes, so
+       that it can follow the colour scheme: in dark mode ink and paper swap,
+       as in rules_requirements_logo-dark.svg. Geometry must stay identical. -->
+  <style>
+    .ink { fill: #111111; }
+    .node { fill: #ffffff; stroke: #111111; stroke-width: 12; }
+    .check { fill: none; stroke: #16b84e; stroke-width: 10; stroke-linecap: round; stroke-linejoin: round; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #ffffff; }
+      .node { fill: #111111; stroke: #ffffff; }
+    }
+  </style>
+
+  <!-- Edges first: top-left -> top-right, and the same arrow rotated 90 degrees,
+       bottom-left -> top-left -->
+  <rect class="ink" x="98" y="57" width="48" height="14"/>
+  <path class="ink" d="M140 43 L164 64 L140 85 Z"/>
+  <rect class="ink" x="57" y="110" width="14" height="48"/>
+  <path class="ink" d="M43 116 L64 92 L85 116 Z"/>
+
+  <!-- Nodes -->
+  <circle class="node" cx="64" cy="64" r="34"/>
+  <circle class="node" cx="192" cy="64" r="34"/>
+  <circle class="node" cx="64" cy="192" r="34"/>
+
+  <!-- Identical centered checks: M-17 0 L-6 11 L17 -12, moved to each center -->
+  <path class="check" d="M47 64 L58 75 L81 52"/>
+  <path class="check" d="M175 64 L186 75 L209 52"/>
+  <path class="check" d="M47 192 L58 203 L81 180"/>
+</svg>

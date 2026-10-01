@@ -2,6 +2,8 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files([
     "LICENSE",
+    "docs/_static/logo/rules_requirements_logo.svg",
+    "docs/_static/logo/rules_requirements_logo-dark.svg",
     "schema/rules_requirements.schema.json",
 ])
 

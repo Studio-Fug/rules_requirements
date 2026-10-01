@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -376,8 +377,29 @@ def test_claude_llm_request_shape_and_errors(monkeypatch):
         rr_llm.ClaudeLLM(client=_FakeClient(_msg(text="nope"))).json("s", "p", {})
     with pytest.raises(rr_llm.LLMError, match="RuntimeError"):
         rr_llm.ClaudeLLM(client=_FakeClient(error=RuntimeError("down"))).json("s", "p", {})
+    # What anthropic 1.11 raises when it finds no credentials at request time.
+    no_auth = TypeError(
+        '"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set. '
+        'Or for one of the `X-Api-Key` or `Authorization` headers to be explicitly omitted"'
+    )
+    with pytest.raises(rr_llm.LLMError, match="no usable Claude credentials: set ANTHROPIC_API_KEY"):
+        rr_llm.ClaudeLLM(client=_FakeClient(error=no_auth)).json("s", "p", {})
     monkeypatch.setenv("RR_AGENT_MODEL", "claude-sonnet-5-5")
     assert rr_llm.ClaudeLLM(client=client, effort="low").name == "claude-sonnet-5-5 (effort low)"
+
+
+def test_a_broken_credentials_profile_leaves_the_llm_unavailable(monkeypatch):
+    # e.g. ANTHROPIC_PROFILE naming a profile that does not exist: the SDK fails in the constructor.
+    class CredentialsError(Exception):
+        pass
+
+    def broken():
+        raise CredentialsError("Config file not found at ~/.config/anthropic/configs/missing.json (profile 'missing')")
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=broken))
+    assert rr_llm.default_llm() is None  # rr serve still starts
+    status = rr_llm.llm_status(None)
+    assert status["available"] is False and "CredentialsError: Config file not found" in status["reason"]
 
 
 def test_llm_availability(monkeypatch):

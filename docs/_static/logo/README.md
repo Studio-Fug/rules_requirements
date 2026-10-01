@@ -77,3 +77,19 @@ gave the icon a project-specific identity without sacrificing simplicity.
 
 `rules_requirements_logo.svg` is the canonical vector artwork. It is hand-authored
 SVG geometry rather than an image trace.
+
+The same geometry appears in:
+
+- `rules_requirements_logo-dark.svg`: ink and paper swapped, for dark backgrounds.
+- `python/rules_requirements/server/static/favicon.svg`: the favicon of the web
+  editor and of this documentation. Its colours are classes in an embedded
+  stylesheet, so it switches to the dark variant under
+  `prefers-color-scheme: dark`. A unit test checks that it draws exactly the
+  canonical shapes. Its view box is cropped to the art (`20 20 216 216`), so
+  it is larger in a browser tab; the shapes are unchanged.
+- The web editor's top bar shows `favicon.svg` itself, so it follows the colour
+  scheme the same way.
+
+The favicon follows the operating system's colour scheme, not the colour of the
+browser's tab strip: with a dark tab strip on a light scheme (or the reverse)
+its edges lose contrast, as the artwork itself would.

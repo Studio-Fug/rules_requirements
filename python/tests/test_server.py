@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 
 import pytest
 from conftest import MODEL, write
@@ -239,10 +241,125 @@ def test_ui_assets_are_packaged():
     from rules_requirements.server import app
 
     names = set(os.listdir(app.STATIC))
-    assert {"index.html", "app.js", "app.css"} <= names
+    assert {"index.html", "app.js", "app.css", "favicon.svg"} <= names
     with open(os.path.join(app.STATIC, "index.html"), encoding="utf-8") as fh:
         html = fh.read()
     assert 'type="module"' in html and "<script>" not in html  # no inline scripts (CSP)
+    assert '<link rel="icon" href="favicon.svg" type="image/svg+xml" />' in html
+
+
+def test_the_favicon_is_the_logo_and_follows_the_colour_scheme(api):
+    httpd = serve(api, port=0)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, headers, body = http(base, "GET", "/favicon.svg")
+    finally:
+        httpd.shutdown()
+    assert status == 200 and headers["Content-Type"] == "image/svg+xml"
+    svg = body.decode()
+    assert "<title" in svg and "rules_requirements logo" in svg and "#16b84e" in svg
+    # Colours live in the stylesheet only, so that dark mode can swap them.
+    assert "@media (prefers-color-scheme: dark)" in svg and " fill=" not in svg and " stroke=" not in svg
+    assert " style=" not in svg  # an inline style would override the class paint the geometry test checks
+
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PAINT = ("fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin")
+
+
+def _logo(name):
+    for base in (_ROOT, os.environ.get("TEST_SRCDIR", "") + "/_main"):
+        path = os.path.join(base, "docs", "_static", "logo", name)
+        if os.path.exists(path):
+            return path
+    # In a checkout (or under Bazel, which ships it as data) the artwork must be there.
+    assert not os.path.exists(os.path.join(_ROOT, "pyproject.toml")), f"missing docs/_static/logo/{name}"
+    pytest.skip("the logo artwork is not available")
+
+
+def _class_styles(svg):
+    """The favicon's stylesheet: class -> paint, without and with dark mode."""
+    style = re.search(r"<style>(.*)</style>", svg, re.S)[1]
+    light, dark = (
+        {
+            cls: dict(re.findall(r"([\w-]+):\s*([^;]+);", body))
+            for cls, body in re.findall(r"\.([\w-]+)\s*\{([^}]*)\}", css)
+        }
+        for css in style.split("@media (prefers-color-scheme: dark)")
+    )
+    return light, {cls: {**paint, **dark.get(cls, {})} for cls, paint in light.items()}
+
+
+def _shapes(path, styles=None):
+    """An SVG's shapes and paint in drawing order, <use>s expanded and translations applied.
+
+    Paint comes from the (inherited) attributes or, given ``styles``, from the
+    stylesheet rule for each shape's class.
+    """
+    root = ET.parse(path).getroot()
+    by_id = {el.get("id"): el for el in root.iter() if el.get("id")}
+    shapes = []
+
+    def walk(el, dx, dy, inherited):
+        tag = el.tag.replace("{http://www.w3.org/2000/svg}", "")
+        if tag in ("defs", "title", "desc", "style"):
+            return
+        if el.get("transform"):
+            m = re.fullmatch(r"translate\((-?\d+(?:\.\d+)?) (-?\d+(?:\.\d+)?)\)", el.get("transform"))
+            assert m, el.get("transform")
+            dx, dy = dx + float(m[1]), dy + float(m[2])
+        paint = {**inherited, **{k: el.get(k) for k in _PAINT if el.get(k)}}
+        if tag in ("svg", "g", "use"):
+            for child in [by_id[el.get("href").lstrip("#")]] if tag == "use" else el:
+                walk(child, dx, dy, paint)
+            return
+        if tag == "rect":
+            geometry = (
+                float(el.get("x")) + dx,
+                float(el.get("y")) + dy,
+                float(el.get("width")),
+                float(el.get("height")),
+            )
+        elif tag == "circle":
+            geometry = (float(el.get("cx")) + dx, float(el.get("cy")) + dy, float(el.get("r")))
+        else:
+            assert tag == "path", tag
+            d = el.get("d")
+            assert set(re.findall(r"[A-Za-z]", d)) <= set("MLZ"), d  # absolute moves and lines only
+            nums = [float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", d)]
+            geometry = (re.sub(r"[^A-Z]", "", d), *((x + dx, y + dy) for x, y in zip(nums[::2], nums[1::2])))
+        if styles is not None:
+            paint = styles[el.get("class")]
+        shapes.append((tag, geometry, tuple(paint.get(k) for k in _PAINT)))
+
+    walk(root, 0.0, 0.0, {})
+    return shapes
+
+
+def test_the_favicon_draws_exactly_the_canonical_logo():
+    from rules_requirements.server import app
+
+    favicon = os.path.join(app.STATIC, "favicon.svg")
+    with open(favicon, encoding="utf-8") as fh:
+        light, dark = _class_styles(fh.read())
+    shapes = _shapes(favicon, light)
+    assert len(shapes) == 3 + 3 + 2 * 2  # nodes, checks, and two arrows of a shaft and a head
+    assert shapes == _shapes(_logo("rules_requirements_logo.svg"))
+    # In dark mode: the variant for dark backgrounds.
+    assert _shapes(favicon, dark) == _shapes(_logo("rules_requirements_logo-dark.svg"))
+    # The view box frames the art (nodes: centres 64 / 192, radius 34 + half the 12 stroke) without clipping it.
+    x, y, w, h = (float(n) for n in ET.parse(favicon).getroot().get("viewBox").split())
+    assert x <= 64 - 40 and y <= 64 - 40 and x + w >= 192 + 40 and y + h >= 192 + 40
+
+
+def test_the_header_mark_is_the_favicon():
+    # One copy of the logo geometry: the top bar shows favicon.svg itself.
+    from rules_requirements.server import app
+
+    with open(os.path.join(app.STATIC, "app.js"), encoding="utf-8") as fh:
+        assert 'src: "favicon.svg"' in fh.read()
+    with open(os.path.join(app.STATIC, "index.html"), encoding="utf-8") as fh:
+        assert 'href="favicon.svg"' in fh.read()
 
 
 def test_findings_apply_once_and_updates_merge(api):

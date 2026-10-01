@@ -41,7 +41,9 @@ myst_heading_anchors = 3
 
 html_theme = "furo"
 html_title = f"rules_requirements {release}"
-html_favicon = "_static/logo/rules_requirements_logo.svg"
+# The web editor's favicon, shared rather than copied: the logo, with ink and
+# paper swapped when the browser prefers a dark colour scheme.
+html_favicon = "../python/rules_requirements/server/static/favicon.svg"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_extra_path = ["_generated/extra"]

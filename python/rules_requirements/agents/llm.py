@@ -52,8 +52,12 @@ class ClaudeLLM:
             except ImportError as exc:
                 raise LLMUnavailable('the "anthropic" package is not installed (pip install anthropic)') from exc
             # Credentials resolve from the environment (ANTHROPIC_API_KEY,
-            # ANTHROPIC_AUTH_TOKEN or an `ant auth login` profile).
-            client = anthropic.Anthropic()
+            # ANTHROPIC_AUTH_TOKEN or an `ant auth login` profile); a profile that
+            # is named but missing or broken fails right here.
+            try:
+                client = anthropic.Anthropic()
+            except Exception as exc:
+                raise LLMUnavailable(f"the Claude client could not be created: {type(exc).__name__}: {exc}") from exc
         self.client = client
         self.name = f"{self.model} (effort {self.effort})"
 
@@ -74,6 +78,11 @@ class ClaudeLLM:
             with self.client.beta.messages.stream(**kwargs) as stream:
                 message = stream.get_final_message()
         except Exception as exc:
+            if isinstance(exc, TypeError) and "Could not resolve authentication method" in str(exc):
+                raise LLMError(
+                    "no usable Claude credentials: set ANTHROPIC_API_KEY, or check your `ant auth login` "
+                    "profile, in the environment rr serve runs in"
+                ) from exc
             raise LLMError(f"{type(exc).__name__}: {exc}") from exc
         if message.stop_reason == "refusal":
             details = getattr(message, "stop_details", None)
@@ -90,13 +99,17 @@ class ClaudeLLM:
             raise LLMError(f"the model returned invalid JSON: {exc}") from exc
 
 
+_why_unavailable: list[str] = [""]  # why default_llm() last returned None
+
+
 def default_llm(enabled: bool = True, model: str = "", effort: str = "") -> LLM | None:
     """A :class:`ClaudeLLM` if possible, else ``None`` (``llm_status`` says why)."""
     if not enabled:
         return None
     try:
         return ClaudeLLM(model=model, effort=effort)
-    except LLMUnavailable:
+    except LLMUnavailable as exc:
+        _why_unavailable[0] = str(exc)
         return None
 
 
@@ -112,4 +125,4 @@ def llm_status(llm: LLM | None, enabled: bool = True) -> dict[str, Any]:
             "available": False,
             "reason": 'install the optional "anthropic" package: pip install anthropic',
         }
-    return {"available": False, "reason": "the Claude client could not be created"}
+    return {"available": False, "reason": _why_unavailable[0] or "the Claude client could not be created"}
