@@ -13,7 +13,8 @@ Model:
 
 Test hooks:
   * `rr_py_test`          — pytest with `@pytest.mark.rr(...)` traceability JUnit.
-  * `rr_wrapped_test`     — run a test binary and convert its output (libtest).
+  * `rr_wrapped_test`     — run a test binary and convert its output (libtest),
+                            or pass on the JUnit it writes (junit).
   * `rr_rust_test`        — `rust_test` + wrapper, for `rr::verifies!(...)`.
   (googletest needs no wrapper: depend on `@rules_requirements//cc:gtest`.)
 
@@ -177,20 +178,28 @@ def rr_py_test(name, srcs, deps = [], args = [], data = [], **kwargs):
         **kwargs
     )
 
-def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], **kwargs):
+def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], junit_in = "", **kwargs):
     """Run test binary `test` and convert its output to traceability JUnit.
 
     Args:
       name: test name.
       test: the test executable target (usually tagged `manual`).
-      format: output format of the binary (`libtest`).
+      format: output format of the binary: `libtest`, or `junit` for a binary
+        that writes JUnit itself to `junit_in`.
       level: default verification level for cases without one.
       args: extra arguments for the binary.
+      junit_in: with `format = "junit"`, the path the binary writes its JUnit
+        to; `$VARS` such as `${TEST_TMPDIR}` are expanded at run time, and a
+        relative path is relative to the test's working directory.
       **kwargs: forwarded to `py_test`.
     """
+    if (format == "junit") != bool(junit_in):
+        fail("rr_wrapped_test: junit_in is required with format = \"junit\", and only then")
     wrap_args = ["--format", format, "--target", "//%s:%s" % (native.package_name(), name)]
     if level:
         wrap_args += ["--level", level]
+    if junit_in:
+        wrap_args += ["--junit-in", junit_in]
     _py(
         "test",
         name,

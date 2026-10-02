@@ -187,3 +187,59 @@ def test_current_build_warns_when_no_identity_matches(capsys, model_path, tmp_pa
     assert "match no artifact identity" in err and "(sha)" in err
     _, _, err = run(capsys, "report", "--model", model_path, "--evidence", x, "--current-build", "sha=abc")
     assert "match no artifact identity" not in err
+
+
+def test_case_appends_one_case(capsys, tmp_path, monkeypatch):
+    from rules_requirements import ingest
+
+    out = tmp_path / "results.xml"
+    monkeypatch.setenv("XML_OUTPUT_FILE", str(out))
+    monkeypatch.setenv("TEST_TARGET", "//bench:flash_test")
+    monkeypatch.chdir(tmp_path)
+    rc, _, _ = run(capsys, "case", "--name", "flash ok", "--requirement", "REQ-21", "--level", "hitl")
+    assert rc == 0
+    rc, _, _ = run(
+        capsys,
+        "case",
+        "--name",
+        "boot banner",
+        "--status",
+        "failed",
+        "--message",
+        "no banner in 30 s",
+        "--classname",
+        "bench.boot",
+        "--artifact",
+        "fw=1.2",
+        "--file",
+        "scripts/bench.sh",
+        "--duration",
+        "2.5",
+    )
+    assert rc == 0
+    cases = ingest.collect([str(out)]).cases
+    assert [(c.classname, c.name, c.status) for c in cases] == [
+        ("flash_test", "flash ok", "passed"),
+        ("bench.boot", "boot banner", "failed"),
+    ]
+    flash, boot = cases
+    assert flash.requirements == ("REQ-21",) and flash.level == "hitl" and "rr.file" not in flash.properties
+    assert boot.requirements == () and boot.artifact == {"fw": "1.2"} and boot.message == "no banner in 30 s"
+    assert boot.properties["rr.file"] == "scripts/bench.sh" and boot.duration == 2.5
+
+
+def test_case_rejects_more_than_one_id(capsys, tmp_path):
+    out = str(tmp_path / "r.xml")
+    rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--requirement", "REQ-1", "--requirement", "REQ-2")
+    assert rc == 2 and "RR-E101" in err
+    rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--requirement", "REQ-1,REQ-2")
+    assert rc == 2 and "RR-E104" in err
+    assert not (tmp_path / "r.xml").exists()
+    rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--suite", "s")
+    assert rc == 0 and '<testsuite name="s"' in (tmp_path / "r.xml").read_text()
+
+
+def test_case_needs_an_output(capsys, monkeypatch):
+    monkeypatch.delenv("XML_OUTPUT_FILE", raising=False)
+    rc, _, err = run(capsys, "case", "--name", "x")
+    assert rc == 2 and "XML_OUTPUT_FILE" in err

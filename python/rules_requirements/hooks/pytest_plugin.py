@@ -2,7 +2,11 @@
 """pytest plugin: ``@pytest.mark.rr("REQ-1", level="hil")``.
 
 Each marked test gets one ``<property name="requirement">`` per id (and a
-``level`` property) on its JUnit ``<testcase>``; run pytest with
+``level`` property) on its JUnit ``<testcase>``. A test case verifies at most
+one requirement: a marker naming several ids (several arguments, or a comma or
+whitespace inside one) is deprecated and warns with
+:class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`, though
+every id is still recorded. Run pytest with
 ``--junitxml=... -o junit_family=xunit2`` (the
 :mod:`~rules_requirements.hooks.pytest_runner` does this for Bazel).
 
@@ -32,6 +36,7 @@ except ImportError:  # pragma: no cover - pytest is always present when the hook
         return fn
 
 
+from rules_requirements.hooks.ids import split_ids, warn_multiple
 from rules_requirements.util import dedupe
 
 MARKERS = ("rr", "requirements")
@@ -100,8 +105,28 @@ def pytest_collection_modifyitems(items: list[Any]) -> None:
     # collection_modifyitems has added its markers — and before any test
     # runs, so the properties reach the JUnit testcase however the test ends,
     # including tests skipped by @pytest.mark.skip / skipif.
+    warned: set[str] = set()
     for item in items:
+        _warn_multiple(item, warned)
         _record(item)
+
+
+def _warn_multiple(item: Any, warned: set[str]) -> None:
+    """Warn once per node whose ``rr`` / ``requirements`` markers name several ids.
+
+    Only markers are checked here: ``@rr.verifies`` warns when it decorates.
+    Ids accumulated across scopes (a module marker plus a function marker) are
+    not a multi-id declaration.
+    """
+    by_node: dict[str, tuple[Any, list[str]]] = {}
+    for node, marker in item.iter_markers_with_node():
+        if marker.name in MARKERS:
+            by_node.setdefault(node.nodeid, (node, []))[1].extend(split_ids(list(marker.args)))
+    for nodeid, (_node, ids) in by_node.items():
+        distinct = dedupe(ids)
+        if len(distinct) > 1 and nodeid not in warned:
+            warned.add(nodeid)
+            warn_multiple(f"{nodeid or item.nodeid}: marker", distinct)
 
 
 def _record(item: Any) -> None:

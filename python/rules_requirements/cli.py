@@ -9,6 +9,7 @@
                  --html report.html --json report.json --md report.md
     rr graph     --model requirements/ --format mermaid
     rr ingest    bazel-testlogs                   # debug: show parsed test cases
+    rr case      --name "flash ok" --status passed --requirement REQ-21   # shell harnesses
 
 Under ``bazel run``, relative paths resolve against the workspace root.
 """
@@ -344,6 +345,42 @@ def cmd_wrap(args: argparse.Namespace) -> int:
     return wrap.main(args.rest)
 
 
+def cmd_case(args: argparse.Namespace) -> int:
+    from rules_requirements.hooks.ids import E_MULTIPLE
+    from rules_requirements.hooks.junit_writer import JUnitWriter, source_file
+
+    out = _path(args.out) if args.out else os.environ.get("XML_OUTPUT_FILE", "")
+    if not out:
+        print("rr case: no --out and no $XML_OUTPUT_FILE", file=sys.stderr)
+        return 2
+    if args.requirement and len(args.requirement) > 1:
+        print(
+            f"rr case: --requirement given {len(args.requirement)} times ({', '.join(args.requirement)}); "
+            f"a test case verifies at most one requirement [{E_MULTIPLE}]",
+            file=sys.stderr,
+        )
+        return 2
+    target = os.environ.get("TEST_TARGET", "")
+    suite = args.suite or (target.rsplit(":", 1)[-1] if target else "") or "rr"
+    writer = JUnitWriter(suite, file=source_file(args.file))
+    try:
+        writer.add(
+            args.name,
+            args.requirement[0] if args.requirement else None,
+            status=args.status,
+            message=args.message,
+            duration=args.duration,
+            level=args.level,
+            artifact=_kv(args.artifact),
+            classname=args.classname,
+        )
+        writer.write(out, append=True)
+    except (ValueError, TypeError, SyntaxError, OSError) as exc:
+        print(f"rr case: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
@@ -434,6 +471,25 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--agent-model", default="", help="Claude model for agents (default claude-opus-5-5)")
     sv.add_argument("--agent-effort", default="", help="effort for agent requests (default high)")
     sv.set_defaults(func=cmd_serve)
+
+    c = sub.add_parser(
+        "case",
+        help="append one test case to a JUnit file (shell and ad-hoc harnesses)",
+        description="Append one test case to the JUnit file at --out (default $XML_OUTPUT_FILE), "
+        "creating it if needed. Exits 0 whatever the case's status.",
+    )
+    c.add_argument("--out", default="", help="JUnit file to append to (default: $XML_OUTPUT_FILE)")
+    c.add_argument("--name", required=True, help="the case's name")
+    c.add_argument("--status", choices=["passed", "failed", "error", "skipped"], default="passed")
+    c.add_argument("--classname", default="", help="the case's classname (default: the suite)")
+    c.add_argument("--suite", default="", help="suite to append to (default: the name part of $TEST_TARGET, else rr)")
+    c.add_argument("--requirement", action="append", metavar="ID", help="the ONE requirement id the case verifies")
+    c.add_argument("--level", default="", help="the verification level the case provides")
+    c.add_argument("--artifact", action="append", metavar="KEY=VALUE", help="artifact identity (repeatable)")
+    c.add_argument("--message", default="", help="failure, error or skip message")
+    c.add_argument("--duration", type=float, default=0.0, help="seconds")
+    c.add_argument("--file", default="", help="source file of the test code, recorded as rr.file")
+    c.set_defaults(func=cmd_case)
 
     w = sub.add_parser("wrap", help="run a test binary and emit traceability JUnit", add_help=False)
     w.add_argument("rest", nargs=argparse.REMAINDER)
