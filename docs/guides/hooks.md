@@ -10,6 +10,7 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 | pytest | `@pytest.mark.rr("REQ-1", level="sil")` | `rr_py_test` | pip-installed plugin, `pytest --junitxml=...` |
 | unittest | `@rr.verifies("REQ-1")` | `py_test` + `rr.unittest_main()` | `rr.unittest_main()` / `--junit-xml` |
 | googletest | `RR_VERIFIES("REQ-1");` | `cc_test` + `@rules_requirements//cc:gtest` | `--gtest_output=xml:...` |
+| plain-assert C/C++ | `RR_CASE(name, "REQ-1") { ... }` | `cc_test` + `@rules_requirements//cc:case` | `--rr_junit=...` |
 | Rust | `rr::verifies!("REQ-1");` | `rr_rust_test` | `rr wrap -- <test binary>` |
 | anything else | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
 
@@ -151,6 +152,75 @@ with `--gtest_output=xml:results.xml`.
 and recorded as one comma-separated `requirements` property. The helpers are
 also available as functions — `rules_requirements::Verifies({...})`,
 `Level(...)`, `Artifact(key, value)`.
+
+(rr-case-h)=
+## Plain-assert C/C++: `rr_case.h`
+
+Many C and C++ tests are a `main()` that calls test functions full of
+`assert()`: the first failure aborts the binary, and Bazel can only report the
+whole target. `rr_case.h` turns such a binary into one JUnit case per test
+function, without googletest:
+
+```cpp
+#include "rr_case.h"
+
+RR_CASE(wifi_settings_vector) {                  // one case
+  RR_CHECK(Encode(kSettings) == kWireVector);    // like assert(), kept under NDEBUG
+}
+
+RR_CASE(rejects_truncated_frame, "REQ-7") {      // optional: the one id it verifies
+  assert(!Decode(kTruncated));                   // plain assert() works too
+}
+
+int main(int argc, char** argv) { return rr::RunCases(argc, argv, "improv_codec"); }
+```
+
+An existing main converts without moving its test functions — list them:
+
+```cpp
+int main(int argc, char** argv) {
+  return rr::RunCases(argc, argv, "improv_codec", {
+      {"wifi_settings_vector", test_wifi_settings_vector},
+      {"rejects_truncated_frame", test_rejects_truncated_frame, "REQ-7"},
+  });
+}
+```
+
+In Bazel, add `@rules_requirements//cc:case` to the `cc_test`'s `deps`; the
+library is header-only and has no dependencies. Under `bazel test` the JUnit
+goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
+
+- **Isolation.** On POSIX each case runs in its own forked child, with core
+  dumps suppressed. A failing `assert()` or `RR_CHECK`, a crash, an uncaught
+  exception or a non-zero `exit()` fails that case only — the message says how
+  (`terminated by SIGABRT: codec_test.cc:31: RR_CHECK(n == 4) failed`,
+  `terminated by SIGSEGV`, `exited with status 1: uncaught exception: ...`) —
+  and the next case still runs. The binary exits 1 if any case failed, so the
+  target fails exactly as it did before. Without `fork` (Windows) the cases
+  run in-process, and a failing `assert()` ends the binary there.
+- **Case keys.** Each case is `<testcase classname="<suite>" name="<case>">`,
+  reported as `<suite>::<case>` (`improv_codec::wifi_settings_vector`). Case
+  names must be unique within a suite; a duplicate is reported as an error.
+- **One requirement per case.** A case names at most one id, recorded as its
+  `requirement` property. `RR_CASE(name, "REQ-1", "REQ-2")` does not compile
+  (`RR-E101`), and an id that is empty or contains a comma or whitespace makes
+  the case an error without running it (`RR-E104`). There is no call to add
+  ids from inside a case. The id is optional: a case without one is still a
+  test case in the report, and a whole-target `verified_by` reference covers it.
+- **Killed runs.** The JUnit is rewritten before each case with that case
+  recorded as an error, so a binary killed mid-case (a Bazel timeout) still
+  reports the cases that finished and names the one that did not.
+- **Selection.** `bazel test --test_filter=GLOB[,GLOB...]` runs the cases whose
+  name or `suite::case` key matches (`*`, `?`), and `shard_count` is honoured.
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--rr_list` | Print every case key (`suite::case [REQ-1]`) and exit. |
+| `--rr_case=NAME` | Run one case in-process, without fork or JUnit — for a debugger. |
+| `--rr_junit=PATH` | Write the JUnit here instead of `$XML_OUTPUT_FILE`. |
+
+Other arguments are left to the test. `rr_case.h` records no level: a tagged
+case provides the model's `default_provided_level`.
 
 ## Rust
 

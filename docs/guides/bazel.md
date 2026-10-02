@@ -24,6 +24,7 @@ the module provides these targets:
 | `@rules_requirements//python` | The Python library (`py_library`, standard library only). |
 | `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
 | `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
+| `@rules_requirements//cc:case` | Per-case JUnit for plain-assert C/C++ tests (`#include "rr_case.h"`). |
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
 
@@ -190,7 +191,9 @@ It understands `--nocapture` output (the result on a line of its own). Call
 runtimes cannot be attributed to a test (the wrapper warns about them).
 
 googletest needs no macro: a `cc_test` depending on
-`@rules_requirements//cc:gtest` writes traced JUnit by itself.
+`@rules_requirements//cc:gtest` writes traced JUnit by itself, and so does a
+plain-assert `cc_test` depending on `@rules_requirements//cc:case`
+({ref}`rr_case.h <rr-case-h>`).
 
 ## Evidence and reports
 
