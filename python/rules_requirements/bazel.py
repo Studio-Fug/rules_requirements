@@ -17,6 +17,7 @@ import argparse
 import difflib
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,31 @@ def _label_dir(label: str) -> str:
 
 def _norm_label(label: str) -> str:
     return label[2:] if label.startswith("@@//") else (label[1:] if label.startswith("@//") else label)
+
+
+def _run_one(exe: str, cwd: str, env: dict[str, str], timeout: float) -> tuple[int, str]:
+    """Runs one test executable: (exit code, combined output).
+
+    On POSIX the test gets its own session, and a timeout kills that whole
+    process group, as Bazel does, so nothing the test started (a forked
+    test case, a server) outlives it.
+    """
+    posix = os.name == "posix"
+    proc = subprocess.Popen(
+        [exe], cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=posix
+    )
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        if posix:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:  # already gone
+                pass
+        proc.kill()
+        out, _ = proc.communicate()
+        return -1, (out or b"").decode("utf-8", "replace") + f"\nTIMEOUT after {timeout}s"
 
 
 def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None = None) -> int:
@@ -75,13 +101,7 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
         if not os.path.isdir(cwd):
             cwd = runfiles if os.path.isdir(runfiles) else execroot
         start = time.monotonic()
-        try:
-            proc = subprocess.run(
-                [exe], cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False
-            )
-            code, log = proc.returncode, proc.stdout.decode("utf-8", "replace")
-        except subprocess.TimeoutExpired as exc:
-            code, log = -1, (exc.stdout or b"").decode("utf-8", "replace") + f"\nTIMEOUT after {timeout}s"
+        code, log = _run_one(exe, cwd, env, timeout)
         with open(os.path.join(logdir, "test.log"), "w", encoding="utf-8") as fh:
             fh.write(log)
         failures += code != 0

@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
 import sys
+import time
+
+import pytest
 
 from rules_requirements import bazel, ingest
 
@@ -53,6 +57,44 @@ def test_run_tests(tmp_path, monkeypatch, capsys):
     assert ev.for_id("REQ-1")[0].target == "//pkg:writes"
     assert "TIMEOUT" in (out / "pkg" / "hang" / "test.log").read_text()
     assert "FAILED (exit 3)" in capsys.readouterr().err
+
+
+def _alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is dead
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+def test_a_timeout_kills_everything_the_test_started(tmp_path, monkeypatch):
+    # A test that forks (rr_case.h runs each case in a child) and hangs: the
+    # timeout must not leave the child running in the build action.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    pidfile = tmp_path / "grandchild.pid"
+    _exe(
+        tmp_path / "bin" / "forks_and_hangs",
+        "import subprocess, sys, time\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid) + '\\n')\n"
+        "time.sleep(120)\n",
+    )
+    out = tmp_path / "ev" / "testlogs"
+    start = time.monotonic()
+    rc = bazel.main(["run-tests", "--out", str(out), "--timeout", "2", "--test", "//pkg:h=bin/forks_and_hangs=_main"])
+    assert rc == 0 and time.monotonic() - start < 60
+    assert "TIMEOUT after 2.0s" in (out / "pkg" / "h" / "test.log").read_text()
+    grandchild = int(pidfile.read_text())
+    try:
+        deadline = time.monotonic() + 10
+        while _alive(grandchild) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _alive(grandchild), "the test's child outlived the timeout"
+    finally:
+        if _alive(grandchild):
+            os.kill(grandchild, 9)
 
 
 def test_golden(tmp_path, monkeypatch, capsys):
