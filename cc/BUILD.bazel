@@ -12,3 +12,14 @@ cc_library(
     hdrs = ["rr_gtest.h"],
     includes = ["."],
 )
+
+# `#include "rr_case.h"` — RR_CASE / RR_CHECK / rr::RunCases: per-case JUnit
+# for plain-assert C/C++ tests, each case in its own forked child. Header-only,
+# no dependencies.
+cc_library(
+    name = "case",
+    hdrs = ["rr_case.h"],
+    includes = ["."],
+)
+
+exports_files(["rr_case.h"])
