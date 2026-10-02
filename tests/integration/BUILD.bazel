@@ -3,6 +3,9 @@
 # `unittest_hook_test` contains one deliberate failure (REQ-5) so the report
 # shows a FAILED requirement; it is tagged manual and only runs inside
 # rr_evidence, where a failing test is evidence rather than a broken build.
+#
+# rr_case.h has its own model, evidence and goldens (the `rr_case_*` targets
+# at the end), with `rr_case_test` failing one case on purpose the same way.
 
 load("@rr_dev_pip//:requirements.bzl", "requirement")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
@@ -46,11 +49,14 @@ rr_rust_test(
 
 rr_annotations_test(
     name = "annotations_test",
-    srcs = glob([
-        "*.py",
-        "*.cc",
-        "*.rs",
-    ]),
+    srcs = glob(
+        [
+            "*.py",
+            "*.cc",
+            "*.rs",
+        ],
+        exclude = ["rr_case_test.cc"],
+    ),
     model = ":model",
 )
 
@@ -80,4 +86,47 @@ rr_golden_test(
     name = "report_md_golden_test",
     src = ":report.md",
     golden = "report.golden.md",
+)
+
+# rr_case.h: per-case JUnit from a plain-assert C++ binary, without googletest.
+
+rr_model(
+    name = "rr_case_model",
+    srcs = ["rr_case_model.yaml"],
+)
+
+cc_test(
+    name = "rr_case_test",
+    srcs = ["rr_case_test.cc"],
+    tags = ["manual"],
+    deps = ["//cc:case"],
+)
+
+rr_annotations_test(
+    name = "rr_case_annotations_test",
+    srcs = ["rr_case_test.cc"],
+    model = ":rr_case_model",
+)
+
+rr_evidence(
+    name = "rr_case_evidence",
+    tests = [":rr_case_test"],
+)
+
+rr_report(
+    name = "rr_case_report",
+    evidence = [":rr_case_evidence"],
+    model = [":rr_case_model"],
+)
+
+rr_golden_test(
+    name = "rr_case_report_json_golden_test",
+    src = ":rr_case_report.json",
+    golden = "rr_case_report.golden.json",
+)
+
+rr_golden_test(
+    name = "rr_case_report_md_golden_test",
+    src = ":rr_case_report.md",
+    golden = "rr_case_report.golden.md",
 )

@@ -12,6 +12,7 @@ Contributions are welcome through pull requests on
 | `python/tests/` | Unit tests (pytest). |
 | `rr/defs.bzl`, `rr/private/` | Bazel rules and macros. |
 | `cc/rr_gtest.h` | googletest hook. |
+| `cc/rr_case.h` | Per-case JUnit for plain-assert C/C++ tests. |
 | `rust/` | Rust hook crate (`rr`). |
 | `schema/` | JSON Schema for model files. |
 | `tests/integration/` | Every hook → evidence → report, pinned by goldens. |
@@ -52,6 +53,8 @@ the diff:
 ```console
 $ bazel run //tests/integration:report_json_golden_test.update
 $ bazel run //tests/integration:report_md_golden_test.update
+$ bazel run //tests/integration:rr_case_report_json_golden_test.update
+$ bazel run //tests/integration:rr_case_report_md_golden_test.update
 ```
 
 (and the same targets in `examples/thermostat`).
