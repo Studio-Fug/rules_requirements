@@ -78,6 +78,31 @@ def target_from_path(path: str) -> str:
     return f"{repo}//{pkg}:{name}"
 
 
+SYNTHETIC_PROPERTY = "rr.synthetic"
+
+
+def is_bazel_generated(suite: ET.Element) -> bool:
+    """Whether ``suite`` is the report Bazel writes for a test that wrote none.
+
+    Bazel's ``generate-xml.sh`` fingerprint: a ``<testsuite name=N>`` holding
+    exactly one ``<testcase name=N status="run">`` without a classname, and a
+    ``<system-out>`` that starts with "Generated test.log". Such a result says
+    only how the whole target ended — it has no per-case identity.
+    """
+    if suite.tag != "testsuite":
+        return False
+    cases = suite.findall("testcase")
+    if len(cases) != 1 or suite.findall("testsuite"):
+        return False
+    case, name = cases[0], suite.get("name", "")
+    if not name or case.get("name") != name or case.get("classname") or case.get("status") != "run":
+        return False
+    out = suite.find("system-out")
+    if out is None:
+        out = case.find("system-out")
+    return out is not None and (out.text or "").lstrip().startswith("Generated test.log")
+
+
 def _status(case: ET.Element) -> tuple[str, str]:
     for tag, status in (("error", ERROR), ("failure", FAILED), ("skipped", SKIPPED)):
         el = case.find(tag)
@@ -127,6 +152,8 @@ class JUnitIngestor(Ingestor):
         # Properties on <testsuites> or <testsuite> apply to every case below
         # (googletest writes RecordProperty calls made outside tests there).
         props = inherited + (_props(el) if el.tag in ("testsuite", "testsuites") else [])
+        suite = el.get("name", "") if el.tag == "testsuite" else ""
+        synthetic = is_bazel_generated(el)
         for child in el:
             if child.tag in ("testsuite", "testsuites"):
                 yield from self._suite(child, props, path, target)
@@ -140,7 +167,10 @@ class JUnitIngestor(Ingestor):
                     duration=_duration(child.get("time")),
                     source=path,
                     target=target,
+                    suite=suite,
                 )
+                if synthetic:
+                    case.properties[SYNTHETIC_PROPERTY] = "true"
                 attrs = [(k, v) for k, v in child.attrib.items() if k in _TRACE_ATTRS]
                 extra = [(k, v) for k, v in child.attrib.items() if k not in _STANDARD_ATTRS and k not in _TRACE_ATTRS]
                 yield apply_properties(case, props + attrs + extra + _props(child))

@@ -9,6 +9,7 @@
                  --html report.html --json report.json --md report.md
     rr graph     --model requirements/ --format mermaid
     rr ingest    bazel-testlogs                   # debug: show parsed test cases
+    rr cases     --evidence bazel-testlogs        # every case key, to copy into the model
 
 Under ``bazel run``, relative paths resolve against the workspace root.
 """
@@ -260,6 +261,31 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cases(args: argparse.Namespace) -> int:
+    from rules_requirements.case_keys import index_cases, is_unscoped
+
+    for spec in args.ingestor or []:
+        ingest.load_ingestor(spec)
+    ev = ingest.collect([_path(p) for p in args.evidence], only=args.format or None)
+    rows = [r for r in index_cases(ev).values() if not args.target or r.key.target in args.target]
+    if args.json:
+        print(json.dumps([r.to_dict() for r in rows], indent=2, ensure_ascii=False))
+    else:
+        for r in rows:
+            flags = [f for f in ("synthetic", "target_scope", "flaky", "duplicate") if getattr(r, f)]
+            print("\t".join([str(r.key), r.status, ",".join(r.declared) or "-", ",".join(flags) or "-", r.file or "-"]))
+    targets = {r.key.target for r in rows}
+    print(f"{len(rows)} case(s) in {len(targets)} target(s)", file=sys.stderr)
+    unscoped = sorted(t for t in targets if is_unscoped(t))
+    if unscoped:
+        print(
+            f"warning: [unscoped-evidence] {len(unscoped)} suite(s) outside a bazel-testlogs tree cannot be pinned "
+            "to a build target: " + ", ".join(unscoped),
+            file=sys.stderr,
+        )
+    return 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from rules_requirements.server.workspace import Workspace, WorkspaceError
 
@@ -409,6 +435,14 @@ def build_parser() -> argparse.ArgumentParser:
     i.add_argument("--format", action="append")
     i.add_argument("--ingestor", action="append")
     i.set_defaults(func=cmd_ingest)
+
+    c = sub.add_parser("cases", help="list every test case key in the evidence (no model needed)")
+    c.add_argument("--evidence", nargs="*", default=["bazel-testlogs"], help="evidence files/dirs/globs")
+    c.add_argument("--target", action="append", help="only this target (repeatable)")
+    c.add_argument("--json", action="store_true", help="print JSON instead of tab-separated lines")
+    c.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
+    c.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
+    c.set_defaults(func=cmd_cases)
 
     d = sub.add_parser("diff", help="semantic diff of the model between two git refs")
     model_arg(d)

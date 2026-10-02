@@ -72,6 +72,7 @@ class TestCase:
     duration: float = 0.0
     source: str = ""  # evidence file it came from
     target: str = ""  # build label (e.g. //pkg:test) if known
+    suite: str = ""  # name of the enclosing <testsuite>, if any
     properties: dict[str, str] = field(default_factory=dict)  # everything else
 
     @property

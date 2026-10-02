@@ -187,3 +187,20 @@ def test_current_build_warns_when_no_identity_matches(capsys, model_path, tmp_pa
     assert "match no artifact identity" in err and "(sha)" in err
     _, _, err = run(capsys, "report", "--model", model_path, "--evidence", x, "--current-build", "sha=abc")
     assert "match no artifact identity" not in err
+
+
+def test_cases_lists_keys(capsys, tmp_path):
+    write(
+        tmp_path,
+        "bazel-testlogs/pkg/t/test.xml",
+        '<testsuite name="s"><testcase classname="m" name="a [rr:REQ-9]">'
+        '<properties><property name="requirement" value="REQ-1"/></properties></testcase></testsuite>',
+    )
+    loose = junit(tmp_path, "loose/report.xml", [("b", "failed", [], "")])
+    rc, out, err = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"), loose)
+    assert rc == 0
+    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
+    assert "2 case(s) in 2 target(s)" in err and "[unscoped-evidence]" in err and "suite:s" in err
+    rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path), "--target", "//pkg:t", "--json")
+    (row,) = json.loads(out)
+    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1"]

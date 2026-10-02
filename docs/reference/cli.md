@@ -12,6 +12,7 @@ paths resolve against the directory Bazel was invoked from.
 | `report` (`aggregate`) | Join the model with evidence; write HTML/JSON/Markdown and the gap queue. | {doc}`../guides/outputs` |
 | `graph` | Export the trace graph as DOT, Mermaid, SVG or JSON. | {doc}`../guides/outputs` |
 | `ingest` | Print the test cases parsed from evidence files (debugging). | {doc}`../guides/evidence` |
+| `cases` | List every test case key in the evidence, with status, declared ids and flags. | {doc}`../guides/evidence` |
 | `wrap` | Run a test binary and convert its output to traceability JUnit. | {doc}`../guides/hooks` |
 
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined

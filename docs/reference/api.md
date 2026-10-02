@@ -41,6 +41,9 @@ with open("report.html", "w", encoding="utf-8") as fh:
 
 .. automodule:: rules_requirements.ingest.records
    :members: RecordsIngestor
+
+.. automodule:: rules_requirements.case_keys
+   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
 ```
 
 ## Tracing and reports
