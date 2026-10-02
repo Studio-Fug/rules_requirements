@@ -47,7 +47,7 @@ reference.
   - pytest — `@pytest.mark.rr("REQ-1", level="hil")`
   - unittest — `@rr.verifies("REQ-1")` + a JUnit-writing runner
   - googletest — `RR_VERIFIES("REQ-1");`
-  - plain-assert C/C++ — `RR_CASE(name, "REQ-1") { ... }`, each case forked and reported on its own
+  - plain-assert C++ — `RR_CASE(name, "REQ-1") { ... }`, each case forked and reported on its own
   - Rust — `rr::verifies!("REQ-1");` (with a libtest → JUnit wrapper)
   - anything else — `JUnitWriter` for hand-rolled (e.g. hardware-in-the-loop) harnesses
 - **Pluggable evidence ingestion.** JUnit is the standard; Rust libtest output and
@@ -187,7 +187,7 @@ include only model files, and the server is local-only by default (see the
 | [`python/rules_requirements/`](python/rules_requirements) | the toolkit: model, validation, ingestion, tracing, reports, hooks, CLI |
 | [`rr/defs.bzl`](rr/defs.bzl) | Bazel rules and macros |
 | [`cc/rr_gtest.h`](cc/rr_gtest.h) | googletest hook (`@rules_requirements//cc:gtest`) |
-| [`cc/rr_case.h`](cc/rr_case.h) | per-case JUnit for plain-assert C/C++ tests (`@rules_requirements//cc:case`) |
+| [`cc/rr_case.h`](cc/rr_case.h) | per-case JUnit for plain-assert C++ tests (`@rules_requirements//cc:case`) |
 | [`rust/src/lib.rs`](rust/src/lib.rs) | Rust hook (`@rules_requirements//rust:rr`, crate `rr`) |
 | [`schema/`](schema) | JSON Schema for model files (editor completion) |
 | [`tests/integration/`](tests/integration) | every hook → evidence → report, pinned by goldens |

@@ -14,7 +14,7 @@ cc_library(
 )
 
 # `#include "rr_case.h"` — RR_CASE / RR_CHECK / rr::RunCases: per-case JUnit
-# for plain-assert C/C++ tests, each case in its own forked child. Header-only,
+# for plain-assert C++ tests, each case in its own forked child. Header-only,
 # no dependencies.
 cc_library(
     name = "case",

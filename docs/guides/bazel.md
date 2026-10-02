@@ -24,7 +24,7 @@ the module provides these targets:
 | `@rules_requirements//python` | The Python library (`py_library`, standard library only). |
 | `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
 | `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
-| `@rules_requirements//cc:case` | Per-case JUnit for plain-assert C/C++ tests (`#include "rr_case.h"`). |
+| `@rules_requirements//cc:case` | Per-case JUnit for plain-assert C++ tests (`#include "rr_case.h"`). |
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
 

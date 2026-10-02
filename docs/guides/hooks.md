@@ -10,7 +10,7 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 | pytest | `@pytest.mark.rr("REQ-1", level="sil")` | `rr_py_test` | pip-installed plugin, `pytest --junitxml=...` |
 | unittest | `@rr.verifies("REQ-1")` | `py_test` + `rr.unittest_main()` | `rr.unittest_main()` / `--junit-xml` |
 | googletest | `RR_VERIFIES("REQ-1");` | `cc_test` + `@rules_requirements//cc:gtest` | `--gtest_output=xml:...` |
-| plain-assert C/C++ | `RR_CASE(name, "REQ-1") { ... }` | `cc_test` + `@rules_requirements//cc:case` | `--rr_junit=...` |
+| plain-assert C++ | `RR_CASE(name, "REQ-1") { ... }` | `cc_test` + `@rules_requirements//cc:case` | `--rr_junit=...` |
 | Rust | `rr::verifies!("REQ-1");` | `rr_rust_test` | `rr wrap -- <test binary>` |
 | anything else | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
 
@@ -154,12 +154,13 @@ also available as functions — `rules_requirements::Verifies({...})`,
 `Level(...)`, `Artifact(key, value)`.
 
 (rr-case-h)=
-## Plain-assert C/C++: `rr_case.h`
+## Plain-assert C++: `rr_case.h`
 
 Many C and C++ tests are a `main()` that calls test functions full of
 `assert()`: the first failure aborts the binary, and Bazel can only report the
 whole target. `rr_case.h` turns such a binary into one JUnit case per test
-function, without googletest:
+function, without googletest. The header is C++ (11 or later); a C-style
+`assert()` test uses it when compiled as C++:
 
 ```cpp
 #include "rr_case.h"
@@ -198,15 +199,34 @@ goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
   and the next case still runs. The binary exits 1 if any case failed, so the
   target fails exactly as it did before. Without `fork` (Windows) the cases
   run in-process, and a failing `assert()` ends the binary there.
+- **No shared state.** Each case starts from the parent as it was before the
+  first case: a global, heap object or `chdir` set by one case is gone in the
+  next, so a case must not depend on an earlier one (in a plain `main` it
+  could). Start no threads before `rr::RunCases` — `fork` copies only the
+  calling thread, so a lock another thread held stays locked in the child.
+- **Child lifetime, coverage, leaks.** On Linux a case's child is killed with
+  the runner, so a hung case never outlives a run killed by a timeout
+  (`rr_evidence` also kills the whole process group). Under `--coverage`
+  (gcc) or `-fprofile-instr-generate` (clang), code run only inside a case is
+  covered; lines run before the cases are counted once per case. Under
+  LeakSanitizer (Linux and other ELF targets) a case that leaks memory fails
+  (`exited with status 1: rr_case: LeakSanitizer found memory leaked by this
+  case`); on macOS the leak check and gcov data of the children are lost.
 - **Case keys.** Each case is `<testcase classname="<suite>" name="<case>">`,
   reported as `<suite>::<case>` (`improv_codec::wifi_settings_vector`). Case
   names must be unique within a suite; a duplicate is reported as an error.
 - **One requirement per case.** A case names at most one id, recorded as its
   `requirement` property. `RR_CASE(name, "REQ-1", "REQ-2")` does not compile
-  (`RR-E101`), and an id that is empty or contains a comma or whitespace makes
+  (`RR-E101`), nor does `RR_CASE(name, ("REQ-1", "REQ-2"))`, and an id that is
+  empty or holds anything but ASCII letters, digits, `_`, `-` and `.` makes
   the case an error without running it (`RR-E104`). There is no call to add
   ids from inside a case. The id is optional: a case without one is still a
   test case in the report, and a whole-target `verified_by` reference covers it.
+- **Evidence and annotations.** `RR_CASE(name, "REQ-1")` written on one line
+  is also an annotation for `rr scan`; the list form's ids
+  (`{"name", fn, "REQ-7"}`) are evidence only, like an `RR_CASE` that a
+  formatter splits across lines. `RR_CASE` also records where the case is
+  defined, as the `<testcase>`'s `file` and `line`.
 - **Killed runs.** The JUnit is rewritten before each case with that case
   recorded as an error, so a binary killed mid-case (a Bazel timeout) still
   reports the cases that finished and names the one that did not.

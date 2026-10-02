@@ -12,7 +12,7 @@ Contributions are welcome through pull requests on
 | `python/tests/` | Unit tests (pytest). |
 | `rr/defs.bzl`, `rr/private/` | Bazel rules and macros. |
 | `cc/rr_gtest.h` | googletest hook. |
-| `cc/rr_case.h` | Per-case JUnit for plain-assert C/C++ tests. |
+| `cc/rr_case.h` | Per-case JUnit for plain-assert C++ tests. |
 | `rust/` | Rust hook crate (`rr`). |
 | `schema/` | JSON Schema for model files. |
 | `tests/integration/` | Every hook → evidence → report, pinned by goldens. |

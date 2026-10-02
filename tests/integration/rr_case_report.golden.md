@@ -12,12 +12,12 @@
 
 | ID | Requirement | Traces | Demands | Evidence | Status |
 |---|---|---|---|---|---|
-| REQ-1 | A passing case verifies the one requirement it names | satisfies UN-1 | simulation | ✓ rr_case_test::tagged_case_is_traced [simulation] | ✅ VERIFIED |
-| REQ-2 | A failing case fails its own requirement | satisfies UN-1 | simulation | ✗ rr_case_test::failing_case_fails_its_own_requirement [simulation] | ❌ FAILED |
-| REQ-3 | The cases after a failing one still run and count | satisfies UN-1 | simulation | ✓ rr_case_test::cases_after_a_failure_still_run [simulation] | ✅ VERIFIED |
+| REQ-1 | A passing case verifies the one requirement it names | satisfies UN-1 | simulation | ✓ plain_assert_codec::tagged_case_is_traced [simulation] | ✅ VERIFIED |
+| REQ-2 | A failing case fails its own requirement | satisfies UN-1 | simulation | ✗ plain_assert_codec::failing_case_fails_its_own_requirement [simulation] | ❌ FAILED |
+| REQ-3 | The cases after a failing one still run and count | satisfies UN-1 | simulation | ✓ plain_assert_codec::cases_after_a_failure_still_run [simulation] | ✅ VERIFIED |
 
 ## Gaps
 
 | Kind | Entity | Route | Detail |
 |---|---|---|---|
-| failed | REQ-2 | autonomous | failing evidence: rr_case_test::failing_case_fails_its_own_requirement |
+| failed | REQ-2 | autonomous | failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement |

@@ -65,7 +65,7 @@
       "status": "VERIFIED",
       "evidence": [
         {
-          "name": "rr_case_test::tagged_case_is_traced",
+          "name": "plain_assert_codec::tagged_case_is_traced",
           "status": "passed",
           "level": "simulation",
           "target": "//tests/integration:rr_case_test"
@@ -85,11 +85,11 @@
       "status": "FAILED",
       "evidence": [
         {
-          "name": "rr_case_test::failing_case_fails_its_own_requirement",
+          "name": "plain_assert_codec::failing_case_fails_its_own_requirement",
           "status": "failed",
           "level": "simulation",
           "target": "//tests/integration:rr_case_test",
-          "message": "terminated by SIGABRT: tests/integration/rr_case_test.cc:11: RR_CHECK(2 + 2 == 5) failed"
+          "message": "terminated by SIGABRT: tests/integration/rr_case_test.cc:13: RR_CHECK(2 + 2 == 5) failed"
         }
       ],
       "demanded_level": "simulation",
@@ -106,7 +106,7 @@
       "status": "VERIFIED",
       "evidence": [
         {
-          "name": "rr_case_test::cases_after_a_failure_still_run",
+          "name": "plain_assert_codec::cases_after_a_failure_still_run",
           "status": "passed",
           "level": "simulation",
           "target": "//tests/integration:rr_case_test"
@@ -132,7 +132,7 @@
     {
       "kind": "failed",
       "entity": "REQ-2",
-      "message": "failing evidence: rr_case_test::failing_case_fails_its_own_requirement",
+      "message": "failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement",
       "route": "autonomous",
       "demanded_level": "simulation"
     }
