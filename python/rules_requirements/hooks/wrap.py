@@ -16,7 +16,9 @@ turns a failing test green or a passing one red.
 ``--format junit`` is for runners that write JUnit themselves, to a fixed path
 (``--junit-in``): the wrapper copies that file to the output and adds the same
 ``exit-status`` error case when the runner exits non-zero although no case in
-its report failed.
+its report failed. A missing or non-JUnit report is recorded as one error
+case, and a report without cases from a clean exit as one synthetic passed
+case, so a run never ends without evidence.
 """
 
 from __future__ import annotations
@@ -207,13 +209,25 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
         return
     exit_case = _exit_status(list(JUnitIngestor().ingest(junit_in)), [], returncode, text, target)
     root: ET.Element | None = None
-    if level or exit_case is not None:
-        try:
-            root = _read_root(junit_in)
-        except (SyntaxError, OSError):
-            pass  # unreadable: ingestion reports it as an error of its own
-        except ValueError:
-            root = ET.Element("testsuites")  # well-formed, but not JUnit: no cases to keep
+    try:
+        root = _read_root(junit_in)
+    except (SyntaxError, OSError):
+        pass  # unreadable: copied as is; ingestion reports it as an error of its own
+    except ValueError as exc:
+        # Well-formed, but not JUnit (ingestion would skip it): nothing it
+        # verified can be read, which must not pass silently.
+        writer.add(suite, None, status="error", message=f"{exc} (exit code {returncode})")
+        writer.write(out)
+        return
+    if root is not None and root.find(".//testcase") is None and exit_case is None:
+        # A report without a single case, and a clean exit: one synthetic
+        # case (as for a libtest binary that printed nothing) so the run
+        # still leaves evidence.
+        writer.add(suite, None, status="passed", message=f"no test cases in {junit_in} (exit code {returncode})")
+        writer.write(out)
+        return
+    if not level and exit_case is None:
+        root = None
     if root is None:  # nothing to add: the report as the runner wrote it
         if not os.path.exists(out) or not os.path.samefile(junit_in, out):
             shutil.copyfile(junit_in, out)

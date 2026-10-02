@@ -45,6 +45,15 @@ How a run that stops early is recorded:
 * **Harness bug** (an unknown step or check name, or a planned check never
   executed by a run that otherwise ended normally): the check is recorded as
   ``error``, and unknown names as an untagged ``<suite>::harness`` error.
+* **Interrupted or exited**: ``KeyboardInterrupt`` (an operator's Ctrl-C) and
+  ``SystemExit`` with code 0 or ``None`` are never the device's, whatever
+  ``is_infrastructure`` says: they are recorded as rig trouble, and a clean
+  exit after every check was recorded adds nothing. A ``SystemExit`` with any
+  other code is classified like any other exception.
+
+Inside ``with plan.check(name):`` the block may record the check's result
+itself (``plan.skipped(name, reason)`` for a check that cannot run on this
+board); that result is the check's only case, whatever the block does next.
 
 *v0.2 compatibility.* Until per-requirement verification sets land (0.3),
 skipped evidence does not stop a requirement reading VERIFIED. So on rig
@@ -73,6 +82,11 @@ def _never(exc: BaseException) -> bool:
     return False
 
 
+def _never_the_device(exc: BaseException) -> bool:
+    """An operator's interrupt or a clean exit: not the device's failure."""
+    return isinstance(exc, KeyboardInterrupt) or (isinstance(exc, SystemExit) and exc.code in (0, None))
+
+
 def _describe(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
@@ -85,7 +99,8 @@ class CheckPlan:
       writer: the :class:`~rules_requirements.hooks.junit_writer.JUnitWriter`
         the cases go to; its ``suite`` prefixes every case's classname.
       steps: step name -> its check names, in run order. Check names are
-        unique within a step.
+        unique within a step; step names contain no ``.`` (it separates the
+        step from the check in ``"<step>.<check>"``).
       tags: ``"<step>.<check>"`` -> the ONE requirement id that check
         verifies (a declared tag; the model may also claim the case).
       is_infrastructure: whether an exception is rig or setup trouble rather
@@ -105,6 +120,8 @@ class CheckPlan:
         self.suite = writer.suite
         self.steps: dict[str, tuple[str, ...]] = {}
         for step, checks in steps.items():
+            if "." in step:
+                raise ValueError(f"CheckPlan: step name {step!r} contains '.', which separates '<step>.<check>'")
             if isinstance(checks, str):
                 raise TypeError(f"CheckPlan: step {step!r}: checks must be a sequence of names, not a string")
             names = tuple(checks)
@@ -170,16 +187,20 @@ class CheckPlan:
     @contextmanager
     def check(self, name: str) -> Iterator[None]:
         """Run one check of the current step: passed if the block completes,
-        failed (then re-raised) if it raises; rig trouble records nothing."""
+        failed (then re-raised) if it raises; rig trouble records nothing.
+        A result the block records for this check itself (``skipped``,
+        ``failed``, ``passed``) is kept as the check's only case."""
         step, check = self._resolve(name, current_only=True)
         start = time.monotonic()
         try:
             yield
         except BaseException as exc:
-            if not isinstance(exc, HarnessError) and not self._is_infrastructure(exc):
+            explicit = (step, check) in self._recorded
+            if not explicit and not isinstance(exc, HarnessError) and not self._is_infrastructure(exc):
                 self._record(step, check, "failed", _describe(exc), time.monotonic() - start)
             raise
-        self._record(step, check, "passed", "", time.monotonic() - start)
+        if (step, check) not in self._recorded:
+            self._record(step, check, "passed", "", time.monotonic() - start)
 
     def passed(self, name: str, message: str = "") -> None:
         """Record check ``name`` (of the current step, or ``"<step>.<check>"``) as passed."""
@@ -212,7 +233,7 @@ class CheckPlan:
     # -- internals ---------------------------------------------------------
 
     def _is_infrastructure(self, exc: BaseException) -> bool:
-        return not self._setup_done or bool(self._infrastructure(exc))
+        return not self._setup_done or _never_the_device(exc) or bool(self._infrastructure(exc))
 
     def _stop(self, exc: BaseException) -> None:
         if self._finished:
@@ -220,6 +241,8 @@ class CheckPlan:
         self._finished = True
         failure = _describe(exc)
         pending = self.pending()
+        if not pending and isinstance(exc, SystemExit) and _never_the_device(exc):
+            return  # every check recorded, then a clean exit: nothing to add
         if isinstance(exc, HarnessError):
             for step, check in pending:
                 self._record(step, check, "error", f"planned check never executed (harness bug: {exc})")
@@ -273,6 +296,8 @@ class CheckPlan:
         return found
 
     def _record(self, step: str, check: str, status: str, message: str, duration: float = 0.0) -> None:
+        if (step, check) in self._recorded:  # every path checks first; never write a second case
+            self._harness_bug(f"check {step}.{check} recorded twice")
         tag = self.tags.get(f"{step}.{check}")
         self._recorded[(step, check)] = self.writer._append(
             check, [tag] if tag else [], status, message, duration, classname=f"{self.suite}.{step}"

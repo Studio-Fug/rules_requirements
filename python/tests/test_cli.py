@@ -243,3 +243,10 @@ def test_case_needs_an_output(capsys, monkeypatch):
     monkeypatch.delenv("XML_OUTPUT_FILE", raising=False)
     rc, _, err = run(capsys, "case", "--name", "x")
     assert rc == 2 and "XML_OUTPUT_FILE" in err
+
+
+def test_case_bad_artifact_exits_2(capsys, tmp_path):
+    out = str(tmp_path / "r.xml")
+    rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--artifact", "nokv")
+    assert rc == 2 and "KEY=VALUE" in err
+    assert not (tmp_path / "r.xml").exists()

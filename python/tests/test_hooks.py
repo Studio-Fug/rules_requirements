@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
 import unittest
 import warnings
 from xml.etree import ElementTree as ET
@@ -696,3 +697,142 @@ def test_id_helpers():
         check_id(13)
     with pytest.raises(ValueError, match="RR-E101"):
         check_id(("PR-13",))
+
+
+def test_junit_writer_warnings_point_at_the_callers_line():
+    w = junit_writer.JUnitWriter("bench", file="")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        add_line = sys._getframe().f_lineno + 1
+        w.add("two", ["REQ-1", "REQ-2"])
+        case_line = sys._getframe().f_lineno + 1
+        with w.case("ctx", ["REQ-3", "REQ-4"]):
+            pass
+    added, cased = (w for w in caught if issubclass(w.category, MultipleRequirementsWarning))
+    assert (added.filename, added.lineno) == (__file__, add_line)
+    assert (cased.filename, cased.lineno) == (__file__, case_line)
+
+
+def test_junit_writer_warning_shows_at_a_scripts_top_level(tmp_path):
+    # Python shows a DeprecationWarning by default only when it is attributed
+    # to __main__: a plain harness script must see it at its own line.
+    script = tmp_path / "harness.py"
+    script.write_text(
+        "from rules_requirements.hooks.junit_writer import JUnitWriter\n"
+        "w = JUnitWriter('bench', file='')\n"
+        "w.add('a', ['REQ-1', 'REQ-2'])\n"
+        "with w.case('b', ['REQ-3', 'REQ-4']):\n"
+        "    pass\n"
+    )
+    env = _env()
+    env.pop("PYTHONWARNINGS", None)
+    proc = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "harness.py:3: MultipleRequirementsWarning" in proc.stderr, proc.stderr
+    assert "harness.py:4: MultipleRequirementsWarning" in proc.stderr, proc.stderr
+
+
+def test_junit_writer_legacy_form_accepts_any_iterable(tmp_path):
+    w = junit_writer.JUnitWriter("bench", file="")
+    assert _recorded(lambda: w.add("set", {"REQ-1"})) == []
+    assert _recorded(lambda: w.add("gen", (r for r in ["REQ-2"]))) == []
+    assert _recorded(lambda: w.add("keys", {"REQ-3": 1}.keys())) == []
+    assert len(_recorded(lambda: w.add("several", (r for r in ["REQ-4", "REQ-5"])))) == 1
+    with pytest.raises(TypeError):
+        w.add("bad", 7)
+    assert [c.requirements for c in w.cases] == [["REQ-1"], ["REQ-2"], ["REQ-3"], ["REQ-4", "REQ-5"]]
+
+
+_APPENDER = r"""
+import os, sys, time
+from rules_requirements.hooks.junit_writer import JUnitWriter
+path, go, i = sys.argv[1], sys.argv[2], sys.argv[3]
+while not os.path.exists(go):
+    time.sleep(0.001)
+w = JUnitWriter("shell", file="")
+w.add(f"case{i}", f"REQ-{i}")
+w.write(path, append=True)
+"""
+
+
+def test_junit_writer_concurrent_appends_keep_every_case(tmp_path):
+    path, go = tmp_path / "shared.xml", tmp_path / "go"
+    script = tmp_path / "append.py"
+    script.write_text(_APPENDER)
+    procs = [
+        subprocess.Popen([sys.executable, str(script), str(path), str(go), str(i)], env=_env(), stderr=subprocess.PIPE)
+        for i in range(16)
+    ]
+    time.sleep(0.5)  # let every process reach the start line
+    go.write_text("")
+    errors = [p.communicate(timeout=60)[1].decode() for p in procs]
+    assert all(p.returncode == 0 for p in procs), errors
+    names = sorted(c.name for c in ingest.collect([str(path)]).cases)
+    assert names == sorted(f"case{i}" for i in range(16))
+    assert sorted(os.listdir(tmp_path)) == ["append.py", "go", "shared.xml"]  # no temp files left
+
+
+def test_wrap_junit_format_without_cases_still_leaves_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    report = tmp_path / "report.xml"
+    xml = tmp_path / "out.xml"
+
+    def run(body, code):
+        runner = tmp_path / "runner"
+        runner.write_text(
+            f"#!{sys.executable}\nimport sys\nopen({str(report)!r}, 'w').write({body!r})\nsys.exit({code})\n"
+        )
+        runner.chmod(0o755)
+        rc = wrap.main(["--format", "junit", "--junit-in", str(report), "--junit-xml", str(xml), "--", str(runner)])
+        return rc, ingest.collect([str(xml)]).cases
+
+    rc, cases = run("<testsuites/>", 0)
+    assert rc == 0 and [(c.name, c.status) for c in cases] == [("runner", "passed")]
+    rc, cases = run("<html/>", 0)
+    assert rc == 0 and [(c.name, c.status) for c in cases] == [("runner", "error")]
+    assert "not JUnit XML" in cases[0].message
+    rc, cases = run("<testsuites/>", 4)  # no case failed, yet the runner did
+    assert rc == 4 and [(c.name, c.status) for c in cases] == [("exit-status", "error")]
+
+
+def _run_pytest(tmp_path, *args):
+    (tmp_path / "main.py").write_text(
+        "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
+    )
+    xml = tmp_path / "out.xml"
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "main.py"), "-q", "-p", "no:cacheprovider", *args],
+        env=_env(XML_OUTPUT_FILE=str(xml)),
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    return proc, proc.stdout + proc.stderr, {c.name: c for c in ingest.collect([str(xml)]).cases}
+
+
+def test_pytest_multi_id_marker_escalated_fails_only_its_test(tmp_path):
+    (tmp_path / "test_multi.py").write_text(
+        "import pytest\n@pytest.mark.rr('REQ-1', 'REQ-2')\ndef test_multi():\n    pass\n"
+    )
+    (tmp_path / "test_other.py").write_text("def test_other():\n    pass\n")
+    proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
+    assert "INTERNALERROR>" not in out and proc.returncode == 1, (proc.returncode, out)
+    assert cases["test_other"].status == "passed"
+    assert cases["test_multi"].status == "error" and "RR-E101" in cases["test_multi"].message
+    assert cases["test_multi"].requirements == ("REQ-1", "REQ-2")  # still recorded
+
+
+def test_pytest_multi_id_marker_warns_once_per_declaration_at_its_line(tmp_path):
+    (tmp_path / "test_param.py").write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.rr('REQ-1', 'REQ-2')\n"
+        "@pytest.mark.parametrize('x', [1, 2, 3])\n"
+        "def test_c(x):\n"
+        "    pass\n"
+    )
+    proc, out, cases = _run_pytest(tmp_path, "-rN")
+    assert proc.returncode == 0, out
+    assert out.count("test_param.py::test_c: marker names REQ-1, REQ-2") == 1, out
+    assert "test_param.py:3: MultipleRequirementsWarning" in out, out  # the marker's line
+    assert {c.requirements for c in cases.values()} == {("REQ-1", "REQ-2")} and len(cases) == 3

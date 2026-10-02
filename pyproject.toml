@@ -45,6 +45,8 @@ rules_requirements = ["_vendor/yaml/LICENSE", "server/static/*", "server/static/
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 addopts = "-p no:cacheprovider"
+# Test this checkout's package even when another checkout is pip-installed (editable).
+pythonpath = ["python"]
 
 [tool.coverage.run]
 source = ["rules_requirements"]

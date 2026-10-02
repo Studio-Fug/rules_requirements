@@ -61,6 +61,17 @@ rr_wrapped_test(
     test = ":junit_runner",
 )
 
+# junit_wrapped_test passes on the wrapper's exit status alone; this asserts on
+# what the wrapper writes for the same runner (cases, level, rr.file).
+py_test(
+    name = "junit_wrapped_check_test",
+    srcs = ["junit_wrapped_check.py"],
+    args = ["$(rootpath :junit_runner)"],
+    data = [":junit_runner"],
+    main = "junit_wrapped_check.py",
+    deps = ["//python"],
+)
+
 rr_annotations_test(
     name = "annotations_test",
     srcs = glob([

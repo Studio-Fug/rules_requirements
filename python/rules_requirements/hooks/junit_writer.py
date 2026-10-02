@@ -27,11 +27,14 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
+import tempfile
 import time
+from collections.abc import Iterable as _Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Mapping, Optional, Sequence, Union
+from typing import Any, Iterable, Iterator, Mapping, Optional, Union
 from xml.etree import ElementTree as ET
 
 from rules_requirements.hooks.ids import check_id, split_ids, warn_multiple
@@ -42,7 +45,7 @@ _STATUSES = ("passed", "failed", "error", "skipped")
 FILE_PROPERTY = "rr.file"
 
 # What ``requirement=`` accepts: one id, or (deprecated) a list of them.
-Requirement = Union[str, Sequence[str], None]
+Requirement = Union[str, Iterable[str], None]
 
 
 @dataclass
@@ -114,8 +117,10 @@ def source_file(path: str) -> str:
 def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: int) -> list[str]:
     """The ids to record for one case, from ``requirement=`` or the legacy list.
 
-    One id string is checked (RR-E104); a list or tuple is the deprecated
-    form, recorded verbatim, with a warning when it names several ids.
+    One id string is checked (RR-E104); any other iterable (a list, tuple,
+    set, generator...) is the deprecated form, recorded verbatim, with a
+    warning when it names several ids. ``stacklevel`` is that of the warning
+    as seen from the caller of ``_resolve_ids`` (2: the caller's caller).
     """
     if requirement is not None and requirements is not None:
         raise TypeError(f"{subject}: pass requirement= or the deprecated requirements=, not both")
@@ -124,12 +129,13 @@ def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: 
         return []
     if isinstance(value, str):
         return [check_id(value, f"{subject}: requirement")]
-    if not isinstance(value, (list, tuple)):
+    if isinstance(value, bytes) or not isinstance(value, _Iterable):
         raise TypeError(f"{subject}: requirement must be one id string, got {type(value).__name__}")
-    ids = split_ids(value)
+    values = list(value)
+    ids = split_ids(values)
     if len(ids) > 1:
         warn_multiple(subject, ids, stacklevel=stacklevel + 1)
-    return [str(v) for v in value]
+    return [str(v) for v in values]
 
 
 @dataclass
@@ -163,7 +169,7 @@ class JUnitWriter:
         artifact: dict[str, str] | None = None,
         classname: str = "",
         *,
-        requirements: Sequence[str] | None = None,
+        requirements: Iterable[str] | None = None,
         file: str | None = None,
     ) -> None:
         """Record one case.
@@ -174,7 +180,8 @@ class JUnitWriter:
         :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning` when
         it names several. ``file`` overrides the writer's source file.
         """
-        ids = _resolve_ids(requirement, requirements, f"JUnitWriter case {name!r}", stacklevel=3)
+        # the warning points at the caller of add()
+        ids = _resolve_ids(requirement, requirements, f"JUnitWriter case {name!r}", stacklevel=2)
         self._append(name, ids, status, message, duration, level, artifact, classname, file)
 
     def _append(
@@ -214,12 +221,14 @@ class JUnitWriter:
         level: str = "",
         artifact: dict[str, str] | None = None,
         *,
-        requirements: Sequence[str] | None = None,
+        requirements: Iterable[str] | None = None,
         classname: str = "",
         file: str | None = None,
     ) -> Iterator[None]:
         """Record ``name`` as passed, or failed if the block raises (re-raised)."""
-        ids = _resolve_ids(requirement, requirements, f"JUnitWriter case {name!r}", stacklevel=4)
+        # this generator runs under contextlib's __enter__: the warning points
+        # at the ``with`` statement, one frame further up
+        ids = _resolve_ids(requirement, requirements, f"JUnitWriter case {name!r}", stacklevel=3)
         start = time.monotonic()
         try:
             yield
@@ -307,22 +316,66 @@ class JUnitWriter:
         """Write the JUnit XML to ``path``.
 
         With ``append``, the cases are added to the JUnit already at ``path``
-        (to this writer's suite there, else as a new suite), and the file is
-        replaced atomically; a missing or empty file is written afresh.
+        (to this writer's suite there, else as a new suite); a missing or
+        empty file is written afresh. The new file replaces the old one
+        atomically, and where ``fcntl`` exists (not on Windows) appends from
+        concurrent processes (``rr case ... &``) are serialised by a lock on
+        the file, so none is lost.
         """
         if not append:
             tree = ET.ElementTree(self.to_element())
             ET.indent(tree)
             tree.write(path, encoding="utf-8", xml_declaration=True)
             return
-        root = self.to_element()
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            root = _merge(_read_root(path), root)
-        tree = ET.ElementTree(root)
-        ET.indent(tree)
-        tmp = f"{path}.tmp"
-        tree.write(tmp, encoding="utf-8", xml_declaration=True)
-        os.replace(tmp, path)
+        with _locked(path) as mode:
+            root = self.to_element()
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                root = _merge(_read_root(path), root)
+            tree = ET.ElementTree(root)
+            ET.indent(tree)
+            fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path) or ".")
+            try:
+                with os.fdopen(fd, "wb") as fh:
+                    tree.write(fh, encoding="utf-8", xml_declaration=True)
+                if mode is not None:
+                    os.chmod(tmp, mode)
+                os.replace(tmp, path)
+            except BaseException:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+                raise
+
+
+@contextmanager
+def _locked(path: str) -> Iterator[Optional[int]]:
+    """Hold an exclusive lock on the file at ``path`` (created empty if
+    missing); yields its permission bits for the replacement file.
+
+    The file is replaced, not rewritten, so a waiter may end up holding the
+    lock on an unlinked inode: it then retries on the current file.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows: no locking
+        yield None
+        return
+    while True:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            held, current = os.fstat(fd), _stat(path)
+            if current is not None and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
+                yield stat.S_IMODE(held.st_mode)
+                return
+        finally:
+            os.close(fd)  # also releases the lock
+
+
+def _stat(path: str) -> Optional[os.stat_result]:
+    try:
+        return os.stat(path)
+    except FileNotFoundError:
+        return None
 
 
 def _read_root(path: str) -> ET.Element:

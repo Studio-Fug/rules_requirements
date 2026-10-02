@@ -67,13 +67,19 @@ def check_id(value: Any, where: str = "requirement") -> str:
     return value
 
 
-def warn_multiple(subject: str, ids: list[str], stacklevel: int = 2) -> None:
-    """Warn that ``subject`` declares several ``ids`` for one test case."""
-    warnings.warn(
-        MultipleRequirementsWarning(
-            f"rr: {subject} names {', '.join(ids)}; a test case verifies at most one requirement "
-            f"[{E_MULTIPLE}]. Every id is still recorded for now, but multi-id declarations are deprecated: "
-            "from 0.3 such a case counts for no requirement, and 0.4 rejects it. Split the test, or keep one id."
-        ),
-        stacklevel=stacklevel + 1,
+def multiple_warning(subject: str, ids: list[str]) -> MultipleRequirementsWarning:
+    """The warning for ``subject`` declaring several ``ids`` for one test case."""
+    return MultipleRequirementsWarning(
+        f"rr: {subject} names {', '.join(ids)}; a test case verifies at most one requirement "
+        f"[{E_MULTIPLE}]. Every id is still recorded for now, but multi-id declarations are deprecated: "
+        "from 0.3 such a case counts for no requirement, and 0.4 rejects it. Split the test, or keep one id."
     )
+
+
+def warn_multiple(subject: str, ids: list[str], stacklevel: int = 2) -> None:
+    """Warn that ``subject`` declares several ``ids`` for one test case.
+
+    ``stacklevel`` is as for :func:`warnings.warn` called by the caller of
+    ``warn_multiple`` (2: the caller's caller).
+    """
+    warnings.warn(multiple_warning(subject, ids), stacklevel=stacklevel + 1)

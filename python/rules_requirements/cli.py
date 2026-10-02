@@ -360,6 +360,11 @@ def cmd_case(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    try:
+        artifact = _kv(args.artifact)
+    except SystemExit as exc:  # a malformed --artifact: the case cannot be recorded
+        print(f"rr case: {exc}", file=sys.stderr)
+        return 2
     target = os.environ.get("TEST_TARGET", "")
     suite = args.suite or (target.rsplit(":", 1)[-1] if target else "") or "rr"
     writer = JUnitWriter(suite, file=source_file(args.file))
@@ -371,7 +376,7 @@ def cmd_case(args: argparse.Namespace) -> int:
             message=args.message,
             duration=args.duration,
             level=args.level,
-            artifact=_kv(args.artifact),
+            artifact=artifact,
             classname=args.classname,
         )
         writer.write(out, append=True)

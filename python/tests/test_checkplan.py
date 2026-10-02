@@ -283,3 +283,61 @@ def test_verdicts_through_the_report(tmp_path):
     # neither VERIFIED nor FAILED where a check never ran; REQ-35's one check passed
     assert rig["REQ-13"] not in (VERIFIED, FAILED) and rig["REQ-23"] not in (VERIFIED, FAILED)
     assert rig["REQ-35"] == VERIFIED
+
+
+def test_a_result_recorded_inside_its_own_check_block_is_the_only_case():
+    # The natural code for a check that can be skipped (board_caps, cert_page):
+    # the explicit result stands and the block's own pass is not added to it.
+    report = JUnitWriter("s", file="")
+    plan = CheckPlan(report, {"a": ["skip", "pass", "fail"]}, tags={"a.skip": "REQ-1", "a.pass": "REQ-2"})
+    with pytest.raises(AssertionError), plan.run(), plan.step("a"):
+        with plan.check("skip"):
+            plan.skipped("skip", "no descriptor in runfiles")
+        with plan.check("pass"):
+            plan.passed("pass", "explicit")
+        with plan.check("fail"):
+            plan.failed("fail", "explicit")
+            raise AssertionError("then raised")
+    assert [(c.name, c.status, c.message) for c in report.cases] == [
+        ("skip", "skipped", "no descriptor in runfiles"),
+        ("pass", "passed", "explicit"),
+        ("fail", "failed", "explicit"),
+    ]
+
+
+def test_step_names_with_a_dot_are_rejected():
+    # {"a.b": ["c"], "a": ["b.c"]} would both be "a.b.c"
+    with pytest.raises(ValueError, match=r"step name 'a\.b' contains '\.'"):
+        CheckPlan(JUnitWriter("s", file=""), {"a.b": ["c"], "a": ["b.c"]})
+
+
+def test_an_interrupted_or_cleanly_exited_run_is_not_the_device():
+    report, plan = plan_for()  # the default classifier would claim nothing
+    plan._infrastructure = lambda e: False
+    with pytest.raises(KeyboardInterrupt), plan.run():
+        plan.setup_done()
+        with plan.step("flash_boot"), plan.check("ble_advertising"):
+            raise KeyboardInterrupt
+    cases = cases_of(report)
+    assert cases.pop(("hitl_e2e", "rig"))[0] == "error"
+    assert {v[0] for v in cases.values()} == {"skipped"}  # nothing failed against the device
+
+    report, plan = plan_for()
+    with pytest.raises(SystemExit), plan.run():
+        plan.setup_done()
+        with plan.step("flash_boot"):
+            raise SystemExit(0)
+    assert "failed" not in {v[0] for v in cases_of(report).values()}
+
+    report, plan = plan_for()
+    with pytest.raises(SystemExit), plan.run():
+        full_run(plan)
+        raise SystemExit(None)  # every check passed, then a clean exit: nothing to add
+    assert {v[0] for v in cases_of(report).values()} == {"passed"} and len(report.cases) == 6
+
+    report, plan = plan_for()
+    with pytest.raises(SystemExit), plan.run():
+        plan.setup_done()
+        with plan.step("flash_boot"):
+            raise SystemExit(3)  # a failing exit still counts against the device
+    assert cases_of(report)[("hitl_e2e.flash_boot", "ble_advertising")][0] == "failed"
