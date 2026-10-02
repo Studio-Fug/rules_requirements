@@ -168,7 +168,7 @@ $ rr cases --evidence bazel-testlogs --json > cases.json
 ```
 
 Copy keys from here rather than guessing them. The keys do not change any
-verdict.
+verdict today; they are what {doc}`migrating-to-per-case` assigns owners to.
 
 ## Writing an ingestor
 

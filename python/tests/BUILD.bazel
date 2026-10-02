@@ -9,9 +9,11 @@ rr_py_test(
         "//:docs/_static/logo/rules_requirements_logo.svg",
         "//:docs/_static/logo/rules_requirements_logo-dark.svg",
         "//:schema/rules_requirements.schema.json",
-    ],
+        "//:schema/worksheet.schema.json",
+    ] + glob(["fixtures/**"]),
     imports = ["."],  # tests import their shared helpers from conftest
     deps = [
+        requirement("black"),
         requirement("pytest"),
         requirement("jsonschema"),
     ],

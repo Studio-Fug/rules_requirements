@@ -10,6 +10,7 @@
     rr graph     --model requirements/ --format mermaid
     rr ingest    bazel-testlogs                   # debug: show parsed test cases
     rr cases     --evidence bazel-testlogs        # every case key, to copy into the model
+    rr migrate   plan --model requirements/ --evidence bazel-testlogs --out attribution.rrplan
 
 Under ``bazel run``, relative paths resolve against the workspace root.
 """
@@ -286,6 +287,105 @@ def cmd_cases(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate_plan(args: argparse.Namespace) -> int:
+    from rules_requirements import migrate
+
+    model, ok = _load(args.model, quiet=True)
+    if not ok:
+        print("rr: requirements model is invalid (see above)", file=sys.stderr)
+        return 2
+    previous = None
+    if args.merge:
+        try:
+            previous = migrate.load_worksheet(_path(args.merge))
+        except migrate.WorksheetError as exc:
+            print(f"rr migrate: {exc}", file=sys.stderr)
+            return 2
+    evidence = ingest.collect([_path(p) for p in args.evidence], only=args.format or None)
+    plan = migrate.census(model, evidence)
+    doc = migrate.worksheet(
+        plan,
+        inputs={"model": migrate.plan_paths(args.model), "evidence": migrate.plan_paths(args.evidence)},
+        previous=previous,
+    )
+    outputs = [(args.out, migrate.render_yaml), (args.json, migrate.render_json), (args.md, migrate.render_markdown)]
+    if not any(path for path, _ in outputs):
+        outputs[0] = ("-", migrate.render_yaml)
+    for path, render in outputs:
+        if path:
+            _write(path, render(doc))
+    s = doc["summary"]
+    print(
+        f"{s['contested_units']} of {s['attributed']} attributed evidence unit(s) count toward two or more "
+        f"entities; {s['shared_targets']} target(s) shared between requirements; "
+        f"{s['decided']} decided, {s['open']} open",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def cmd_migrate_apply(args: argparse.Namespace) -> int:
+    import difflib
+
+    from rules_requirements import migrate, tag_codemod
+
+    try:
+        doc = migrate.load_worksheet(_path(args.worksheet))
+    except migrate.WorksheetError as exc:
+        print(f"rr migrate: {exc}", file=sys.stderr)
+        return 2
+    model = None
+    if args.model:
+        model, ok = _load(args.model, quiet=True)
+        if not ok:
+            print("rr: requirements model is invalid (see above)", file=sys.stderr)
+            return 2
+    problems = migrate.check_worksheet(doc, model)
+    for problem in problems:
+        print(f"rr migrate: {args.worksheet}: {problem}", file=sys.stderr)
+    if problems:
+        return 2
+    root = _path(args.root) if args.root else _root()
+    res = tag_codemod.apply_tags(
+        migrate.decisions(doc), root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
+    )
+    for f in res.changed:
+        if args.dry_run:
+            sys.stdout.writelines(
+                difflib.unified_diff(
+                    f.old_text.splitlines(keepends=True),
+                    f.new_text.splitlines(keepends=True),
+                    f"a/{f.path}",
+                    f"b/{f.path}",
+                )
+            )
+        else:
+            with open(os.path.join(root, f.path), "w", encoding="utf-8") as fh:
+                fh.write(f.new_text)
+        print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)
+        for change in f.changes:
+            print(f"  {change}", file=sys.stderr)
+    for f in res.refused:
+        print(f"refused {f.path} (left unchanged):", file=sys.stderr)
+        for reason in f.reasons:
+            print(f"  {reason}", file=sys.stderr)
+    if res.unresolved:
+        print(f"{len(res.unresolved)} decided case(s) have no Python test to rewrite:", file=sys.stderr)
+        for key, why in res.unresolved:
+            print(f"  {key}: {why}", file=sys.stderr)
+    if res.untagged:
+        print(f"{len(res.untagged)} decided case(s) carry no tag; their owner is set in the model:", file=sys.stderr)
+        for key in res.untagged:
+            print(f"  {key}", file=sys.stderr)
+    edits = [e for e in migrate.model_edits(doc) if e["action"] in ("remove", "split")]
+    if edits:
+        print("model edits the decisions imply (verified_by):", file=sys.stderr)
+        for e in edits:
+            print(f"  {e['requirement']}: {e['action']} {e['target']} ({e['reason']})", file=sys.stderr)
+    print(f"{len(res.changed)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
+    return 1 if res.refused else 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from rules_requirements.server.workspace import Workspace, WorkspaceError
 
@@ -443,6 +543,33 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
     c.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
     c.set_defaults(func=cmd_cases)
+
+    mg = sub.add_parser("migrate", help="move to one requirement per test case: worksheet and codemod")
+    msub = mg.add_subparsers(dest="migrate_command", required=True)
+    mp = msub.add_parser("plan", help="write the attribution worksheet: evidence counting toward 2+ entities")
+    model_arg(mp)
+    mp.add_argument("--evidence", nargs="*", default=["bazel-testlogs"], help="evidence files/dirs/globs")
+    mp.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
+    mp.add_argument("--out", default="", help="worksheet to write (.rrplan, YAML); stdout if no output is given")
+    mp.add_argument("--json", default="", help="also write the worksheet as JSON")
+    mp.add_argument("--md", default="", help="also write the worksheet as Markdown")
+    mp.add_argument("--merge", default="", help="carry the decisions of an earlier worksheet over")
+    mp.set_defaults(func=cmd_migrate_plan)
+    ma = msub.add_parser("apply", help="rewrite test tags to the owners decided on a worksheet")
+    ma.add_argument("worksheet", help="the decided .rrplan (or .json) worksheet")
+    ma.add_argument("--stage", choices=["tags"], required=True, help="tags: split multi-id pytest/unittest tags")
+    ma.add_argument("--root", default="", help="source tree to rewrite (default: workspace)")
+    ma.add_argument("--only", action="append", help="only rewrite files below this path (repeatable)")
+    ma.add_argument(
+        "--unassigned",
+        choices=["refuse", "drop"],
+        default="refuse",
+        help="a multi-id test without a decision: leave its file unchanged (refuse) or drop its tags",
+    )
+    ma.add_argument("--line-length", type=int, default=88, help="black's line length, for lines that need wrapping")
+    ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
+    ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
+    ma.set_defaults(func=cmd_migrate_apply)
 
     d = sub.add_parser("diff", help="semantic diff of the model between two git refs")
     model_arg(d)

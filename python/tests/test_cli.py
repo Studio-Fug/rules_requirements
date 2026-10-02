@@ -204,3 +204,75 @@ def test_cases_lists_keys(capsys, tmp_path):
     rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path), "--target", "//pkg:t", "--json")
     (row,) = json.loads(out)
     assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1"]
+
+
+def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
+    from test_migrate import fixture_repo
+
+    root = fixture_repo(tmp_path, monkeypatch)
+    rc, _, err = run(
+        capsys,
+        "migrate",
+        "plan",
+        "--model",
+        "requirements",
+        "--evidence",
+        "evidence",
+        "--out",
+        "plan.rrplan",
+        "--json",
+        "plan.json",
+        "--md",
+        "plan.md",
+    )
+    assert rc == 0 and "16 of 18 attributed evidence unit(s)" in err and "16 open" in err
+    assert json.loads((root / "plan.json").read_text())["summary"]["contested_units"] == 16
+    assert (root / "plan.md").read_text().startswith("# Attribution worksheet")
+    rc, out, _ = run(capsys, "migrate", "plan", "--model", "requirements", "--evidence", "evidence")
+    assert rc == 0 and out.startswith("# Attribution worksheet") and "schema: rules_requirements/" in out
+    rc, _, err = run(
+        capsys, "migrate", "plan", "--model", "requirements", "--evidence", "evidence", "--merge", "decided.rrplan"
+    )
+    assert rc == 0 and "16 decided, 0 open" in err
+
+    # An undecided worksheet refuses every multi-id file and writes nothing.
+    rc, _, err = run(capsys, "migrate", "apply", "plan.rrplan", "--stage", "tags")
+    assert rc == 1 and "0 file(s) rewritten, 5 refused" in err and "owner is undecided" in err
+
+    before = (root / "app/tests/test_config.py").read_text()
+    rc, out, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--dry-run")
+    assert rc == 1 and "would rewrite app/tests/test_config.py" in err
+    assert out.startswith("--- a/app/tests/") and '+@pytest.mark.requirements("REQ-2")' in out
+    assert (root / "app/tests/test_config.py").read_text() == before
+
+    rc, _, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--model", "requirements")
+    assert rc == 1 and "4 file(s) rewritten, 1 refused" in err
+    assert "refused app/tests/test_modes.py" in err
+    assert "//cc:codec_test#Codec::RoundTrip: no Python test found" in err
+    assert "REQ-5: remove //web:clock_test" in err and "REQ-6: split //app/tests:smoke_test" in err
+    assert (root / "app/tests/test_config.py").read_text() != before
+
+    rc, _, err = run(
+        capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--only", "app/tests/test_smoke.py"
+    )
+    assert rc == 0 and "0 file(s) rewritten, 0 refused" in err
+
+
+def test_migrate_apply_rejects_bad_worksheets(capsys, model_path, tmp_path):
+    rc, _, err = run(capsys, "migrate", "apply", str(tmp_path / "none.rrplan"), "--stage", "tags")
+    assert rc == 2 and "cannot read worksheet" in err
+    bad = write(
+        tmp_path,
+        "bad.rrplan",
+        "schema: rules_requirements/attribution-worksheet/v1\n"
+        "groups:\n- {target: '//a:b', group: m, owner: REQ-7, cases: [{path: 'm::t', owner: 'REQ-1, REQ-2'}]}\n",
+    )
+    rc, _, err = run(capsys, "migrate", "apply", bad, "--stage", "tags", "--model", model_path, "--root", str(tmp_path))
+    assert rc == 2 and "REQ-7 is not a requirement" in err and "more than one id" in err
+    rc, _, err = run(capsys, "migrate", "plan", "--model", model_path, "--merge", str(tmp_path / "none.rrplan"))
+    assert rc == 2 and "cannot read worksheet" in err
+    invalid = write(tmp_path, "bad.yaml", MODEL.replace("satisfies: [UN-2]", "satisfies: [UN-7]"))
+    rc, _, err = run(capsys, "migrate", "plan", "--model", invalid)
+    assert rc == 2 and "model is invalid" in err
+    rc, _, err = run(capsys, "migrate", "apply", bad, "--stage", "tags", "--model", invalid)
+    assert rc == 2

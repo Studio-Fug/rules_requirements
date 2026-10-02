@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="2" failures="0" errors="0" name="AllTests">
+  <testsuite name="Codec" tests="2" failures="0" errors="0">
+    <testcase name="RoundTrip" status="run" result="completed" classname="Codec">
+      <properties>
+        <property name="requirements" value="REQ-1,REQ-2"/>
+      </properties>
+    </testcase>
+    <testcase name="EmptyInput" status="run" result="completed" classname="Codec">
+      <properties>
+        <property name="requirements" value="REQ-2"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

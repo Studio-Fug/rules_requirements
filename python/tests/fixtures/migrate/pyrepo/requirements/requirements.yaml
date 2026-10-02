@@ -1,0 +1,27 @@
+# Fixture model for `rr migrate`: tags and whole-target verified_by references
+# that make some evidence count toward several requirements today.
+user_needs:
+  - id: UN-1
+    title: Configure the device without surprises
+requirements:
+  - id: REQ-1
+    title: Parse configuration files
+    satisfies: [UN-1]
+  - id: REQ-2
+    title: Reject malformed configuration
+    refines: [REQ-1]
+  - id: REQ-3
+    title: Reconnect after a dropped link
+    satisfies: [UN-1]
+  - id: REQ-4
+    title: Keep the clock in sync
+    satisfies: [UN-1]
+    verified_by: [//web:clock_test]
+  - id: REQ-5
+    title: Show the clock offset
+    satisfies: [UN-1]
+    verified_by: [//web:clock_test]
+  - id: REQ-6
+    title: Smoke-test every build
+    satisfies: [UN-1]
+    verified_by: [//app/tests:smoke_test]
