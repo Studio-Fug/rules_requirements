@@ -2,7 +2,9 @@
 //
 // Fixture for test_rr_case.py: every way a case can end, in both forms of
 // rr_case.h. RR_FIXTURE_FORM=registry runs the RR_CASE cases, =ids the
-// requirement-id and flag edge cases, =hang one case that never ends, and
+// requirement-id and flag edge cases, =hang one case that never ends
+// (RR_FIXTURE_PIDFILE gets its pid; RR_FIXTURE_NO_PDEATHSIG clears its
+// PR_SET_PDEATHSIG), and
 // =locale the list under the LC_NUMERIC in RR_FIXTURE_LOCALE; otherwise the
 // explicit list runs (and the registry is ignored).
 
@@ -19,6 +21,9 @@
 
 #if !defined(_WIN32)
 #include <unistd.h>
+#endif
+#if defined(__linux__)
+#include <sys/prctl.h>
 #endif
 
 RR_CASE(registered_plain) { RR_CHECK(1 + 1 == 2); }
@@ -64,6 +69,11 @@ static void KillsRunner() {
 }
 
 static void Hangs() {
+#if defined(__linux__)
+  // Act like a platform without PR_SET_PDEATHSIG, where only the runner's
+  // signal handler can end the case.
+  if (std::getenv("RR_FIXTURE_NO_PDEATHSIG") != nullptr) prctl(PR_SET_PDEATHSIG, 0);
+#endif
 #if !defined(_WIN32)
   if (const char* pidfile = std::getenv("RR_FIXTURE_PIDFILE")) {
     if (FILE* f = std::fopen(pidfile, "w")) {

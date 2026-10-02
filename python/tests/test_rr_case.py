@@ -383,47 +383,113 @@ def test_a_parenthesised_id_list_does_not_compile(tmp_path):
     assert "not a parenthesised list" in proc.stderr and "[RR-E101]" in proc.stderr
 
 
+def test_werror_unused_value_rejects_a_comma_expression_in_the_list_form(tmp_path):
+    # The documented remedy: the list form itself cannot see the comma.
+    source = (
+        '#include "rr_case.h"\nstatic void f() {}\n'
+        "int main(int argc, char** argv) {\n"
+        '  return rr::RunCases(argc, argv, "s", {{"x", f, ("REQ-1", "REQ-2")}});\n}\n'
+    )
+    assert _compile(tmp_path, source, "-Wno-error", "-Wno-unused-value").returncode == 0
+    proc = _compile(tmp_path, source, "-Wno-error", "-Werror=unused-value")
+    assert proc.returncode != 0 and "unused-value" in proc.stderr
+
+
 _LEAKS = """#include <cstdlib>
 #include "rr_case.h"
 static void* volatile sink;
 RR_CASE(leaks) { sink = std::malloc(1000); sink = nullptr; }
 RR_CASE(clean) { void* p = std::malloc(10); std::free(p); }
-""" + _MAIN.replace('"s"', '"lsan"')
+int main(int argc, char** argv) {
+  if (std::getenv("PRELEAK") != nullptr) {  // leaked before any case runs
+    sink = std::malloc(77);
+    sink = nullptr;
+  }
+  return rr::RunCases(argc, argv, "lsan");
+}
+"""
 
 
-def test_a_leaking_case_fails_under_leak_sanitizer(tmp_path):
+def _run_with_leak_sanitizer(tmp_path, **env):
     if not sys.platform.startswith("linux"):
         pytest.skip("LeakSanitizer is checked per case on ELF targets")
     proc = _compile(tmp_path, _LEAKS, "-fsanitize=address", "-fno-omit-frame-pointer")
     if proc.returncode != 0:
         pytest.skip("no AddressSanitizer runtime: " + proc.stderr[-200:])
     xml = tmp_path / "x.xml"
-    env = dict(os.environ, XML_OUTPUT_FILE=str(xml), ASAN_OPTIONS="detect_leaks=1")
-    run = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, env=env)
+    full = dict(os.environ, XML_OUTPUT_FILE=str(xml), ASAN_OPTIONS="detect_leaks=1", **env)
+    run = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, env=full)
     if "LeakSanitizer has encountered a fatal error" in run.stdout + run.stderr:
         pytest.skip("LeakSanitizer cannot run here (ptrace restricted)")
-    cases = _cases(xml)
+    return run, _cases(xml)
+
+
+def test_a_leaking_case_fails_under_leak_sanitizer(tmp_path):
+    run, cases = _run_with_leak_sanitizer(tmp_path)
     assert cases["clean"][0] == "passed"
     assert cases["leaks"][0] == "failure", run.stdout
     assert cases["leaks"][1] == "exited with status 1: rr_case: LeakSanitizer found memory leaked by this case"
     assert run.returncode == 1
 
 
-_COVERED = (
-    """#include "rr_case.h"
-static int covered_only_in_case(int x) { return x * 3; }
-RR_CASE(calls_it) { RR_CHECK(covered_only_in_case(2) == 6); }
+def test_a_leak_from_before_the_cases_fails_the_binary_and_blames_no_case(tmp_path):
+    run, cases = _run_with_leak_sanitizer(tmp_path, PRELEAK="1")
+    output = run.stdout + run.stderr
+    # The runner's own leak cannot be told apart from a case's in a child, so
+    # the children do not check: no case fails for it, but the binary does.
+    assert cases["clean"][:2] == ("passed", "")
+    assert cases["leaks"][:2] == ("passed", "")
+    assert "leaked by this case" not in output
+    assert output.count("rr_case: LeakSanitizer found memory leaked before any case ran") == 1, output
+    assert "[==========] lsan: 2 case(s), 0 failed, memory leaked before any case ran\n" in run.stdout
+    assert run.returncode != 0
+
+
+_COVERED = """#include <cstdio>
+#include <cstdlib>
+#include "rr_case.h"
+static int before_cases(int x) { return x + 1; }
+static int only_in_a_case(int x) { return x * 3; }
+static void at_exit() { std::printf("ATEXIT\\n"); }
+struct Static {
+  ~Static() { std::printf("STATIC DTOR\\n"); }
+} static_object;
+RR_CASE(calls_it) { RR_CHECK(only_in_a_case(2) == 6); }
+RR_CASE(other) {}
+RR_CASE(third) {}
+int main(int argc, char** argv) {
+  std::atexit(at_exit);
+  RR_CHECK(before_cases(1) == 2);
+  return rr::RunCases(argc, argv, "cov");
+}
 """
-    + _MAIN
-)
 
 
-def test_code_run_only_inside_a_case_is_covered(tmp_path):
+def _gcc_with_gcov():
     gcov = shutil.which("gcov")
     cxx = _compiler()
     version = subprocess.run([cxx, "--version"], capture_output=True, text=True).stdout
     if not gcov or "clang" in version.lower():
         pytest.skip("needs gcc and gcov")
+    return gcov
+
+
+@pytest.mark.parametrize("coverage", [False, True], ids=["plain", "gcc-coverage"])
+def test_exit_handlers_and_static_destructors_run_once_not_per_case(tmp_path, coverage):
+    if coverage:
+        _gcc_with_gcov()
+    proc = _compile(tmp_path, _COVERED, *(["--coverage"] if coverage else []))
+    if proc.returncode != 0:
+        pytest.skip("no gcov runtime: " + proc.stderr[-200:])
+    run = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, cwd=str(tmp_path), env={})
+    assert run.returncode == 0, run.stdout
+    # Once in total, in the runner, after its summary line: never in a child.
+    assert run.stdout.count("ATEXIT") == 1 and run.stdout.count("STATIC DTOR") == 1, run.stdout
+    assert run.stdout.index("[==========]") < run.stdout.index("ATEXIT")
+
+
+def test_gcc_coverage_counts_each_line_once_per_run_of_it(tmp_path):
+    gcov = _gcc_with_gcov()
     proc = _compile(tmp_path, _COVERED, "--coverage")
     if proc.returncode != 0:
         pytest.skip("no gcov runtime: " + proc.stderr[-200:])
@@ -435,6 +501,130 @@ def test_code_run_only_inside_a_case_is_covered(tmp_path):
         text=True,
         cwd=str(tmp_path),
     ).stdout
-    line = next(ln for ln in report.splitlines() if ln.rstrip().endswith("{ return x * 3; }"))
-    count = line.split(":", 1)[0].strip()
-    assert count not in ("#####", "-") and int(count.rstrip("*")) >= 1, line
+
+    def count(suffix):
+        line = next(ln for ln in report.splitlines() if ln.rstrip().endswith(suffix))
+        return line.split(":", 1)[0].strip().rstrip("*")
+
+    # Run in one case's child only, and before the cases in the runner only:
+    # one count each, however many children were forked after it.
+    assert count("{ return x * 3; }") == "1", report
+    assert count("{ return x + 1; }") == "1", report
+    assert count('{ std::printf("ATEXIT\\n"); }') == "1", report
+
+
+def _wait_for_pid(pidfile, proc):
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        text = pidfile.read_text() if pidfile.exists() else ""
+        if text.endswith("\n"):
+            return int(text)
+        assert proc.poll() is None, "the runner ended before its hanging case started"
+        time.sleep(0.02)
+    raise AssertionError("the hanging case never started")
+
+
+def _gone(pid, seconds=10):
+    deadline = time.monotonic() + seconds
+    while _alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return not _alive(pid)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP], ids=lambda s: s.name)
+def test_a_signal_to_the_runner_kills_its_running_case(binary, tmp_path, sig):
+    # Without PR_SET_PDEATHSIG (as on every POSIX system but Linux), only the
+    # runner's handler can end the case's child.
+    pidfile = tmp_path / "child.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TEST", "XML_OUTPUT_FILE", "RR_FIXTURE"))}
+    env.update(
+        RR_FIXTURE_FORM="hang",
+        RR_FIXTURE_PIDFILE=str(pidfile),
+        RR_FIXTURE_NO_PDEATHSIG="1",
+        XML_OUTPUT_FILE=str(tmp_path / "out.xml"),
+    )
+    runner = subprocess.Popen([binary], env=env, cwd=str(tmp_path), stdout=subprocess.DEVNULL)
+    child = None
+    try:
+        child = _wait_for_pid(pidfile, runner)
+        runner.send_signal(sig)
+        assert runner.wait(timeout=10) == -sig  # ended as the signal would have ended it
+        assert _gone(child), "the case's child outlived its signalled runner"
+        assert _cases(tmp_path / "out.xml")["hangs"][1].startswith("did not finish")
+    finally:
+        runner.kill()
+        runner.wait()
+        if child is not None and _alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def _bazel_main(*argv):
+    import rules_requirements
+
+    path = os.path.dirname(os.path.dirname(os.path.abspath(rules_requirements.__file__)))
+    code = f"import sys; sys.path.insert(0, {path!r}); from rules_requirements import bazel; sys.exit(bazel.main({list(argv)!r}))"
+    return [sys.executable, "-c", code]
+
+
+def _hang_spec(tmp_path, binary, *extra_env):
+    pidfile = tmp_path / "child.pid"
+    args = ["--test", f"//pkg:hang={binary}=_main", "--env", "//pkg:hang=RR_FIXTURE_FORM=hang"]
+    args += ["--env", f"//pkg:hang=RR_FIXTURE_PIDFILE={pidfile}"]
+    for env in extra_env:
+        args += ["--env", f"//pkg:hang={env}"]
+    return pidfile, args
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_killing_the_rr_evidence_action_kills_the_test_and_its_case(binary, tmp_path):
+    # Bazel kills an action by killing its process group: the test, and the
+    # case its runner forked, must still be in it.
+    pidfile, spec = _hang_spec(tmp_path, binary)
+    out = tmp_path / "testlogs"
+    action = subprocess.Popen(
+        _bazel_main("run-tests", "--out", str(out), "--timeout", "120", *spec),
+        cwd=str(tmp_path),
+        start_new_session=True,
+        stderr=subprocess.DEVNULL,
+    )
+    child = runner = None
+    try:
+        child = _wait_for_pid(pidfile, action)
+        with open(f"/proc/{child}/stat", encoding="utf-8") as fh:
+            runner = int(fh.read().rsplit(")", 1)[1].split()[1])
+        assert runner != action.pid and _alive(runner)
+        os.killpg(action.pid, signal.SIGKILL)
+        action.wait()
+        assert _gone(runner), "the test outlived its killed rr_evidence action"
+        assert _gone(child), "the case's child outlived its killed rr_evidence action"
+    finally:
+        for pid in (child, runner):
+            if pid is not None and _alive(pid):
+                os.kill(pid, signal.SIGKILL)
+        if action.poll() is None:
+            action.kill()
+            action.wait()
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_an_rr_evidence_timeout_ends_the_running_case(binary, tmp_path):
+    from rules_requirements import bazel
+
+    pidfile, spec = _hang_spec(tmp_path, binary, "RR_FIXTURE_NO_PDEATHSIG=1")
+    out = tmp_path / "testlogs"
+    cwd = os.getcwd()
+    os.chdir(str(tmp_path))
+    try:
+        assert bazel.main(["run-tests", "--out", str(out), "--timeout", "2", *spec]) == 0
+    finally:
+        os.chdir(cwd)
+    child = int(pidfile.read_text())
+    try:
+        assert _gone(child), "the hung case outlived the timeout"
+        log = (out / "pkg" / "hang" / "test.log").read_text()
+        assert log.endswith("TIMEOUT after 2.0s") and "[ RUN      ] fixture_hang::hangs" in log
+        assert _cases(out / "pkg" / "hang" / "test.xml")["hangs"][1].startswith("did not finish")
+    finally:
+        if _alive(child):
+            os.kill(child, signal.SIGKILL)

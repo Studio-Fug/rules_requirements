@@ -204,23 +204,48 @@ goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
   next, so a case must not depend on an earlier one (in a plain `main` it
   could). Start no threads before `rr::RunCases` — `fork` copies only the
   calling thread, so a lock another thread held stays locked in the child.
-- **Child lifetime, coverage, leaks.** On Linux a case's child is killed with
-  the runner, so a hung case never outlives a run killed by a timeout
-  (`rr_evidence` also kills the whole process group). Under `--coverage`
-  (gcc) or `-fprofile-instr-generate` (clang), code run only inside a case is
-  covered; lines run before the cases are counted once per case. Under
-  LeakSanitizer (Linux and other ELF targets) a case that leaks memory fails
+- **Child lifetime.** A child ends with `_exit`, so `atexit` handlers and
+  static destructors run once, in the runner, never per case. A hung case
+  does not outlive its runner: a `SIGTERM`, `SIGINT` or `SIGHUP` to the
+  runner (an `rr_evidence` timeout sends `SIGTERM`, then `SIGKILL` after 2 s)
+  kills the running case's child first, and on Linux the child also dies with
+  a runner killed by `SIGKILL`. Tests run by `rr_evidence` stay in the
+  action's process group, so a cancelled build reaches them too.
+- **Coverage** (Linux and other ELF targets). A child starts its case's
+  counts from zero and writes them before it ends, so a line run in a case
+  is counted once per run of it, and a line run before the cases once.
+  Verified only with gcc `--coverage` (gcc 13), and only for code linked into
+  the test executable itself (`linkstatic = True` on the `cc_test`, or
+  `--dynamic_mode=off`): the children's counts for code in a shared library
+  are lost. The test's own source must be instrumented too
+  (`--instrument_test_targets`), or code run before the cases is counted once
+  more per case. clang `--coverage` (compiler-rt's `__gcov_dump`) and clang
+  `-fprofile-instr-generate` (`__llvm_profile_reset_counters`,
+  `__llvm_profile_write_file`; `LLVM_PROFILE_FILE` needs `%p` or `%m`, as
+  Bazel sets it) are handled but not verified. On macOS the children's
+  coverage is lost.
+- **Leaks.** Under LeakSanitizer (ELF targets) a case that leaks memory fails
   (`exited with status 1: rr_case: LeakSanitizer found memory leaked by this
-  case`); on macOS the leak check and gcov data of the children are lost.
+  case`). The runner checks once before the first case: memory leaked before
+  any case ran (in `main` or a static initializer) fails the binary without
+  failing any case (`rr_case: LeakSanitizer found memory leaked before any
+  case ran`), and the cases' own checks are then skipped, since a child's
+  leak could no longer be told apart from it. On macOS the children's leak
+  checks are lost.
 - **Case keys.** Each case is `<testcase classname="<suite>" name="<case>">`,
   reported as `<suite>::<case>` (`improv_codec::wifi_settings_vector`). Case
   names must be unique within a suite; a duplicate is reported as an error.
 - **One requirement per case.** A case names at most one id, recorded as its
   `requirement` property. `RR_CASE(name, "REQ-1", "REQ-2")` does not compile
-  (`RR-E101`), nor does `RR_CASE(name, ("REQ-1", "REQ-2"))`, and an id that is
+  (`RR-E101`; with 16 or more ids the error is an unrelated one), nor does
+  `RR_CASE(name, ("REQ-1", "REQ-2"))`. In the list form that comma
+  expression compiles with only a `-Wunused-value` warning and records just
+  `REQ-2`, so build such tests with `-Werror=unused-value`. An id that is
   empty or holds anything but ASCII letters, digits, `_`, `-` and `.` makes
-  the case an error without running it (`RR-E104`). There is no call to add
-  ids from inside a case. The id is optional: a case without one is still a
+  the case an error without running it (`RR-E104`). `rr_case.h` accepts ids
+  matching `[A-Za-z0-9_.-]+` only: a project whose `config.id_pattern` allows
+  other characters must use another hook. There is no call to add ids from
+  inside a case. The id is optional: a case without one is still a
   test case in the report, and a whole-target `verified_by` reference covers it.
 - **Evidence and annotations.** `RR_CASE(name, "REQ-1")` written on one line
   is also an annotation for `rr scan`; the list form's ids

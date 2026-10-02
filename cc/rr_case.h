@@ -41,18 +41,42 @@
 // before the first case, so a global, heap object or cwd change made by one
 // case is gone in the next, and a case must not depend on an earlier one. Do
 // not start threads before rr::RunCases (fork copies only the calling
-// thread, so a lock another thread held stays locked in the child). On Linux
-// a case's child is killed with the runner, so a hung case does not outlive
-// a killed run. Under --coverage (gcc) or -fprofile-instr-generate (clang) a
-// child writes its coverage before it ends, and under LeakSanitizer (ELF
-// targets) a case that leaks memory fails.
+// thread, so a lock another thread held stays locked in the child). A child
+// ends with _exit: atexit handlers and static destructors run once, in the
+// runner, never per case.
+//
+// A hung case does not outlive its runner: a SIGTERM, SIGINT or SIGHUP to
+// the runner kills the case's child first, and on Linux the child also dies
+// with a runner killed by SIGKILL (PR_SET_PDEATHSIG).
+//
+// Coverage (ELF targets): a child resets its counts after fork and writes
+// them before _exit, so code run in a case is counted once per run of it and
+// code run before the cases once. Verified only with gcc 13 --coverage, and
+// only for code linked into the test executable itself: the children's counts
+// for code in a shared library are lost, and unless this header's own
+// translation unit is instrumented too (Bazel: --instrument_test_targets),
+// code run before the cases is counted once more per case. Handled but NOT
+// verified: clang --coverage (compiler-rt's __gcov_dump) and clang
+// -fprofile-instr-generate (__llvm_profile_reset_counters and
+// __llvm_profile_write_file; LLVM_PROFILE_FILE needs %p or %m, as Bazel sets
+// it, or each child overwrites the last one's profile). On macOS the
+// children's coverage is lost.
+//
+// LeakSanitizer (ELF targets): a case whose child leaks memory fails. The
+// runner checks once before the first case: memory leaked before any case
+// ran fails the binary (exit 1, "memory leaked before any case ran") without
+// failing a case, and the cases' own checks are then skipped.
 //
 // A case verifies at most one requirement. The optional id is a single
-// string recorded as the case's `requirement` property: RR_CASE with two ids
-// does not compile [RR-E101], nor does a parenthesised list of ids (a comma
-// expression that would keep only its last id); an id that is empty or holds
-// anything but ASCII letters, digits, '_', '-' and '.' is reported as an
-// error case without running it [RR-E104], and nothing inside a case can add
+// string recorded as the case's `requirement` property: RR_CASE with 2 to 15
+// ids does not compile [RR-E101] (16 or more fail too, with an unrelated
+// error), nor does a parenthesised list of ids (a comma expression that would
+// keep only its last id). The list form cannot catch that comma expression:
+// `{"x", f, ("REQ-1", "REQ-2")}` compiles, with only -Wunused-value, and
+// records "REQ-2"; build with -Werror=unused-value. An id that is empty or
+// holds anything but ASCII letters, digits, '_', '-' and '.' (the grammar
+// [A-Za-z0-9_.-]+, whatever config.id_pattern allows) is reported as an error
+// case without running it [RR-E104], and nothing inside a case can add
 // another. Only `RR_CASE(name, "ID")` written on one line is also an
 // annotation for `rr scan`; the list form's ids are evidence only.
 //
@@ -88,15 +112,22 @@
 #include <sys/prctl.h>
 #endif
 #if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
-// Present only when the binary is built with LeakSanitizer, clang's profile
-// runtime or gcov: a forked case ends with _exit, which skips the exit-time
-// leak check and coverage dump, so the child does them itself.
+// Present only when the binary is built with LeakSanitizer or a coverage
+// runtime. A forked case ends with _exit, so that the parent's atexit
+// handlers and static destructors never run once per case; that also skips
+// the exit-time leak check and coverage dump, so the child does them itself.
 extern "C" int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
+// clang -fprofile-instr-generate (compiler-rt's InstrProfiling).
 extern "C" int __llvm_profile_write_file(void) __attribute__((weak));
-// gcov's registry of instrumented objects: only its address is used, and
-// only libgcov itself refers to it (a weak reference to a function the
-// instrumentation calls would make that reference weak and break gcov).
-extern "C" char __gcov_master __attribute__((weak));
+extern "C" void __llvm_profile_reset_counters(void) __attribute__((weak));
+// gcov format. A weak reference never pulls an archive member in, so each
+// is present only when something else links it: __gcov_dump is in clang
+// --coverage's runtime (compiler-rt's GCDAProfiling, which the
+// instrumentation always links), but in its own member of gcc's libgcov.a;
+// gcc's __gcov_exit is in the member that holds __gcov_init, which gcc's
+// instrumentation calls, so it is linked whenever gcc --coverage is.
+extern "C" void __gcov_dump(void) __attribute__((weak));
+extern "C" void __gcov_exit(void) __attribute__((weak));
 #define RR_INTERNAL_WEAK_HOOKS 1
 #endif
 #endif
@@ -360,32 +391,126 @@ inline std::string SignalName(int sig) {
   }
 }
 
-// In the child after its case: false (after saying so) if LeakSanitizer
-// finds memory the case leaked.
-inline bool ChildLeakCheckPasses() {
+// True if LeakSanitizer is linked in and finds unreachable memory now.
+inline bool LeakSanitizerFindsLeaks() {
 #if defined(RR_INTERNAL_WEAK_HOOKS)
-  if (&__lsan_do_recoverable_leak_check != nullptr && __lsan_do_recoverable_leak_check() != 0) {
-    std::fprintf(stderr, "rr_case: LeakSanitizer found memory leaked by this case\n");
-    return false;
-  }
+  return &__lsan_do_recoverable_leak_check != nullptr && __lsan_do_recoverable_leak_check() != 0;
+#else
+  return false;
 #endif
-  return true;
 }
 
-// Ends the child. _exit skips the parent's atexit handlers and static
-// destructors, which must not run once per case; but coverage runtimes write
-// their data only at exit, so clang's is asked to write first, and under gcov
-// (whose dump call cannot be weakly linked) the child ends with exit().
+// fork(). gcc --coverage rewrites __builtin_fork (but, under a strict
+// -std=c++NN, not fork) into __gcov_fork, which starts the child's counts
+// from zero, so lines the parent ran before the fork are not counted again by
+// every child; that happens only where this header is compiled with
+// --coverage.
+inline pid_t Fork() {
+#if defined(__GNUC__) && !defined(__clang__)
+  return __builtin_fork();
+#else
+  return fork();
+#endif
+}
+
+// In the child right after fork: clang -fprofile-instr-generate's counts
+// start from zero, as __gcov_fork does for gcov.
+inline void ChildResetCoverage() {
+#if defined(RR_INTERNAL_WEAK_HOOKS)
+  if (&__llvm_profile_reset_counters != nullptr) __llvm_profile_reset_counters();
+#endif
+}
+
+// Ends the child with _exit: the parent's atexit handlers and static
+// destructors must not run once per case. Coverage runtimes write their data
+// only at exit, so the child asks its own runtime to write first.
 [[noreturn]] inline void ChildExit(int code) {
 #if defined(RR_INTERNAL_WEAK_HOOKS)
   if (&__llvm_profile_write_file != nullptr) __llvm_profile_write_file();
-  if (&__gcov_master != nullptr) std::exit(code);
+  if (&__gcov_dump != nullptr) {
+    __gcov_dump();
+  } else if (&__gcov_exit != nullptr) {
+    __gcov_exit();
+  }
 #endif
   _exit(code);
 }
 
-// Runs one case in a forked child; fills status/message.
-inline void RunForked(const Case& c, Result* r) {
+// The case child the runner is waiting for (0: none), for the handler below.
+inline volatile pid_t& RunningChild() {
+  static volatile pid_t pid = 0;
+  return pid;
+}
+
+// A SIGTERM, SIGINT or SIGHUP to the runner while a case runs (a timeout or
+// a cancel that signals only the runner) kills the case's child too, then
+// ends the runner as the signal would have.
+inline void KillChildAndReraise(int sig) {
+  const pid_t child = RunningChild();
+  if (child > 0) kill(child, SIGKILL);
+  struct sigaction dfl;
+  std::memset(&dfl, 0, sizeof dfl);
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  sigaction(sig, &dfl, nullptr);
+  raise(sig);  // delivered when the handler returns
+}
+
+// Installs KillChildAndReraise for the life of one case (where the signal is
+// not ignored), keeping the signals blocked across fork so that neither the
+// child nor a runner that has not recorded the child's pid yet runs it.
+class ChildSignalGuard {
+ public:
+  ChildSignalGuard() {
+    sigset_t block;
+    sigemptyset(&block);
+    for (int i = 0; i < kCount; ++i) sigaddset(&block, kSignals[i]);
+    sigprocmask(SIG_BLOCK, &block, &mask_);
+    struct sigaction kill_child;
+    std::memset(&kill_child, 0, sizeof kill_child);
+    kill_child.sa_handler = &KillChildAndReraise;
+    sigemptyset(&kill_child.sa_mask);
+    for (int i = 0; i < kCount; ++i) {
+      installed_[i] = sigaction(kSignals[i], nullptr, &old_[i]) == 0 && old_[i].sa_handler != SIG_IGN &&
+                      sigaction(kSignals[i], &kill_child, nullptr) == 0;
+    }
+  }
+  ChildSignalGuard(const ChildSignalGuard&) = delete;
+  ChildSignalGuard& operator=(const ChildSignalGuard&) = delete;
+  // In the runner, once the child exists (pid > 0) or fork failed (pid < 0).
+  void Forked(pid_t pid) {
+    if (pid > 0) RunningChild() = pid;
+    sigprocmask(SIG_SETMASK, &mask_, nullptr);
+  }
+  // In the child: the runner's dispositions and mask, as before the case.
+  void InChild() {
+    Restore();
+    sigprocmask(SIG_SETMASK, &mask_, nullptr);
+  }
+  // In the runner, once the child is reaped. (A signal between the reaping
+  // and this would kill a pid the system could only have reused in those
+  // few instructions.)
+  ~ChildSignalGuard() {
+    RunningChild() = 0;
+    Restore();
+  }
+
+ private:
+  void Restore() {
+    for (int i = 0; i < kCount; ++i) {
+      if (installed_[i]) sigaction(kSignals[i], &old_[i], nullptr);
+    }
+  }
+  static const int kCount = 3;
+  const int kSignals[kCount] = {SIGTERM, SIGINT, SIGHUP};
+  struct sigaction old_[kCount];
+  bool installed_[kCount];
+  sigset_t mask_;
+};
+
+// Runs one case in a forked child; fills status/message. `leak_check`: the
+// child fails the case if LeakSanitizer finds memory leaked when it ends.
+inline void RunForked(const Case& c, bool leak_check, Result* r) {
   int out[2];
   if (pipe(out) != 0) {
     r->status = "error";
@@ -393,8 +518,10 @@ inline void RunForked(const Case& c, Result* r) {
     return;
   }
   std::fflush(nullptr);
+  ChildSignalGuard guard;
   const pid_t parent = getpid();
-  const pid_t pid = fork();
+  const pid_t pid = Fork();
+  if (pid != 0) guard.Forked(pid);
   if (pid < 0) {
     r->status = "error";
     r->message = std::string("fork failed: ") + std::strerror(errno);
@@ -407,13 +534,15 @@ inline void RunForked(const Case& c, Result* r) {
     // line for the failure message), line-buffered so nothing printed before
     // an abort is lost; a failing case must not litter the sandbox with cores.
 #if defined(__linux__)
-    // Die with the runner: a timeout that kills only the runner (rather
-    // than its process group) must not leave a hung case running.
+    // Die with the runner, even by SIGKILL, which no handler sees: a hung
+    // case must not outlive a killed run.
     prctl(PR_SET_PDEATHSIG, SIGKILL);
     if (getppid() != parent) _exit(1);  // the runner died before prctl
 #else
     (void)parent;
 #endif
+    guard.InChild();
+    ChildResetCoverage();
     close(out[0]);
     dup2(out[1], 1);
     dup2(out[1], 2);
@@ -427,7 +556,10 @@ inline void RunForked(const Case& c, Result* r) {
     std::string message;
     bool ok = Invoke(c, &message);
     if (!ok) std::fprintf(stderr, "%s\n", message.c_str());
-    ok = ChildLeakCheckPasses() && ok;
+    if (leak_check && LeakSanitizerFindsLeaks()) {
+      std::fprintf(stderr, "rr_case: LeakSanitizer found memory leaked by this case\n");
+      ok = false;
+    }
     std::fflush(nullptr);
     ChildExit(ok ? 0 : 1);
   }
@@ -547,6 +679,9 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
   std::vector<Result> results;
   std::vector<std::string> seen;
   int failed = 0, selected = 0;
+  // LeakSanitizer, before the first fork: a leak the parent already holds
+  // would be found again by every case's child.
+  bool leak_checked = false, leaked_before_cases = false;
   for (const Case& c : cases) {
     const std::string name = c.name != nullptr ? c.name : "";
     bool duplicate = false;
@@ -554,6 +689,21 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     seen.push_back(name);
     if (!filter.empty() && !Selected(filter, name, suite + "::" + name)) continue;
     if (selected++ % shards != shard) continue;
+#if defined(RR_INTERNAL_FORK)
+    if (!leak_checked) {
+      leak_checked = true;
+      leaked_before_cases = LeakSanitizerFindsLeaks();
+      if (leaked_before_cases) {
+        std::fprintf(stderr,
+                     "rr_case: LeakSanitizer found memory leaked before any case ran (in main or a static "
+                     "initializer, before rr::RunCases); no case is blamed for it, and the cases' own leak "
+                     "checks are skipped\n");
+        std::fflush(stderr);
+      }
+    }
+#else
+    (void)leak_checked;
+#endif
 
     Result r;
     r.name = name;
@@ -583,7 +733,7 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
       r.message = bad_id;
     } else {
 #if defined(RR_INTERNAL_FORK)
-      RunForked(c, &r);
+      RunForked(c, !leaked_before_cases, &r);
 #else
       if (!Invoke(c, &r.message)) r.status = "failed";
 #endif
@@ -599,10 +749,10 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     results.back() = r;
   }
   WriteJUnit(junit, suite, results);
-  std::printf("[==========] %s: %u case(s), %d failed\n", suite.c_str(), static_cast<unsigned>(results.size()),
-              failed);
+  std::printf("[==========] %s: %u case(s), %d failed%s\n", suite.c_str(), static_cast<unsigned>(results.size()),
+              failed, leaked_before_cases ? ", memory leaked before any case ran" : "");
   std::fflush(stdout);
-  return failed != 0 ? 1 : 0;
+  return failed != 0 || leaked_before_cases ? 1 : 0;
 }
 
 }  // namespace internal
@@ -623,7 +773,7 @@ inline int RunCases(int argc, char** argv, const char* suite, std::initializer_l
 
 #define RR_INTERNAL_EXPAND(x) x
 // Every arity from RR_CASE(name, id1, id2) to 15 ids reaches the RR-E101
-// static_assert.
+// static_assert; 16 or more pick `unused` and fail with an unrelated error.
 #define RR_INTERNAL_CASE_PICK(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, macro, ...) macro
 #define RR_INTERNAL_CASE_PLAIN(name) RR_INTERNAL_CASE_DEFINE(name, nullptr)
 // RR_CASE(name, ("REQ-1", "REQ-2")) is a comma expression that would keep
