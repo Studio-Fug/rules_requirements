@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -269,3 +270,171 @@ def test_header_is_warning_clean(tmp_path, std, flags):
     )
     assert run.returncode == 1  # RR_CHECK is not compiled out by NDEBUG
     assert [c[0] for c in _cases(tmp_path / "x.xml").values()] == ["passed", "passed", "failure"]
+
+
+def _alive(pid):
+    """True while `pid` runs (a zombie, which no one may reap here, is dead)."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
+def test_a_hung_case_dies_with_its_killed_runner(binary, tmp_path):
+    # rr_evidence (and many CI runners) kill only the runner on a timeout,
+    # not its process group: the hung case's child must not outlive it.
+    pidfile = tmp_path / "child.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TEST", "XML_OUTPUT_FILE", "RR_FIXTURE"))}
+    env.update(RR_FIXTURE_FORM="hang", RR_FIXTURE_PIDFILE=str(pidfile), XML_OUTPUT_FILE=str(tmp_path / "out.xml"))
+    runner = subprocess.Popen([binary], env=env, cwd=str(tmp_path), stdout=subprocess.DEVNULL)
+    child = None
+    try:
+        deadline = time.monotonic() + 30
+        while child is None and time.monotonic() < deadline:
+            text = pidfile.read_text() if pidfile.exists() else ""
+            child = int(text) if text.endswith("\n") else None
+            time.sleep(0.02)
+        assert child is not None, "the hanging case never started"
+        assert _alive(child)
+        runner.kill()
+        runner.wait()
+        deadline = time.monotonic() + 10
+        while _alive(child) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _alive(child), "the hung case outlived its killed runner"
+        assert _cases(tmp_path / "out.xml")["hangs"][1].startswith("did not finish")
+    finally:
+        runner.kill()
+        runner.wait()
+        if child is not None and _alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_ids_must_be_strict_ascii_and_flags_refuse_bad_cases(binary, tmp_path):
+    proc, path = _run(binary, tmp_path, RR_FIXTURE_FORM="ids")
+    assert proc.returncode == 1
+    cases = _cases(path)
+    assert cases["dotted_id"][:3] == ("passed", "", "SRS-1.2_a")
+    for name in ("nbsp_id", "semicolon_id", "slash_id"):
+        status, message, req, _ = cases[name]
+        # Ingest splits on commas and any (Unicode) whitespace: never let one
+        # case's id read as two.
+        assert (status, req) == ("error", None), name
+        assert message.startswith("malformed requirement id") and message.endswith("[RR-E104]"), message
+    assert cases[""][:2] == ("error", "a case needs a name and a function")
+    assert "MUST NOT RUN" not in proc.stdout
+
+    proc, _ = _run(binary, tmp_path, "--rr_list", RR_FIXTURE_FORM="ids")
+    assert proc.returncode == 0
+    assert "fixture_ids::\n" in proc.stdout  # the nameless case, not a crash
+    for flag, why in (
+        ("--rr_case=semicolon_id", "malformed requirement id"),
+        ("--rr_case=twice", "duplicate case name"),
+    ):
+        proc, _ = _run(binary, tmp_path, flag, RR_FIXTURE_FORM="ids")
+        assert proc.returncode == 1, (flag, proc.returncode)
+        assert why in proc.stderr
+        assert "MUST NOT RUN" not in proc.stdout
+    proc, _ = _run(binary, tmp_path, "--rr_case=dotted_id", RR_FIXTURE_FORM="ids")
+    assert proc.returncode == 0
+
+
+def test_rr_case_records_where_each_case_is_defined(binary, tmp_path):
+    _, path = _run(binary, tmp_path, RR_FIXTURE_FORM="registry")
+    with open(_FIXTURE_SRC, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    for case in ET.parse(str(path)).getroot().iter("testcase"):
+        assert case.get("file", "").endswith("rr_case_fixture.cc")
+        assert lines[int(case.get("line")) - 1].startswith("RR_CASE(" + case.get("name"))
+    _, path = _run(binary, tmp_path)
+    assert all(case.get("file") is None for case in ET.parse(str(path)).getroot().iter("testcase"))
+
+
+_LOCALES = ("de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "fr_FR.utf8", "nl_NL.UTF-8", "ru_RU.UTF-8")
+
+
+def test_times_do_not_follow_the_numeric_locale(binary, tmp_path):
+    for name in _LOCALES:
+        proc, path = _run(binary, tmp_path, RR_FIXTURE_FORM="locale", RR_FIXTURE_LOCALE=name)
+        if proc.returncode != 77:
+            break
+    else:
+        pytest.skip("no locale with a decimal comma is installed")
+    assert proc.returncode == 1
+    root = ET.parse(str(path)).getroot()
+    times = [root.get("time")] + [el.get("time") for el in root.iter() if el.tag in ("testsuite", "testcase")]
+    assert all(re.fullmatch(r"\d+\.\d{3}", t) for t in times), times
+
+
+@pytest.mark.parametrize("ids", [5, 6, 15])
+def test_any_number_of_ids_fails_with_rr_e101(tmp_path, ids):
+    listed = ", ".join(f'"REQ-{i}"' for i in range(ids))
+    proc = _compile(tmp_path, f'#include "rr_case.h"\nRR_CASE(many, {listed}) {{}}\n' + _MAIN)
+    assert proc.returncode != 0
+    assert "a test case verifies at most one requirement [RR-E101]" in proc.stderr
+
+
+def test_a_parenthesised_id_list_does_not_compile(tmp_path):
+    # A comma expression would silently record only "REQ-2".
+    proc = _compile(tmp_path, '#include "rr_case.h"\nRR_CASE(both, ("REQ-1", "REQ-2")) {}\n' + _MAIN, "-Wno-error")
+    assert proc.returncode != 0
+    assert "not a parenthesised list" in proc.stderr and "[RR-E101]" in proc.stderr
+
+
+_LEAKS = """#include <cstdlib>
+#include "rr_case.h"
+static void* volatile sink;
+RR_CASE(leaks) { sink = std::malloc(1000); sink = nullptr; }
+RR_CASE(clean) { void* p = std::malloc(10); std::free(p); }
+""" + _MAIN.replace('"s"', '"lsan"')
+
+
+def test_a_leaking_case_fails_under_leak_sanitizer(tmp_path):
+    if not sys.platform.startswith("linux"):
+        pytest.skip("LeakSanitizer is checked per case on ELF targets")
+    proc = _compile(tmp_path, _LEAKS, "-fsanitize=address", "-fno-omit-frame-pointer")
+    if proc.returncode != 0:
+        pytest.skip("no AddressSanitizer runtime: " + proc.stderr[-200:])
+    xml = tmp_path / "x.xml"
+    env = dict(os.environ, XML_OUTPUT_FILE=str(xml), ASAN_OPTIONS="detect_leaks=1")
+    run = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, env=env)
+    if "LeakSanitizer has encountered a fatal error" in run.stdout + run.stderr:
+        pytest.skip("LeakSanitizer cannot run here (ptrace restricted)")
+    cases = _cases(xml)
+    assert cases["clean"][0] == "passed"
+    assert cases["leaks"][0] == "failure", run.stdout
+    assert cases["leaks"][1] == "exited with status 1: rr_case: LeakSanitizer found memory leaked by this case"
+    assert run.returncode == 1
+
+
+_COVERED = (
+    """#include "rr_case.h"
+static int covered_only_in_case(int x) { return x * 3; }
+RR_CASE(calls_it) { RR_CHECK(covered_only_in_case(2) == 6); }
+"""
+    + _MAIN
+)
+
+
+def test_code_run_only_inside_a_case_is_covered(tmp_path):
+    gcov = shutil.which("gcov")
+    cxx = _compiler()
+    version = subprocess.run([cxx, "--version"], capture_output=True, text=True).stdout
+    if not gcov or "clang" in version.lower():
+        pytest.skip("needs gcc and gcov")
+    proc = _compile(tmp_path, _COVERED, "--coverage")
+    if proc.returncode != 0:
+        pytest.skip("no gcov runtime: " + proc.stderr[-200:])
+    run = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, cwd=str(tmp_path), env={})
+    assert run.returncode == 0, run.stdout
+    report = subprocess.run(
+        [gcov, "-t", "-o", str(tmp_path), str(tmp_path / "case_test.cc")],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+    ).stdout
+    line = next(ln for ln in report.splitlines() if ln.rstrip().endswith("{ return x * 3; }"))
+    count = line.split(":", 1)[0].strip()
+    assert count not in ("#####", "-") and int(count.rstrip("*")) >= 1, line

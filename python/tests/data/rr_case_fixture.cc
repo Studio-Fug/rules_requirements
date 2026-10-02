@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
 // Fixture for test_rr_case.py: every way a case can end, in both forms of
-// rr_case.h. RR_FIXTURE_FORM=registry runs the RR_CASE cases; otherwise the
+// rr_case.h. RR_FIXTURE_FORM=registry runs the RR_CASE cases, =ids the
+// requirement-id and flag edge cases, =hang one case that never ends, and
+// =locale the list under the LC_NUMERIC in RR_FIXTURE_LOCALE; otherwise the
 // explicit list runs (and the registry is ignored).
 
 #undef NDEBUG  // the assert() case must abort in optimized builds too
 #include <cassert>
+#include <clocale>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -60,9 +63,39 @@ static void KillsRunner() {
 #endif
 }
 
+static void Hangs() {
+#if !defined(_WIN32)
+  if (const char* pidfile = std::getenv("RR_FIXTURE_PIDFILE")) {
+    if (FILE* f = std::fopen(pidfile, "w")) {
+      std::fprintf(f, "%ld\n", static_cast<long>(getpid()));
+      std::fclose(f);
+    }
+  }
+  for (;;) pause();
+#endif
+}
+
 int main(int argc, char** argv) {
-  const char* form = std::getenv("RR_FIXTURE_FORM");
-  if (form != nullptr && std::string(form) == "registry") return rr::RunCases(argc, argv, "fixture_registry");
+  const std::string form = std::getenv("RR_FIXTURE_FORM") != nullptr ? std::getenv("RR_FIXTURE_FORM") : "";
+  if (form == "registry") return rr::RunCases(argc, argv, "fixture_registry");
+  if (form == "hang") return rr::RunCases(argc, argv, "fixture_hang", {{"hangs", Hangs}});
+  if (form == "ids") {
+    return rr::RunCases(argc, argv, "fixture_ids",
+                        {
+                            {"dotted_id", Passes, "SRS-1.2_a"},
+                            {"nbsp_id", MustNotRun, "REQ-1\xc2\xa0REQ-2"},
+                            {"semicolon_id", MustNotRun, "REQ-1;REQ-2"},
+                            {"slash_id", MustNotRun, "REQ-1/REQ-2"},
+                            {nullptr, MustNotRun},
+                            {"twice", Passes},
+                            {"twice", MustNotRun},
+                        });
+  }
+  if (form == "locale") {
+    const char* wanted = std::getenv("RR_FIXTURE_LOCALE");
+    if (wanted == nullptr || std::setlocale(LC_NUMERIC, wanted) == nullptr) return 77;  // locale not installed
+    return rr::RunCases(argc, argv, "fixture_locale", {{"passes", Passes}, {"check_fails", CheckFails}});
+  }
   return rr::RunCases(argc, argv, "fixture",
                       {
                           {"passes", Passes, "REQ-1"},

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// rules_requirements per-case JUnit for plain-assert C/C++ tests, without
-// googletest.
+// rules_requirements per-case JUnit for plain-assert C++ tests (including
+// C-style assert() tests compiled as C++), without googletest.
 //
 //   #include "rr_case.h"   // Bazel: deps = ["@rules_requirements//cc:case"]
 //
@@ -37,11 +37,24 @@
 // cases run in-process: a failing assert ends the binary there, and the case
 // it was running is the one reported as an error.
 //
+// Cases do not share process state: each starts from the parent as it was
+// before the first case, so a global, heap object or cwd change made by one
+// case is gone in the next, and a case must not depend on an earlier one. Do
+// not start threads before rr::RunCases (fork copies only the calling
+// thread, so a lock another thread held stays locked in the child). On Linux
+// a case's child is killed with the runner, so a hung case does not outlive
+// a killed run. Under --coverage (gcc) or -fprofile-instr-generate (clang) a
+// child writes its coverage before it ends, and under LeakSanitizer (ELF
+// targets) a case that leaks memory fails.
+//
 // A case verifies at most one requirement. The optional id is a single
 // string recorded as the case's `requirement` property: RR_CASE with two ids
-// does not compile [RR-E101], an id that is empty or contains a comma or
-// whitespace is reported as an error case without running it [RR-E104], and
-// nothing inside a case can add another.
+// does not compile [RR-E101], nor does a parenthesised list of ids (a comma
+// expression that would keep only its last id); an id that is empty or holds
+// anything but ASCII letters, digits, '_', '-' and '.' is reported as an
+// error case without running it [RR-E104], and nothing inside a case can add
+// another. Only `RR_CASE(name, "ID")` written on one line is also an
+// annotation for `rr scan`; the list form's ids are evidence only.
 //
 // Flags (others are ignored, so the binary still accepts its own):
 //   --rr_list         print every case key (`suite::case [id]`) and exit
@@ -71,6 +84,21 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #define RR_INTERNAL_FORK 1
+#if defined(__linux__)
+#include <sys/prctl.h>
+#endif
+#if defined(__ELF__) && (defined(__GNUC__) || defined(__clang__))
+// Present only when the binary is built with LeakSanitizer, clang's profile
+// runtime or gcov: a forked case ends with _exit, which skips the exit-time
+// leak check and coverage dump, so the child does them itself.
+extern "C" int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
+extern "C" int __llvm_profile_write_file(void) __attribute__((weak));
+// gcov's registry of instrumented objects: only its address is used, and
+// only libgcov itself refers to it (a weak reference to a function the
+// instrumentation calls would make that reference weak and break gcov).
+extern "C" char __gcov_master __attribute__((weak));
+#define RR_INTERNAL_WEAK_HOOKS 1
+#endif
 #endif
 
 // Like assert(), but never compiled out by NDEBUG: prints the location and
@@ -83,22 +111,39 @@
 // RR_CASE(name) { body }  or  RR_CASE(name, "REQ-1") { body }: defines a case
 // and registers it for rr::RunCases(argc, argv, suite). `name` must be an
 // identifier; it is the case's name in the report.
-#define RR_CASE(...)                                                                                  \
-  RR_INTERNAL_EXPAND(RR_INTERNAL_CASE_PICK(__VA_ARGS__, RR_INTERNAL_CASE_TOO_MANY_IDS,                 \
-                                           RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, \
-                                           RR_INTERNAL_CASE_VERIFIES, RR_INTERNAL_CASE_PLAIN, unused))  \
+#define RR_CASE(...)                                                                          \
+  RR_INTERNAL_EXPAND(RR_INTERNAL_CASE_PICK(                                                   \
+      __VA_ARGS__, RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS,              \
+      RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, \
+      RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, \
+      RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, \
+      RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, RR_INTERNAL_CASE_TOO_MANY_IDS, \
+      RR_INTERNAL_CASE_VERIFIES, RR_INTERNAL_CASE_PLAIN, unused))                             \
   (__VA_ARGS__)
 
 namespace rr {
 
-// One test case: a name, the function that runs it and optionally the one
-// requirement id it verifies.
+// Where a case is defined. Explicit, so a stray second id in the list form
+// (`{"x", f, "REQ-1", "REQ-2"}`) does not compile as a location.
+struct Location {
+  explicit Location(const char* source_file, int source_line) : file(source_file), line(source_line) {}
+  const char* file;
+  int line;
+};
+
+// One test case: a name, the function that runs it, optionally the one
+// requirement id it verifies, and where it is defined (RR_CASE fills that in;
+// it becomes the <testcase> file and line attributes).
 struct Case {
   Case(const char* case_name, void (*case_fn)(), const char* requirement_id = nullptr)
-      : name(case_name), fn(case_fn), requirement(requirement_id) {}
+      : name(case_name), fn(case_fn), requirement(requirement_id), file(nullptr), line(0) {}
+  Case(const char* case_name, void (*case_fn)(), const char* requirement_id, Location where)
+      : name(case_name), fn(case_fn), requirement(requirement_id), file(where.file), line(where.line) {}
   const char* name;
   void (*fn)();
   const char* requirement;
+  const char* file;
+  int line;
 };
 
 namespace internal {
@@ -121,8 +166,16 @@ inline std::string CheckRequirement(const char* id) {
       return std::string("requirement \"") + id +
              "\" names more than one id; a test case verifies at most one requirement [RR-E104]";
     }
-    if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\f' || *p == '\v') {
-      return std::string("malformed requirement id \"") + id + "\" [RR-E104]";
+  }
+  // Strict ASCII, so ingest can never read one id as two (it splits on
+  // commas and on any whitespace, Unicode included).
+  for (const char* p = id; *p != '\0'; ++p) {
+    const char ch = *p;
+    const bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' ||
+                    ch == '-' || ch == '.';
+    if (!ok) {
+      return std::string("malformed requirement id \"") + id +
+             "\": an id is ASCII letters, digits, '_', '-' and '.' [RR-E104]";
     }
   }
   return "";
@@ -217,7 +270,16 @@ struct Result {
   std::string status;       // passed | failed | error
   std::string message;
   double seconds;
+  std::string file;  // empty: unknown
+  int line;
 };
+
+// "1.234": seconds with a '.' whatever the C locale's LC_NUMERIC says.
+inline std::string Seconds(double seconds) {
+  const long long ms = seconds > 0 ? static_cast<long long>(seconds * 1000 + 0.5) : 0;
+  const std::string frac = std::to_string(1000 + ms % 1000);
+  return std::to_string(ms / 1000) + "." + frac.substr(1);
+}
 
 // Writes the JUnit atomically (temporary file, then rename).
 inline void WriteJUnit(const std::string& path, const std::string& suite, const std::vector<Result>& results) {
@@ -237,13 +299,15 @@ inline void WriteJUnit(const std::string& path, const std::string& suite, const 
   }
   const std::string esc_suite = XmlAttr(suite);
   std::fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-  std::fprintf(f, "<testsuites tests=\"%u\" failures=\"%d\" errors=\"%d\" time=\"%.3f\">\n",
-               static_cast<unsigned>(results.size()), failures, errors, total);
-  std::fprintf(f, "  <testsuite name=\"%s\" tests=\"%u\" failures=\"%d\" errors=\"%d\" skipped=\"0\" time=\"%.3f\">\n",
-               esc_suite.c_str(), static_cast<unsigned>(results.size()), failures, errors, total);
+  std::fprintf(f, "<testsuites tests=\"%u\" failures=\"%d\" errors=\"%d\" time=\"%s\">\n",
+               static_cast<unsigned>(results.size()), failures, errors, Seconds(total).c_str());
+  std::fprintf(f, "  <testsuite name=\"%s\" tests=\"%u\" failures=\"%d\" errors=\"%d\" skipped=\"0\" time=\"%s\">\n",
+               esc_suite.c_str(), static_cast<unsigned>(results.size()), failures, errors, Seconds(total).c_str());
   for (const Result& r : results) {
-    std::fprintf(f, "    <testcase classname=\"%s\" name=\"%s\" time=\"%.3f\">\n", esc_suite.c_str(),
-                 XmlAttr(r.name).c_str(), r.seconds);
+    std::string where;
+    if (!r.file.empty()) where = " file=\"" + XmlAttr(r.file) + "\" line=\"" + std::to_string(r.line) + "\"";
+    std::fprintf(f, "    <testcase classname=\"%s\" name=\"%s\"%s time=\"%s\">\n", esc_suite.c_str(),
+                 XmlAttr(r.name).c_str(), where.c_str(), Seconds(r.seconds).c_str());
     if (!r.requirement.empty()) {
       std::fprintf(f, "      <properties><property name=\"requirement\" value=\"%s\"/></properties>\n",
                    XmlAttr(r.requirement).c_str());
@@ -296,6 +360,30 @@ inline std::string SignalName(int sig) {
   }
 }
 
+// In the child after its case: false (after saying so) if LeakSanitizer
+// finds memory the case leaked.
+inline bool ChildLeakCheckPasses() {
+#if defined(RR_INTERNAL_WEAK_HOOKS)
+  if (&__lsan_do_recoverable_leak_check != nullptr && __lsan_do_recoverable_leak_check() != 0) {
+    std::fprintf(stderr, "rr_case: LeakSanitizer found memory leaked by this case\n");
+    return false;
+  }
+#endif
+  return true;
+}
+
+// Ends the child. _exit skips the parent's atexit handlers and static
+// destructors, which must not run once per case; but coverage runtimes write
+// their data only at exit, so clang's is asked to write first, and under gcov
+// (whose dump call cannot be weakly linked) the child ends with exit().
+[[noreturn]] inline void ChildExit(int code) {
+#if defined(RR_INTERNAL_WEAK_HOOKS)
+  if (&__llvm_profile_write_file != nullptr) __llvm_profile_write_file();
+  if (&__gcov_master != nullptr) std::exit(code);
+#endif
+  _exit(code);
+}
+
 // Runs one case in a forked child; fills status/message.
 inline void RunForked(const Case& c, Result* r) {
   int out[2];
@@ -305,6 +393,7 @@ inline void RunForked(const Case& c, Result* r) {
     return;
   }
   std::fflush(nullptr);
+  const pid_t parent = getpid();
   const pid_t pid = fork();
   if (pid < 0) {
     r->status = "error";
@@ -317,6 +406,14 @@ inline void RunForked(const Case& c, Result* r) {
     // The child: its output goes through the parent (which keeps the last
     // line for the failure message), line-buffered so nothing printed before
     // an abort is lost; a failing case must not litter the sandbox with cores.
+#if defined(__linux__)
+    // Die with the runner: a timeout that kills only the runner (rather
+    // than its process group) must not leave a hung case running.
+    prctl(PR_SET_PDEATHSIG, SIGKILL);
+    if (getppid() != parent) _exit(1);  // the runner died before prctl
+#else
+    (void)parent;
+#endif
     close(out[0]);
     dup2(out[1], 1);
     dup2(out[1], 2);
@@ -328,10 +425,11 @@ inline void RunForked(const Case& c, Result* r) {
     no_core.rlim_max = 0;
     setrlimit(RLIMIT_CORE, &no_core);
     std::string message;
-    const bool ok = Invoke(c, &message);
+    bool ok = Invoke(c, &message);
     if (!ok) std::fprintf(stderr, "%s\n", message.c_str());
+    ok = ChildLeakCheckPasses() && ok;
     std::fflush(nullptr);
-    _exit(ok ? 0 : 1);
+    ChildExit(ok ? 0 : 1);
   }
   close(out[1]);
   std::string last, line;
@@ -384,23 +482,39 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     const std::string arg = argv[i];
     if (arg == "--rr_list") {
       for (const Case& c : cases) {
-        std::printf("%s::%s%s%s%s\n", suite.c_str(), c.name, c.requirement != nullptr ? " [" : "",
-                    c.requirement != nullptr ? c.requirement : "", c.requirement != nullptr ? "]" : "");
+        std::printf("%s::%s%s%s%s\n", suite.c_str(), c.name != nullptr ? c.name : "",
+                    c.requirement != nullptr ? " [" : "", c.requirement != nullptr ? c.requirement : "",
+                    c.requirement != nullptr ? "]" : "");
       }
       return 0;
     }
     if (arg.compare(0, 10, "--rr_case=") == 0) {
+      const std::string want = arg.substr(10);
+      const Case* found = nullptr;
+      int matches = 0;
       for (const Case& c : cases) {
-        if (arg.compare(10, std::string::npos, c.name) == 0) {
-          std::printf("[ RUN      ] %s::%s (in-process)\n", suite.c_str(), c.name);
-          std::fflush(stdout);
-          c.fn();
-          std::printf("[       OK ] %s::%s\n", suite.c_str(), c.name);
-          return 0;
+        if (c.name != nullptr && want == c.name) {
+          found = found != nullptr ? found : &c;
+          ++matches;
         }
       }
-      std::fprintf(stderr, "rr_case: no case named %s (see --rr_list)\n", arg.c_str() + 10);
-      return 2;
+      if (found == nullptr) {
+        std::fprintf(stderr, "rr_case: no case named %s (see --rr_list)\n", want.c_str());
+        return 2;
+      }
+      // Refuse what a full run reports as an error without running it.
+      std::string why = CheckRequirement(found->requirement);
+      if (matches > 1) why = "duplicate case name: each case of a suite needs its own";
+      if (found->fn == nullptr) why = "a case needs a name and a function";
+      if (!why.empty()) {
+        std::fprintf(stderr, "rr_case: %s::%s: %s\n", suite.c_str(), want.c_str(), why.c_str());
+        return 1;
+      }
+      std::printf("[ RUN      ] %s::%s (in-process)\n", suite.c_str(), want.c_str());
+      std::fflush(stdout);
+      found->fn();
+      std::printf("[       OK ] %s::%s\n", suite.c_str(), want.c_str());
+      return 0;
     }
     if (arg.compare(0, 11, "--rr_junit=") == 0) {
       junit = arg.substr(11);
@@ -446,6 +560,8 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     r.status = "error";
     r.message = "did not finish: the test binary ended while running this case (a crash in-process, or killed by a timeout)";
     r.seconds = 0;
+    r.file = c.file != nullptr ? c.file : "";
+    r.line = c.line;
     const std::string bad_id = CheckRequirement(c.requirement);
     if (bad_id.empty() && c.requirement != nullptr) r.requirement = c.requirement;
     results.push_back(r);
@@ -506,9 +622,17 @@ inline int RunCases(int argc, char** argv, const char* suite, std::initializer_l
 }  // namespace rr
 
 #define RR_INTERNAL_EXPAND(x) x
-#define RR_INTERNAL_CASE_PICK(a1, a2, a3, a4, a5, macro, ...) macro
+// Every arity from RR_CASE(name, id1, id2) to 15 ids reaches the RR-E101
+// static_assert.
+#define RR_INTERNAL_CASE_PICK(a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, macro, ...) macro
 #define RR_INTERNAL_CASE_PLAIN(name) RR_INTERNAL_CASE_DEFINE(name, nullptr)
-#define RR_INTERNAL_CASE_VERIFIES(name, id) RR_INTERNAL_CASE_DEFINE(name, id)
+// RR_CASE(name, ("REQ-1", "REQ-2")) is a comma expression that would keep
+// only "REQ-2".
+#define RR_INTERNAL_CASE_VERIFIES(name, id)                                              \
+  static_assert(#id[0] != '(', "RR_CASE(" #name ", " #id                                \
+                "): pass one id, not a parenthesised list; a test case verifies at most " \
+                "one requirement [RR-E101]");                                            \
+  RR_INTERNAL_CASE_DEFINE(name, id)
 #define RR_INTERNAL_CASE_TOO_MANY_IDS(name, ...)                                                       \
   static_assert(false, "RR_CASE(" #name ", ...): a test case verifies at most one requirement [RR-E101]"); \
   static void rr_case_fn_##name()
@@ -520,7 +644,7 @@ inline int RunCases(int argc, char** argv, const char* suite, std::initializer_l
 #define RR_INTERNAL_CASE_DEFINE(name, id)                                         \
   static void rr_case_fn_##name();                                                \
   RR_INTERNAL_UNUSED static const ::rr::internal::Registrar rr_case_registrar_##name( \
-      ::rr::Case(#name, &rr_case_fn_##name, id));                                 \
+      ::rr::Case(#name, &rr_case_fn_##name, id, ::rr::Location(__FILE__, __LINE__)));   \
   static void rr_case_fn_##name()
 
 #endif  // RULES_REQUIREMENTS_RR_CASE_H_
