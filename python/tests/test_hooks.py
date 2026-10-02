@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+import stat
 import subprocess
 import sys
 import textwrap
@@ -478,6 +479,15 @@ def test_rr_verifies_multi_id_is_deprecated_but_recorded():
 
     assert len(_recorded(comma)) == 1
 
+    def spaced():
+        @rr.verifies("REQ-1 REQ-2")
+        def test_s():
+            pass
+
+        assert test_s.__rr__["ids"] == ["REQ-1 REQ-2"]  # one (malformed) id, as before 0.2
+
+    assert _recorded(spaced) == []  # not "names REQ-1, REQ-2": only one id is recorded
+
     def stacked():
         @rr.verifies("REQ-2")
         @rr.verifies("REQ-1")
@@ -690,7 +700,9 @@ def test_wrap_junit_format(tmp_path, monkeypatch):
 def test_id_helpers():
     from rules_requirements.hooks.ids import check_id, split_ids
 
-    assert split_ids("REQ-1, REQ-2 REQ-1") == ["REQ-1", "REQ-2"]
+    assert split_ids("REQ-1, REQ-2,REQ-1") == ["REQ-1", "REQ-2"]
+    # whitespace does not separate ids: the hooks record "REQ-2 REQ-1" as one id
+    assert split_ids(" REQ-1 , REQ-2 REQ-1") == ["REQ-1", "REQ-2 REQ-1"]
     assert split_ids(["REQ-1", ("REQ-2,", "")]) == ["REQ-1", "REQ-2"]
     assert check_id("PR-13") == "PR-13"
     with pytest.raises(TypeError):
@@ -755,10 +767,18 @@ w.write(path, append=True)
 """
 
 
-def test_junit_writer_concurrent_appends_keep_every_case(tmp_path):
+@pytest.mark.parametrize("existing", [None, 0o444], ids=["missing", "read-only"])
+def test_junit_writer_concurrent_appends_keep_every_case(tmp_path, existing):
     path, go = tmp_path / "shared.xml", tmp_path / "go"
     script = tmp_path / "append.py"
     script.write_text(_APPENDER)
+    first = []
+    if existing is not None:  # a read-only file: the directory is writable, the file is not
+        seed = junit_writer.JUnitWriter("shell", file="")
+        seed.add("seed")
+        seed.write(str(path), append=True)
+        path.chmod(existing)
+        first = ["seed"]
     procs = [
         subprocess.Popen([sys.executable, str(script), str(path), str(go), str(i)], env=_env(), stderr=subprocess.PIPE)
         for i in range(16)
@@ -768,8 +788,23 @@ def test_junit_writer_concurrent_appends_keep_every_case(tmp_path):
     errors = [p.communicate(timeout=60)[1].decode() for p in procs]
     assert all(p.returncode == 0 for p in procs), errors
     names = sorted(c.name for c in ingest.collect([str(path)]).cases)
-    assert names == sorted(f"case{i}" for i in range(16))
+    assert names == sorted(first + [f"case{i}" for i in range(16)])
     assert sorted(os.listdir(tmp_path)) == ["append.py", "go", "shared.xml"]  # no temp files left
+    if existing is not None:
+        assert stat.S_IMODE(path.stat().st_mode) == existing
+
+
+def test_junit_writer_append_keeps_the_files_mode_and_needs_no_write_access_to_it(tmp_path):
+    path = tmp_path / "a.xml"
+    w = junit_writer.JUnitWriter("shell", file="")
+    w.add("flash", "REQ-1")
+    w.write(str(path), append=True)
+    for mode in (0o604, 0o444):  # neither is mkstemp's 0600; 0444 is not writable
+        path.chmod(mode)
+        w.write(str(path), append=True)
+        assert stat.S_IMODE(path.stat().st_mode) == mode
+    assert [c.name for c in ingest.collect([str(path)]).cases] == ["flash"] * 3
+    assert os.listdir(tmp_path) == ["a.xml"]
 
 
 def test_wrap_junit_format_without_cases_still_leaves_evidence(tmp_path, monkeypatch):
@@ -836,3 +871,53 @@ def test_pytest_multi_id_marker_warns_once_per_declaration_at_its_line(tmp_path)
     assert out.count("test_param.py::test_c: marker names REQ-1, REQ-2") == 1, out
     assert "test_param.py:3: MultipleRequirementsWarning" in out, out  # the marker's line
     assert {c.requirements for c in cases.values()} == {("REQ-1", "REQ-2")} and len(cases) == 3
+
+
+_MULTI_ID_DECLARATIONS = {
+    "test_mod.py": "import pytest\npytestmark = pytest.mark.rr('REQ-1, REQ-2')\n"
+    "def test_a():\n    pass\ndef test_b():\n    pass\n",
+    "test_par.py": "import pytest\n@pytest.mark.rr('REQ-3', 'REQ-4')\n@pytest.mark.parametrize('x', [1, 2, 3])\n"
+    "def test_c(x):\n    pass\n",
+    "test_cls.py": "import pytest\n@pytest.mark.rr('REQ-5', 'REQ-6')\nclass TestK:\n"
+    "    def test_d(self):\n        pass\n    def test_e(self):\n        pass\n",
+}
+
+# Counts the warning records themselves: pytest's summary groups identical
+# messages, so counting the summary's text cannot tell one record from seven.
+_RECORD_WARNINGS = """
+def pytest_warning_recorded(warning_message, when, nodeid, location):
+    if warning_message.category.__name__ == "MultipleRequirementsWarning":
+        with open(__file__ + ".records", "a") as fh:
+            fh.write(f"{nodeid}\\n")
+"""
+
+
+def test_pytest_multi_id_warning_records_once_per_declaration(tmp_path):
+    for name, text in _MULTI_ID_DECLARATIONS.items():
+        (tmp_path / name).write_text(text)
+    (tmp_path / "conftest.py").write_text(_RECORD_WARNINGS)
+    proc, out, cases = _run_pytest(tmp_path)
+    assert proc.returncode == 0, out
+    records = (tmp_path / "conftest.py.records").read_text().splitlines()
+    assert sorted(records) == ["test_cls.py::TestK::test_d", "test_mod.py::test_a", "test_par.py::test_c[1]"], out
+    assert len(cases) == 7 and all(c.status == "passed" for c in cases.values())
+
+
+def test_pytest_multi_id_warning_escalated_errors_one_test_per_declaration(tmp_path):
+    for name, text in _MULTI_ID_DECLARATIONS.items():
+        (tmp_path / name).write_text(text)
+    proc, out, cases = _run_pytest(tmp_path, "-W", "error::rules_requirements.hooks.ids.MultipleRequirementsWarning")
+    assert "INTERNALERROR>" not in out and proc.returncode == 1, out
+    errored = sorted(name for name, c in cases.items() if c.status == "error")
+    assert errored == ["test_a", "test_c[1]", "test_d"], out  # the first test of each declaration only
+    assert all(c.status == "passed" for name, c in cases.items() if name not in errored)
+
+
+def test_pytest_space_separated_marker_records_one_id_without_warning(tmp_path):
+    # As on origin/main, a marker string is split on commas only: "REQ-1 REQ-2"
+    # is one (malformed) id, so it must not warn that it names several ids.
+    (tmp_path / "test_space.py").write_text("import pytest\n@pytest.mark.rr('REQ-1 REQ-2')\ndef test_s():\n    pass\n")
+    proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
+    assert proc.returncode == 0, out
+    assert cases["test_s"].requirements == ("REQ-1 REQ-2",)
+    assert "MultipleRequirementsWarning" not in out

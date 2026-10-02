@@ -77,9 +77,10 @@ def test_parses_units(): ...
   comma-separated string, a list, or several markers at one scope naming
   different ids — are deprecated: every id is still recorded, and the plugin
   warns once per declaring test (all its parameters), class or module
-  ([details](#multi-id-deprecation)). A space inside one argument
-  (`"REQ-1 REQ-2"`) warns too, but, as before 0.2, the string is recorded as
-  written: one id, which matches no requirement.
+  ([details](#multi-id-deprecation)). A string is split on its commas only:
+  whitespace does not separate ids, so `"REQ-1 REQ-2"` is, as before 0.2,
+  recorded as written — one malformed id, which matches no requirement and
+  which the report lists as an undefined id. It does not warn as several ids.
 - `level=` names the level the test provides; `artifact=` a mapping of artifact
   identity keys.
 - Markers accumulate: a test gets the ids of every `rr`/`requirements` marker on

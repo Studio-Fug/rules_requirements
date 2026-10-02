@@ -3,12 +3,15 @@
 
 Each marked test gets one ``<property name="requirement">`` per id (and a
 ``level`` property) on its JUnit ``<testcase>``. A test case verifies at most
-one requirement: a marker naming several ids (several arguments, or a comma or
-whitespace inside one) is deprecated and warns with
-:class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`, though
-every id is still recorded. The warning is raised when the first test the
-marker applies to sets up, attributed to the marker's test, class or module,
-so an escalated warning (``-W error``) errors that test alone. Run pytest with
+one requirement: a marker naming several ids (several arguments, a list, or a
+comma-separated string, which is split on its commas) is deprecated and warns
+with :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`, though
+every id is still recorded. Whitespace does not separate ids:
+``rr("REQ-1 REQ-2")`` records the one id ``"REQ-1 REQ-2"``, as it always has,
+which matches no requirement (the report lists it as an undefined id). The
+warning is raised once per declaration, when the first test the marker applies
+to sets up, attributed to the marker's test, class or module, so an escalated
+warning (``-W error``) errors that test alone. Run pytest with
 ``--junitxml=... -o junit_family=xunit2`` (the
 :mod:`~rules_requirements.hooks.pytest_runner` does this for Bazel).
 

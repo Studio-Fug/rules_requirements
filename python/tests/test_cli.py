@@ -228,6 +228,22 @@ def test_case_appends_one_case(capsys, tmp_path, monkeypatch):
     assert boot.properties["rr.file"] == "scripts/bench.sh" and boot.duration == 2.5
 
 
+def test_case_appends_to_a_read_only_file(capsys, tmp_path):
+    import stat
+
+    from rules_requirements import ingest
+
+    out = tmp_path / "d" / "ro.xml"
+    out.parent.mkdir()
+    rc, _, err = run(capsys, "case", "--out", str(out), "--name", "first")
+    assert rc == 0, err
+    out.chmod(0o444)  # the directory stays writable: that is all an append needs
+    rc, _, err = run(capsys, "case", "--out", str(out), "--name", "second")
+    assert rc == 0, err
+    assert [c.name for c in ingest.collect([str(out)]).cases] == ["first", "second"]
+    assert stat.S_IMODE(out.stat().st_mode) == 0o444
+
+
 def test_case_rejects_more_than_one_id(capsys, tmp_path):
     out = str(tmp_path / "r.xml")
     rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--requirement", "REQ-1", "--requirement", "REQ-2")

@@ -318,9 +318,11 @@ class JUnitWriter:
         With ``append``, the cases are added to the JUnit already at ``path``
         (to this writer's suite there, else as a new suite); a missing or
         empty file is written afresh. The new file replaces the old one
-        atomically, and where ``fcntl`` exists (not on Windows) appends from
-        concurrent processes (``rr case ... &``) are serialised by a lock on
-        the file, so none is lost.
+        atomically and keeps its permission bits; like any replacement it
+        needs a writable directory, but not a writable file. Where ``fcntl``
+        exists (not on Windows) appends from concurrent processes
+        (``rr case ... &``) are serialised by a lock on the file, so none is
+        lost.
         """
         if not append:
             tree = ET.ElementTree(self.to_element())
@@ -351,8 +353,12 @@ def _locked(path: str) -> Iterator[Optional[int]]:
     """Hold an exclusive lock on the file at ``path`` (created empty if
     missing); yields its permission bits for the replacement file.
 
-    The file is replaced, not rewritten, so a waiter may end up holding the
-    lock on an unlinked inode: it then retries on the current file.
+    The file is opened read-only, and created read-only when missing:
+    ``flock`` needs no write access, and the file is replaced (``os.replace``),
+    not rewritten, so appending needs only a writable directory, as it did
+    before the lock; a read-only file stays appendable and keeps its mode.
+    Because the file is replaced, a waiter may end up holding the lock on an
+    unlinked inode: it then retries on the current file.
     """
     try:
         import fcntl
@@ -360,7 +366,13 @@ def _locked(path: str) -> Iterator[Optional[int]]:
         yield None
         return
     while True:
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            try:  # the first writer creates it; another may beat us to it
+                fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            except FileExistsError:
+                continue
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             held, current = os.fstat(fd), _stat(path)

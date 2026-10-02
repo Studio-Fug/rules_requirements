@@ -25,7 +25,8 @@ from rules_requirements.util import dedupe
 E_MULTIPLE = "RR-E101"
 E_MALFORMED = "RR-E104"
 
-_SEPARATORS = re.compile(r"[,\s]+")
+_SEPARATORS = re.compile(r"[,\s]+")  # what makes a string not ONE id
+_COMMA = re.compile(r"\s*,\s*")  # what separates the ids of a string the hooks record
 
 
 class MultipleRequirementsWarning(DeprecationWarning):
@@ -37,12 +38,17 @@ class MultipleRequirementsWarning(DeprecationWarning):
 
 
 def split_ids(value: Any) -> list[str]:
-    """Every distinct id in ``value``: a string (split on commas and whitespace)
-    or a list, tuple or set of them. Empty parts are dropped."""
+    """Every distinct id in ``value``: a string, or a list, tuple or set of them.
+
+    A string is split on commas only, as the hooks and the JUnit reader have
+    always split it, and each part is stripped; empty parts are dropped.
+    Whitespace inside a part does not separate ids: ``"REQ-1 REQ-2"`` is the
+    one (malformed) id ``"REQ-1 REQ-2"``, which matches no requirement.
+    """
     if isinstance(value, (list, tuple, set, frozenset)):
         parts = [p for v in value for p in split_ids(v)]
     else:
-        parts = [p for p in _SEPARATORS.split(str(value)) if p]
+        parts = [p for p in _COMMA.split(str(value).strip()) if p]
     return dedupe(parts)
 
 
