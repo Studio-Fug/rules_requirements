@@ -36,3 +36,7 @@
 //tests/node:skip_todo_test#skip_todo::todo with a reason  [skipped]  rr.file=tests/node/skip_todo.test.cjs  not written yet
 //tests/node:skip_todo_test#skip_todo::skipped at run time  [skipped]  rr.file=tests/node/skip_todo.test.cjs  decided inside the test
 //tests/node:skip_todo_test#skip_todo::todo at run time  [skipped]  rr.file=tests/node/skip_todo.test.cjs  marked inside the test
+//tests/node:skip_todo_test#skip_todo::skipped suite  [skipped]  rr.file=tests/node/skip_todo.test.cjs
+//tests/node:skip_todo_test#skip_todo > outer::skipped suite with a reason  [skipped]  rr.file=tests/node/skip_todo.test.cjs  no bench
+//tests/node:uses_helper_test#uses_helper::own  [passed]  rr.file=tests/node/uses_helper.test.cjs
+//tests/node:uses_helper_test#uses_helper::defined in a helper  [passed]  requirement=REQ-9 rr.file=tests/node/helper_cases.cjs

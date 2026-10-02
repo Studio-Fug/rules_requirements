@@ -24,6 +24,14 @@ load("//rr:defs.bzl", "rr_evidence", "rr_golden_test", "rr_node_test")
     ]
 ]
 
+# Tests defined in a helper module: their rr.file names the helper.
+rr_node_test(
+    name = "uses_helper_test",
+    data = ["helper_cases.cjs"],
+    rule = js_test,
+    test = "uses_helper.test.cjs",
+)
+
 rr_node_test(
     name = "args_test",
     args = [
@@ -80,6 +88,7 @@ rr_evidence(
         ":other_package_test",
         ":root_after_hook_test",
         ":skip_todo_test",
+        ":uses_helper_test",
         ":zero_tests_test",
     ],
 )
@@ -108,6 +117,6 @@ rr_golden_test(
 # The fixtures, for the runner's unit tests (python/tests/test_node_runner.py).
 filegroup(
     name = "fixtures",
-    srcs = glob(["*.test.cjs"]),
+    srcs = glob(["*.test.cjs"]) + ["helper_cases.cjs"],
     visibility = ["//python/tests:__pkg__"],
 )

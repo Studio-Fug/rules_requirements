@@ -80,7 +80,7 @@ $ pip install pre-commit && pre-commit run --all-files
 
 - **Lint** — the presubmit checks above.
 - **Python 3.9–3.13** — the unit tests, and the coverage gate.
-- **node:test conformance** — `rr_node_test`'s runner on Node 20, 22 and 24
+- **node:test conformance** — `rr_node_test`'s runner on Node 18 (the fallback), 20, 22 and 24
   (`python/tests/test_node_runner.py`), so a change in node:test's event model
   fails here rather than in a consumer.
 - **Bazel** — `bazel test //...` with Bazel 7.7.1 and 8.8.1 on Linux, and 8.8.1

@@ -95,7 +95,7 @@ def rr_node_test(name, rule, test, data = [], args = [], level = "", **kwargs):
       diagnostics (`t.diagnostic(...)`, or `verifies(t, id)` from
       `@rules_requirements//js:verifies.cjs`) as that case's properties;
     - target-scope error cases (`rr.scope=target`) for failures outside any
-      test: `<load>`, `<exit-status>`, a root hook (`<file>`), a describe's or
+      test: `<load>`, `<exit-status>`, a root `after()` hook (`<file>`), a describe's or
       parent test's own failure (`<hooks>`).
 
     Args:

@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // rr_node_test fixture: rr diagnostics become properties of their own case.
-const { before, describe, test } = require("node:test");
-const { verifies } = require(process.env.RR_NODE_VERIFIES);
+const { after, before, describe, test } = require("node:test");
+// rr_node_test sets RR_NODE_VERIFIES; elsewhere (`node --test`, an IDE) the
+// file still loads, without the helper's guards.
+const { verifies } = process.env.RR_NODE_VERIFIES
+  ? require(process.env.RR_NODE_VERIFIES)
+  : { verifies: (t, id) => t.diagnostic(`rr.requirement=${id}`) };
 
 before((t) => {
   t.diagnostic("rr.requirement=REQ-from-a-hook"); // belongs to no case: a warning
+});
+
+after((t) => {
+  t.diagnostic("rr.requirement=REQ-from-a-root-after-hook"); // after the last case: a warning too
 });
 
 test("raw diagnostics", (t) => {

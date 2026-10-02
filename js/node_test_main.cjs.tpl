@@ -5,15 +5,18 @@
 // two reporters — `spec` for the log, rr_node_reporter.mjs for the cases — and,
 // once the child has exited, writes one JUnit <testcase> per test case to
 // $XML_OUTPUT_FILE. It exits with the child's code: it never turns a failing
-// test green or a passing one red. Failures that belong to no case (a load
-// error, a non-zero exit after passing tests, a failing root hook) become
+// test green or a passing one red — a report it cannot write is a warning in
+// the log, not a verdict — and it passes SIGTERM / SIGINT / SIGHUP on to the
+// child, so the test process never outlives it. Failures that belong to no case (a load
+// error, a non-zero exit after passing tests, a failing root after() hook) become
 // target-scope error cases (property rr.scope=target).
 "use strict";
 
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
+const { pathToFileURL } = require("node:url");
 
 // Baked in by the rule (paths in the runfiles tree).
 const TEST_REL = "{{TEST_REL}}"; // test file, relative to this file's directory
@@ -44,12 +47,19 @@ function locate(rel, runfilesPath) {
   return candidates.find((p) => fs.existsSync(p)) ?? candidates[0] ?? "";
 }
 
-// The workspace-relative form of a source path, for rr.file.
+// The main repository's name in the runfiles tree (`_main` under bzlmod).
+const MAIN_REPO = TEST_SHORT.startsWith("external/") ? "_main" : TEST_RUNFILES.split("/")[0];
+
+// The workspace-relative form of a source path, for rr.file. The runfiles
+// tree is checked first: under rules_js it lies inside bazel-out/<cfg>/bin
+// (`.../bin/pkg/x_test_/x_test.runfiles/_main/pkg/helper.cjs`).
 function workspacePath(file, test) {
   if (!file) return "";
   if (file === test) return TEST_SHORT;
   const norm = file.replace(/\\/g, "/");
-  const m = /\/bazel-out\/[^/]+\/bin\/(.*)$/.exec(norm) || /\/[^/]+\.runfiles\/[^/]+\/(.*)$/.exec(norm);
+  const runfile = /\/[^/]+\.runfiles\/([^/]+)\/(.*)$/.exec(norm);
+  if (runfile) return runfile[1] === MAIN_REPO ? runfile[2] : `external/${runfile[1]}/${runfile[2]}`;
+  const m = /\/bazel-out\/[^/]+\/bin\/(.*)$/.exec(norm);
   if (m) return m[1];
   const rel = path.relative(process.cwd(), file).replace(/\\/g, "/");
   return rel.startsWith("../") ? norm : rel;
@@ -203,7 +213,41 @@ function writeJUnit(file, cases) {
   fs.renameSync(file + ".tmp", file);
 }
 
-function main() {
+const FORWARDED = ["SIGTERM", "SIGINT", "SIGHUP"];
+
+// Runs node and resolves with {status, signal, error}, like spawnSync, while
+// passing termination signals on to the child.
+function runNode(argv, env) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(process.execPath, argv, { stdio: "inherit", env });
+    } catch (error) {
+      resolve({ status: null, signal: null, error });
+      return;
+    }
+    const forward = (sig) => {
+      try {
+        child.kill(sig);
+      } catch {
+        // Already gone.
+      }
+    };
+    for (const sig of FORWARDED) process.on(sig, forward);
+    let error = null;
+    child.on("error", (e) => {
+      error = e;
+      // No process was started: no "close" follows.
+      if (child.pid === undefined) resolve({ status: null, signal: null, error });
+    });
+    child.on("close", (status, signal) => {
+      for (const sig of FORWARDED) process.off(sig, forward);
+      resolve({ status, signal, error });
+    });
+  });
+}
+
+async function main() {
   const test = locate(TEST_REL, TEST_RUNFILES);
   const reporter = locate(REPORTER_REL, "");
   const verifies = VERIFIES_RUNFILES ? locate("", VERIFIES_RUNFILES) : "";
@@ -211,38 +255,60 @@ function main() {
   const plain = major < 20 || process.env.RR_NODE_TEST_PLAIN === "1";
   const xml = process.env.XML_OUTPUT_FILE;
 
-  const scratch = fs.mkdtempSync(path.join(process.env.TEST_TMPDIR || os.tmpdir(), "rr_node_test-"));
-  const casesOut = path.join(scratch, "cases.jsonl");
+  // Reporting trouble never decides the verdict: without a scratch directory
+  // the test still runs, and Bazel's own one-result report stands (a warning).
+  let scratch = "";
+  try {
+    scratch = fs.mkdtempSync(path.join(process.env.TEST_TMPDIR || os.tmpdir(), "rr_node_test-"));
+  } catch (e) {
+    process.stderr.write(`rr_node_test: warning: no scratch directory, no per-test report: ${e.message}\n`);
+  }
+  const casesOut = scratch ? path.join(scratch, "cases.jsonl") : "";
   const reporters = plain
     ? []
     : [
         "--test-reporter=spec",
         "--test-reporter-destination=stdout",
-        `--test-reporter=${reporter}`,
+        // A file: URL, which a Windows path (`C:\...`) is not.
+        `--test-reporter=${pathToFileURL(reporter).href}`,
         "--test-reporter-destination=stderr",
       ];
   // execArgv and NODE_OPTIONS (inherited) carry rules_js's node flags along.
-  const child = spawnSync(process.execPath, [...process.execArgv, ...reporters, test, ...ARGS, ...process.argv.slice(2)], {
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      RR_CASES_OUT: casesOut,
-      RR_TEST_FILE: test,
-      RR_TEST_STEM: fileStem(test),
-      RR_TARGET: TARGET,
-      ...(verifies ? { RR_NODE_VERIFIES: verifies } : {}),
-    },
+  const child = await runNode([...process.execArgv, ...reporters, test, ...ARGS, ...process.argv.slice(2)], {
+    ...process.env,
+    RR_CASES_OUT: casesOut,
+    RR_TEST_FILE: test,
+    RR_TEST_STEM: fileStem(test),
+    RR_TARGET: TARGET,
+    ...(verifies ? { RR_NODE_VERIFIES: verifies } : {}),
   });
   let code = child.status;
   if (code === null) {
     const signo = child.signal ? os.constants.signals[child.signal] : undefined;
     code = signo ? 128 + signo : 1;
   }
-  const run = { code, signal: child.signal, error: child.error ? String(child.error.message || child.error) : "" };
-  if (child.error) process.stderr.write(`rr_node_test: cannot run node: ${run.error}\n`);
-  if (xml) writeJUnit(xml, render(readRows(casesOut), run, test, plain));
-  fs.rmSync(scratch, { recursive: true, force: true });
+  const result = { code, signal: child.signal, error: child.error ? String(child.error.message || child.error) : "" };
+  if (child.error) process.stderr.write(`rr_node_test: cannot run node: ${result.error}\n`);
+  try {
+    if (xml && scratch) writeJUnit(xml, render(readRows(casesOut), result, test, plain));
+  } catch (e) {
+    process.stderr.write(`rr_node_test: warning: cannot write ${xml}: ${e.message}\n`);
+  }
+  try {
+    if (scratch) fs.rmSync(scratch, { recursive: true, force: true });
+  } catch {
+    // Only clutter in $TEST_TMPDIR.
+  }
   return code;
 }
 
-process.exitCode = main();
+main().then(
+  (code) => {
+    process.exitCode = code;
+  },
+  (e) => {
+    // A bug in this runner, not a test result.
+    process.stderr.write(`rr_node_test: internal error: ${e.stack || e}\n`);
+    process.exitCode = 1;
+  },
+);

@@ -4,7 +4,8 @@
 The entry point template is expanded here the way ``rr/private/node.bzl``
 expands it, run with a real ``node`` (``$RR_NODE``, else the one on ``PATH``)
 and its JUnit read back with the JUnit ingestor. CI runs this module on Node
-20, 22 and 24, so a change in node:test's event model fails here first.
+18, 20, 22 and 24 (with ``$RR_NODE_MIN`` set, so a missing node fails rather
+than skips), so a change in node:test's event model fails here first.
 """
 
 from __future__ import annotations
@@ -13,8 +14,10 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import textwrap
+import time
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -47,7 +50,8 @@ def _node_major():
         out = subprocess.run([_NODE, "--version"], capture_output=True, text=True, check=True, timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return 0
-    return int(out.strip().lstrip("v").split(".")[0])
+    m = re.match(r"\s*v?(\d+)\.", out)
+    return int(m.group(1)) if m else 0
 
 
 _MAJOR = _node_major()
@@ -80,22 +84,37 @@ class Run:
 
 @pytest.fixture
 def run_fixture(tmp_path):
-    """run_fixture(name or (name, source), args=(), level="", env=None, xml=True) -> Run."""
+    """run_fixture(name or (name, source), args=(), level="", env=None, xml=True,
+    helpers=(), bazel_layout=False) -> Run.
 
-    pkg = tmp_path / "_main" / "tests" / "node"
-    pkg.mkdir(parents=True)
-    (tmp_path / "_main" / "js").mkdir()
-    shutil.copy(_repo_file("js/verifies.cjs"), tmp_path / "_main" / "js" / "verifies.cjs")
+    ``helpers`` are further tests/node files copied next to the test;
+    ``bazel_layout`` puts the runfiles tree where rules_js has it, inside
+    ``bazel-out/<cfg>/bin``. ``run_fixture.prepare(...)`` (same arguments)
+    returns ``(argv, env, cwd, xml_path)`` without running anything.
+    """
+
     template = _read("js/node_test_main.cjs.tpl")
     reporter = _repo_file("js/rr_node_reporter.mjs")
 
-    def run(fixture, args=(), level="", env=None, xml=True):
+    def prepare(fixture, args=(), level="", env=None, xml=True, helpers=(), bazel_layout=False):
         if isinstance(fixture, tuple):
             fixture, source = fixture
+        else:
+            source = None
+        name = f"{fixture}_test"
+        root = tmp_path
+        if bazel_layout:
+            root = tmp_path / "bazel-out" / "k8-fastbuild" / "bin" / "tests" / "node" / f"{name}_" / f"{name}.runfiles"
+        pkg = root / "_main" / "tests" / "node"
+        pkg.mkdir(parents=True, exist_ok=True)
+        (root / "_main" / "js").mkdir(exist_ok=True)
+        shutil.copy(_repo_file("js/verifies.cjs"), root / "_main" / "js" / "verifies.cjs")
+        if source is not None:
             (pkg / f"{fixture}.test.cjs").write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
         else:
             shutil.copy(_repo_file(f"tests/node/{fixture}.test.cjs"), pkg / f"{fixture}.test.cjs")
-        name = f"{fixture}_test"
+        for helper in helpers:
+            shutil.copy(_repo_file(f"tests/node/{helper}"), pkg / helper)
         shutil.copy(reporter, pkg / f"{name}.rr_node_reporter.mjs")
         main = pkg / f"{name}.rr_node_main.cjs"
         main.write_text(
@@ -117,30 +136,29 @@ def run_fixture(tmp_path):
         out = tmp_path / f"{name}.xml"
         full_env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "RUNFILES_DIR": str(tmp_path),
+            "RUNFILES_DIR": str(root),
             "TEST_TMPDIR": str(tmp_path),
             **({"XML_OUTPUT_FILE": str(out)} if xml else {}),
             **(env or {}),
         }
-        proc = subprocess.run(
-            [_NODE, str(main)],
-            cwd=tmp_path / "_main",
-            env=full_env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        plain = subprocess.run(
-            [_NODE, str(pkg / f"{fixture}.test.cjs"), *args],
-            cwd=tmp_path / "_main",
-            env={"PATH": full_env["PATH"], "RR_NODE_VERIFIES": str(tmp_path / "_main" / "js" / "verifies.cjs")},
-            capture_output=True,
-            timeout=120,
-            check=False,
-        )
-        return Run(proc.returncode, str(out), proc.stdout, proc.stderr, plain.returncode)
+        return [_NODE, str(main)], full_env, root / "_main", str(out)
 
+    def run(fixture, args=(), **kw):
+        argv, full_env, cwd, out = prepare(fixture, args, **kw)
+        proc = subprocess.run(argv, cwd=cwd, env=full_env, capture_output=True, text=True, timeout=120, check=False)
+        name = fixture[0] if isinstance(fixture, tuple) else fixture
+        # `node <file>` alone, outside rr_node_test (no RR_NODE_VERIFIES).
+        plain = subprocess.run(
+            [_NODE, str(cwd / "tests" / "node" / f"{name}.test.cjs"), *args],
+            cwd=cwd,
+            env={"PATH": full_env["PATH"]},
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        return Run(proc.returncode, out, proc.stdout, proc.stderr, plain.returncode)
+
+    run.prepare = prepare  # type: ignore[attr-defined]
     return run
 
 
@@ -202,7 +220,29 @@ def test_skip_and_todo_are_skipped(run_fixture):
         ("todo with a reason", "skipped", "not written yet"),
         ("skipped at run time", "skipped", "decided inside the test"),
         ("todo at run time", "skipped", "marked inside the test"),
+        ("skipped suite", "skipped", ""),
+        ("skipped suite with a reason", "skipped", "no bench"),
     ]
+    # Node reports nothing of a skipped describe's tests: the describe is the
+    # case (in its own chain), so what it claims reads skipped, not missing.
+    assert r.paths()[-2:] == ["skip_todo::skipped suite", "skip_todo > outer::skipped suite with a reason"]
+    assert all("never reported" not in c.name for c in r.cases)
+
+
+@needs_reporters
+def test_an_empty_describe_is_no_case(run_fixture):
+    r = run_fixture(
+        (
+            "empty_suite",
+            """
+            const { describe, test } = require("node:test");
+            describe("no tests yet", () => {});
+            test("a", () => {});
+            """,
+        )
+    )
+    assert r.code == 0
+    assert r.paths() == ["empty_suite::a"]
 
 
 @needs_reporters
@@ -235,6 +275,118 @@ def test_diagnostics_become_properties_of_their_own_case(run_fixture):
     # A diagnostic from a hook is never guessed onto a case.
     assert "uncorrelated rr diagnostic 'rr.requirement=REQ-from-a-hook'" in r.stderr
     assert all("REQ-from-a-hook" not in c.requirements for c in r.cases)
+    # Not even a root after() hook's, which node reports right after the last
+    # case, at nesting 0.
+    assert "uncorrelated rr diagnostic 'rr.requirement=REQ-from-a-root-after-hook'" in r.stderr
+    assert cases["diagnostics > after a sibling's diagnostics::second"].requirements == ()
+    # The documented import still loads the file outside rr_node_test.
+    assert r.plain_code == 0
+
+
+@needs_reporters
+def test_a_root_after_hook_diagnostic_in_a_one_line_file_is_no_case(run_fixture):
+    # Minified or bundled: the hook and the test share line 1 (and nesting 0).
+    r = run_fixture(
+        (
+            "one_line",
+            'const { test, after } = require("node:test"); test("only case", () => {}); '
+            'after((t) => { t.diagnostic("rr.requirement=REQ-hook"); });\n',
+        )
+    )
+    assert r.code == 0
+    assert [(c.name, c.requirements) for c in r.cases] == [("only case", ())]
+    assert "uncorrelated rr diagnostic 'rr.requirement=REQ-hook'" in r.stderr
+
+
+@needs_reporters
+def test_one_line_file_keeps_each_tests_own_diagnostics(run_fixture):
+    r = run_fixture(
+        (
+            "one_line_tests",
+            'const { test } = require("node:test"); '
+            'test("a", (t) => { t.diagnostic("rr.requirement=REQ-a"); }); '
+            'test("b", (t) => { t.diagnostic("rr.requirement=REQ-b"); });\n',
+        )
+    )
+    assert r.code == 0
+    assert [(c.name, c.requirements) for c in r.cases] == [("a", ("REQ-a",)), ("b", ("REQ-b",))]
+
+
+def _reporter_rows(tmp_path, events):
+    """Feeds a synthetic node:test event stream to the reporter; its rows."""
+    out = tmp_path / "rows.jsonl"
+    driver = tmp_path / "drive.mjs"
+    driver.write_text(
+        "import fs from 'node:fs';\n"
+        "import { pathToFileURL } from 'node:url';\n"
+        "const { default: rr } = await import(pathToFileURL(process.argv[2]).href);\n"
+        "const events = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));\n"
+        "async function* source() { for (const e of events) yield e; }\n"
+        "for await (const _ of rr(source())) {}\n",
+        encoding="utf-8",
+    )
+    stream = tmp_path / "events.json"
+    stream.write_text(json.dumps(events), encoding="utf-8")
+    subprocess.run(
+        [_NODE, str(driver), _repo_file("js/rr_node_reporter.mjs"), str(stream)],
+        env={"PATH": os.environ.get("PATH", ""), "RR_CASES_OUT": str(out), "RR_TEST_FILE": "/w/f.test.cjs"},
+        check=True,
+        timeout=60,
+    )
+    return [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+
+
+_F = "/w/f.test.cjs"
+
+
+def _ev(kind, nesting=0, line=2, column=1, file=_F, **data):
+    return {"type": kind, "data": {"nesting": nesting, "line": line, "column": column, "file": file, **data}}
+
+
+def _case(name="a", nesting=0, line=2, column=1):
+    return [
+        _ev("test:start", nesting, line, column, name=name),
+        _ev("test:pass", nesting, line, column, name=name, details={"duration_ms": 1}),
+    ]
+
+
+def _diag(nesting=0, line=2, column=1, file=_F):
+    return _ev("test:diagnostic", nesting, line, column, file, message="rr.requirement=REQ-X")
+
+
+# Each of these diagnostics follows case `a` (nesting 0, line 2, column 1) but
+# is not its own: every check of the correlation is needed.
+_NOT_ITS_OWN = {
+    "other nesting": [_diag(nesting=1)],
+    "other line": [_diag(line=3)],
+    "other column": [_diag(column=40)],
+    "other file": [_diag(file="/w/helper.cjs")],
+    "no file": [_diag(file=None)],
+    "after a plan (a root after hook)": [_ev("test:plan", 0, 2, 1, count=1), _diag()],
+    "after the next test started": [_ev("test:start", 0, 5, 1, name="b"), _diag()],
+    "after a describe passed": [
+        _ev("test:start", 0, 7, 1, name="d"),
+        _ev("test:pass", 0, 7, 1, name="d", details={"type": "suite"}),
+        _diag(),
+    ],
+    "after a root hook failed": [
+        _ev("test:fail", 0, 1, 1, name=_F, details={"error": {"message": "hook broke"}}),
+        _diag(),
+    ],
+}
+
+
+@needs_reporters
+@pytest.mark.parametrize("events", list(_NOT_ITS_OWN.values()), ids=list(_NOT_ITS_OWN))
+def test_reporter_correlates_a_diagnostic_only_with_its_own_case(tmp_path, events):
+    rows = _reporter_rows(tmp_path, _case() + events)
+    assert [r["kind"] for r in rows if r["kind"] in ("diag", "warning")] == ["warning"], rows
+
+
+@needs_reporters
+def test_reporter_correlates_a_diagnostic_with_its_case(tmp_path):
+    rows = _reporter_rows(tmp_path, _case() + [_diag()])
+    assert [(r["kind"], r.get("case")) for r in rows] == [("case", None), ("diag", 0)]
 
 
 @needs_reporters
@@ -403,3 +555,136 @@ def test_node_before_20_falls_back_to_one_synthetic_result(run_fixture):
     r = run_fixture("nesting")
     assert r.code == 0
     assert [(c.name, c.status, c.properties) for c in r.cases] == [("nesting_test", "passed", {"rr.synthetic": "true"})]
+
+
+@needs_reporters
+@pytest.mark.parametrize("bazel_layout", [False, True], ids=["runfiles", "rules_js-bin-tree"])
+def test_rr_file_of_a_test_defined_in_a_helper_module(run_fixture, bazel_layout):
+    # Under rules_js the runfiles tree lies inside bazel-out/<cfg>/bin: the
+    # helper's rr.file is its workspace path, not one inside the runfiles.
+    r = run_fixture("uses_helper", helpers=["helper_cases.cjs"], bazel_layout=bazel_layout)
+    assert r.code == 0, r.stderr
+    assert [(c.name, c.requirements, c.properties["rr.file"]) for c in r.cases] == [
+        ("own", (), "tests/node/uses_helper.test.cjs"),
+        ("defined in a helper", ("REQ-9",), "tests/node/helper_cases.cjs"),
+    ]
+
+
+@needs_reporters
+def test_a_failing_root_before_hook_fails_the_tests_not_the_file(run_fixture):
+    # As docs/guides/hooks.md says: no `<file>` case; each top-level test
+    # fails, and each describe gets a `<hooks>` error with the hook's message.
+    r = run_fixture(
+        (
+            "root_before",
+            """
+            const { before, describe, test } = require("node:test");
+            before(() => { throw new Error("root before broke"); });
+            test("a", () => {});
+            describe("d", () => { test("b", () => {}); });
+            """,
+        )
+    )
+    assert r.code == r.plain_code == 1
+    assert [(p, c.status) for p, c in r.by_path().items()] == [
+        ("root_before::a", "failed"),
+        ("root_before > d::b", "failed"),
+        ("root_before > d::<hooks>", "error"),
+    ]
+    assert r.by_path()["root_before::a"].message == "Error: root before broke"
+    assert r.by_path()["root_before > d::<hooks>"].message == "Error: root before broke"
+
+
+@needs_reporters
+def test_a_thrown_non_error_is_shown_not_object_object(run_fixture):
+    r = run_fixture(
+        (
+            "non_error",
+            """
+            const { test } = require("node:test");
+            test("object", () => { throw { code: 1, why: "plain object" }; });
+            test("string", () => { throw "a string"; });
+            """,
+        )
+    )
+    assert r.code == 1
+    assert [c.message for c in r.cases] == ["{ code: 1, why: 'plain object' }", "a string"]
+
+
+@needs_reporters
+@pytest.mark.parametrize("broken", ["XML_OUTPUT_FILE", "TEST_TMPDIR"])
+def test_reporting_trouble_never_changes_the_exit_code(run_fixture, tmp_path, broken):
+    missing = str(tmp_path / "no" / "such" / "dir")
+    env = {broken: missing + "/test.xml" if broken == "XML_OUTPUT_FILE" else missing}
+    r = run_fixture("nesting", env=env)
+    assert r.code == 0, r.stderr
+    assert "rr_node_test: warning:" in r.stderr
+    assert "top level" in r.stdout  # the tests did run
+    bad = run_fixture("duplicates", env=env)
+    assert bad.code == 1
+
+
+@needs_reporters
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT])
+def test_a_termination_signal_reaches_the_test_process(run_fixture, tmp_path, sig):
+    pid_file = tmp_path / "child.pid"
+    argv, env, cwd, xml = run_fixture.prepare(
+        (
+            "waits",
+            """
+            const { test } = require("node:test");
+            const fs = require("node:fs");
+            test("waits", async () => {
+              fs.writeFileSync(process.env.PID_FILE, String(process.pid));
+              await new Promise((resolve) => setTimeout(resolve, 60000));
+            });
+            """,
+        ),
+        env={"PID_FILE": str(pid_file)},
+    )
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 30
+        while not (pid_file.exists() and pid_file.read_text()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        child = int(pid_file.read_text())
+        proc.send_signal(sig)
+        code = proc.wait(timeout=30)
+    finally:
+        proc.kill()
+        proc.wait()
+    # The wrapper waits for the child it signalled and exits as it did...
+    assert code == 128 + sig
+    # ...so no test process outlives the target (a SIGTERM'd wrapper used to).
+    deadline = time.monotonic() + 10
+    while _alive(child) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        assert not _alive(child)
+    finally:
+        if _alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    # A zombie (exited, not yet reaped by init) counts as gone.
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def test_the_node_ci_asks_for_is_there():
+    # CI sets RR_NODE_MIN to its matrix's Node, so a node that is missing or
+    # cannot be read fails the job instead of skipping every test above.
+    want = os.environ.get("RR_NODE_MIN")
+    if not want:
+        pytest.skip("RR_NODE_MIN is not set")
+    assert int(want) <= _MAJOR, f"{_NODE!r} is Node {_MAJOR or 'unknown'}, CI wants >= {want}"

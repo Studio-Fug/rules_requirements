@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Optional node:test helper: `verifies(t, "PR-13")` tags the running test.
 //
-//   const { verifies } = require(process.env.RR_NODE_VERIFIES); // set by rr_node_test
+//   // rr_node_test sets RR_NODE_VERIFIES; the fallback keeps the file loadable
+//   // elsewhere (`node --test`, an IDE), without the guards below.
+//   const { verifies } = process.env.RR_NODE_VERIFIES
+//     ? require(process.env.RR_NODE_VERIFIES)
+//     : { verifies: (t, id) => t.diagnostic(`rr.requirement=${id}`) };
 //   test("bestSample keeps the min-RTT sample", (t) => {
 //     verifies(t, "PR-13");
 //     ...

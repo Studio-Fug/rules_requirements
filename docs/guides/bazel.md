@@ -334,4 +334,4 @@ Tested with Bazel 7.7.1 and 8.8.1 using bzlmod. The module's dependency floors
 are `rules_python` 2.0.3, `rules_cc` 0.2.22, `rules_rust` 0.71.3 and `googletest`
 1.17.0; newer versions in your workspace win. Python 3.9 or newer.
 `rr_node_test` is tested with `aspect_rules_js` 3.2.2 (its default Node 22) and
-its runner with Node 20, 22 and 24; rules_js is not a dependency of the module.
+its runner with Node 18 (the fallback), 20, 22 and 24; rules_js is not a dependency of the module.

@@ -222,17 +222,24 @@ records the cases, which are written to `$XML_OUTPUT_FILE` once node exits:
 | a `describe`, or a test with subtests | no case of its own — its leaves are the cases |
 | passed / failed | `passed` / `failed`; a failure's message is the first line, its text the stack |
 | `{ skip }`, `{ todo }`, `t.skip()`, `t.todo()` | `skipped`, with the reason as message |
+| `describe.skip()`, `describe(..., { skip })` | one `skipped` case named after the describe — node never reports the tests inside it |
 
 So `describe("bestSample", ...)` around `it("keeps the min-RTT sample", ...)`
 in `clocksync.test.js` is the case `clocksync > bestSample::keeps the min-RTT
 sample`. Two tests with one name stay two cases. Every case carries an
-`rr.file` property, the test file relative to the workspace.
+`rr.file` property: the workspace-relative file that defines the test — the
+test file, or a helper module it requires. For TypeScript compiled to
+JavaScript, that is the compiled file (`dist-test/...`), not the `.ts` source.
 
 **Declaring traces.** A test declares what it verifies with a diagnostic:
 
 ```js
 const { test } = require("node:test");
-const { verifies } = require(process.env.RR_NODE_VERIFIES); // set by rr_node_test
+// rr_node_test sets RR_NODE_VERIFIES; the fallback keeps the file loadable
+// elsewhere (`node --test`, an IDE), without the helper's guards.
+const { verifies } = process.env.RR_NODE_VERIFIES
+  ? require(process.env.RR_NODE_VERIFIES)
+  : { verifies: (t, id) => t.diagnostic(`rr.requirement=${id}`) };
 
 test("bestSample keeps the min-RTT sample", (t) => {
   verifies(t, "REQ-13");                  // one id; optional level: verifies(t, "REQ-13", "sil")
@@ -247,8 +254,10 @@ test("bestSample keeps the min-RTT sample", (t) => {
 case's `requirement`, `level` and `artifact.<key>` properties (other
 diagnostics are left alone). They belong to the test that writes them — also
 under `describe(..., { concurrency })` — and a diagnostic that cannot be tied
-to a test, such as one from a hook, is never guessed onto one: it is reported
-as a warning in the test log. The `level` attribute of `rr_node_test` is the
+to a test, such as one from a `before()` / `after()` hook, is never guessed
+onto one: it is reported as a warning in the test log. (A `beforeEach()` /
+`afterEach()` hook's `t` is the test's own context, so its diagnostics do
+belong to that test.) The `level` attribute of `rr_node_test` is the
 default for cases that declare none.
 
 `verifies(t, id, level?)` (`@rules_requirements//js:verifies.cjs`; under
@@ -267,8 +276,13 @@ anyway, every one is written (never a silent pick) and the test log carries an
 | ---- | ---- |
 | `<stem>::<load>` | node exited non-zero before reporting any test: the file threw while loading, or the process died. |
 | `<stem>::<exit-status>` | node exited non-zero (or was killed) although no test failed — e.g. an unhandled rejection after the tests. |
-| `<stem>::<file>` | a root-level `before()` / `after()` hook failed. Node 22 still exits 0 here, so Bazel passes the target; the report does not. |
+| `<stem>::<file>` | a root-level `after()` hook failed. Node 22 and newer still exit 0 here, so Bazel passes the target; the report does not. |
 | `<chain>::<hooks>` | a `describe` or a parent test failed outside its subtests (its own hook or body). |
+
+The other root-level hooks fail tests instead: a failing root `before()` fails
+every top-level test with the hook's error, and every top-level `describe`
+gets a `<hooks>` case carrying it (its tests are cancelled); a failing root
+`beforeEach()` / `afterEach()` fails every test it runs for.
 
 A file that registers no test at all writes an empty suite (`tests="0"`).
 Because these cases name no requirement, they fail every whole-target
@@ -280,7 +294,13 @@ tests name.
 `RR_NODE_TEST_PLAIN=1` in the test's environment, the file runs plainly and
 the runner writes one result for the whole target with the property
 `rr.synthetic=true` — what a plain `js_test` gives. rules_requirements' CI runs
-the runner on Node 20, 22 and 24.
+the runner on Node 18 (the fallback), 20, 22 and 24.
+
+The runner never decides the verdict itself: if it cannot write the report
+(an unwritable `$XML_OUTPUT_FILE` directory, a full disk) it warns in the log
+and still exits with node's code, and it passes `SIGTERM`, `SIGINT` and
+`SIGHUP` on to the test process, so a timeout or an interrupt never leaves
+that process running.
 
 ## Hand-rolled harnesses: `JUnitWriter`
 
