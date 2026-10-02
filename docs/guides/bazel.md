@@ -216,7 +216,7 @@ again only when something they depend on changes.
 | Attribute | Default | |
 | --------- | ------- | - |
 | `tests` | required | Test targets to run. |
-| `timeout` | `300` | Per-test timeout in seconds; a test that exceeds it is recorded as failed. |
+| `timeout` | `300` | Per-test timeout in seconds; a test that exceeds it gets `SIGTERM` (then `SIGKILL` 2 s later) and is recorded as failed. |
 | `local` | `False` | Add `no-remote-exec` to the action. |
 | `testonly` | `True` | |
 

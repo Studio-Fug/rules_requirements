@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+import shutil
+import signal
 import sys
 import time
 
@@ -59,42 +61,43 @@ def test_run_tests(tmp_path, monkeypatch, capsys):
     assert "FAILED (exit 3)" in capsys.readouterr().err
 
 
-def _alive(pid):
-    try:
-        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
-            return fh.read().rsplit(")", 1)[1].split()[0] != "Z"  # a zombie is dead
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
-def test_a_timeout_kills_everything_the_test_started(tmp_path, monkeypatch):
-    # A test that forks (rr_case.h runs each case in a child) and hangs: the
-    # timeout must not leave the child running in the build action.
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / "bin").mkdir()
-    pidfile = tmp_path / "grandchild.pid"
-    _exe(
-        tmp_path / "bin" / "forks_and_hangs",
-        "import subprocess, sys, time\n"
-        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
-        f"open({str(pidfile)!r}, 'w').write(str(p.pid) + '\\n')\n"
-        "time.sleep(120)\n",
+@pytest.mark.skipif(not shutil.which("setsid"), reason="needs setsid")
+def test_a_timeout_never_waits_for_what_the_test_left_holding_its_output(tmp_path):
+    # A process that left the test's group but holds its stdout must not keep
+    # the action waiting: the timeout returns after SIGTERM's grace, with the
+    # output read so far.
+    pids = tmp_path / "pids"
+    script = _exe(tmp_path / "escapes", "")
+    script.write_text(
+        f"#!/bin/sh\necho partial output\nsetsid sleep 20 & echo $! > {pids}\nsleep 60 & echo $! >> {pids}\nwait\n"
     )
-    out = tmp_path / "ev" / "testlogs"
     start = time.monotonic()
-    rc = bazel.main(["run-tests", "--out", str(out), "--timeout", "2", "--test", "//pkg:h=bin/forks_and_hangs=_main"])
-    assert rc == 0 and time.monotonic() - start < 60
-    assert "TIMEOUT after 2.0s" in (out / "pkg" / "h" / "test.log").read_text()
-    grandchild = int(pidfile.read_text())
     try:
-        deadline = time.monotonic() + 10
-        while _alive(grandchild) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert not _alive(grandchild), "the test's child outlived the timeout"
+        code, log = bazel._run_one(str(script), str(tmp_path), {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, 1)
+        elapsed = time.monotonic() - start
     finally:
-        if _alive(grandchild):
-            os.kill(grandchild, 9)
+        for pid in pids.read_text().split() if pids.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+    assert code == -1
+    assert log.startswith("partial output\n") and log.endswith("TIMEOUT after 1s")
+    assert 1 <= elapsed < 1 + bazel._KILL_GRACE + 1, elapsed
+
+
+def test_a_timeout_kills_a_test_that_ignores_sigterm(tmp_path):
+    exe = _exe(
+        tmp_path / "stubborn",
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n",
+    )
+    start = time.monotonic()
+    code, log = bazel._run_one(str(exe), str(tmp_path), dict(os.environ), 1)
+    assert code == -1 and log.startswith("ready\n")
+    assert time.monotonic() - start < 1 + bazel._KILL_GRACE + 2
 
 
 def test_golden(tmp_path, monkeypatch, capsys):
