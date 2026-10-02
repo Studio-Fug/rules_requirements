@@ -1,0 +1,9 @@
+# node:test support behind rr_node_test (//rr:defs.bzl). Plain files, no npm
+# dependencies and no rules_js dependency: the consumer's js_test runs them.
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "node_test_main.cjs.tpl",
+    "rr_node_reporter.mjs",
+    "verifies.cjs",
+])

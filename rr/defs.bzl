@@ -15,6 +15,8 @@ Test hooks:
   * `rr_py_test`          — pytest with `@pytest.mark.rr(...)` traceability JUnit.
   * `rr_wrapped_test`     — run a test binary and convert its output (libtest).
   * `rr_rust_test`        — `rust_test` + wrapper, for `rr::verifies!(...)`.
+  * `rr_node_test`        — rules_js `js_test` of a node:test file, one JUnit
+                            case per test (`verifies(t, id)` diagnostics).
   (googletest needs no wrapper: depend on `@rules_requirements//cc:gtest`.)
 
 Reports:
@@ -25,6 +27,7 @@ Reports:
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
+load("//rr/private:node.bzl", _rr_node_test = "rr_node_test")
 load(
     "//rr/private:rules.bzl",
     _RrEvidenceInfo = "RrEvidenceInfo",
@@ -39,6 +42,7 @@ RrModelInfo = _RrModelInfo
 RrEvidenceInfo = _RrEvidenceInfo
 rr_evidence = _rr_evidence
 rr_report = _rr_report
+rr_node_test = _rr_node_test
 
 _LIB = Label("//python")
 

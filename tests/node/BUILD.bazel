@@ -1,0 +1,113 @@
+# rr_node_test fixtures: every node:test behaviour the runner has to map.
+#
+# Fixtures that fail on purpose (a failing case, a load error, a late
+# rejection) are tagged manual: they only run inside rr_evidence, where a
+# failing test is evidence. The golden pins the ingested case keys, states and
+# properties of all of them.
+
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//rr:defs.bzl", "rr_evidence", "rr_golden_test", "rr_node_test")
+
+# Passing fixtures also run under `bazel test //...` (exit codes preserved).
+[
+    rr_node_test(
+        name = fixture + "_test",
+        rule = js_test,
+        test = fixture + ".test.cjs",
+    )
+    for fixture in [
+        "nesting",
+        "root_after_hook",  # node exits 0; the report gets a target-scope error
+        "skip_todo",
+        "zero_tests",
+    ]
+]
+
+rr_node_test(
+    name = "args_test",
+    args = [
+        "--mode",
+        "fast",
+    ],
+    level = "sil",
+    rule = js_test,
+    test = "args.test.cjs",
+)
+
+# Paths: a test below the package (like splanc's compiled dist-test/ tree,
+# with the package.json that scopes it to CommonJS) and one in another package.
+rr_node_test(
+    name = "compiled_test",
+    data = ["dist-test/package.json"],
+    rule = js_test,
+    test = "dist-test/tests/compiled.test.js",
+)
+
+rr_node_test(
+    name = "other_package_test",
+    rule = js_test,
+    test = "//tests/node/elsewhere:other_package.test.cjs",
+)
+
+[
+    rr_node_test(
+        name = fixture + "_test",
+        rule = js_test,
+        tags = ["manual"],
+        test = fixture + ".test.cjs",
+    )
+    for fixture in [
+        "diagnostics",
+        "duplicates",
+        "failures",
+        "late_rejection",
+        "load_error",
+    ]
+]
+
+rr_evidence(
+    name = "evidence",
+    tests = [
+        ":args_test",
+        ":compiled_test",
+        ":diagnostics_test",
+        ":duplicates_test",
+        ":failures_test",
+        ":late_rejection_test",
+        ":load_error_test",
+        ":nesting_test",
+        ":other_package_test",
+        ":root_after_hook_test",
+        ":skip_todo_test",
+        ":zero_tests_test",
+    ],
+)
+
+py_binary(
+    name = "dump_cases",
+    srcs = ["dump_cases.py"],
+    deps = ["//python"],
+)
+
+genrule(
+    name = "cases",
+    testonly = True,
+    srcs = [":evidence"],
+    outs = ["cases.txt"],
+    cmd = "$(execpath :dump_cases) $@ $(execpaths :evidence)",
+    tools = [":dump_cases"],
+)
+
+rr_golden_test(
+    name = "cases_golden_test",
+    src = ":cases.txt",
+    golden = "cases.golden.txt",
+)
+
+# The fixtures, for the runner's unit tests (python/tests/test_node_runner.py).
+filegroup(
+    name = "fixtures",
+    srcs = glob(["*.test.cjs"]),
+    visibility = ["//python/tests:__pkg__"],
+)
