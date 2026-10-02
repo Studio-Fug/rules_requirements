@@ -66,7 +66,13 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: verifies, implements, unittest_main
 
 .. automodule:: rules_requirements.hooks.junit_writer
-   :members: JUnitWriter
+   :members: JUnitWriter, source_file, xml_safe
+
+.. automodule:: rules_requirements.hooks.checkplan
+   :members: CheckPlan, HarnessError
+
+.. automodule:: rules_requirements.hooks.ids
+   :members: MultipleRequirementsWarning, split_ids, check_id, warn_multiple
 
 .. automodule:: rules_requirements.hooks.pytest_plugin
    :members: trace_of

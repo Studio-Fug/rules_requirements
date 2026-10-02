@@ -103,4 +103,5 @@ reference/api
 :hidden:
 
 development
+release-notes
 ```
