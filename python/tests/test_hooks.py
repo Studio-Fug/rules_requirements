@@ -807,6 +807,69 @@ def test_junit_writer_append_keeps_the_files_mode_and_needs_no_write_access_to_i
     assert os.listdir(tmp_path) == ["a.xml"]
 
 
+_DANGLING = r"""
+import sys
+from rules_requirements.hooks.junit_writer import JUnitWriter
+w = JUnitWriter("shell", file="")
+w.add("flash", "REQ-1")
+w.write(sys.argv[1], append=True)
+"""
+
+
+@pytest.mark.parametrize("target", ["nowhere.xml", os.path.join("gone", "nowhere.xml")])
+def test_junit_writer_appends_through_a_dangling_symlink(tmp_path, target):
+    # An $XML_OUTPUT_FILE symlink whose target is gone: the append ends (it
+    # once spun forever) and, as before the lock, replaces the link.
+    path = tmp_path / "out.xml"
+    path.symlink_to(target)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _DANGLING, str(path)], env=_env(), capture_output=True, text=True, timeout=30
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the append to a dangling symlink never ended")
+    assert proc.returncode == 0, proc.stderr
+    assert not path.is_symlink() and [c.name for c in ingest.collect([str(path)]).cases] == ["flash"]
+    assert os.listdir(tmp_path) == ["out.xml"]  # no empty target or temp file left behind
+    plain = tmp_path / "plain.xml"
+    junit_writer.JUnitWriter("shell", file="").write(str(plain))
+    assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(plain.stat().st_mode)  # the umask's, not 0600
+
+
+def _nfs_flock(calls):
+    """``fcntl.flock`` as an NFS client does it: an exclusive lock needs a
+    file opened for writing (EBADF otherwise)."""
+    import errno
+    import fcntl
+
+    real = fcntl.flock
+
+    def flock(fd, op):
+        if op & fcntl.LOCK_EX and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+            raise OSError(errno.EBADF, os.strerror(errno.EBADF))
+        calls.append(op)
+        return real(fd, op)
+
+    return flock
+
+
+def test_junit_writer_append_locks_on_nfs(tmp_path, monkeypatch):
+    import fcntl
+
+    calls = []
+    monkeypatch.setattr(fcntl, "flock", _nfs_flock(calls))
+    path = tmp_path / "a.xml"
+    w = junit_writer.JUnitWriter("shell", file="")
+    w.add("flash", "REQ-1")
+    w.write(str(path), append=True)  # missing: created, then locked
+    w.write(str(path), append=True)  # writable: opened for writing, so locked
+    assert calls == [fcntl.LOCK_EX, fcntl.LOCK_EX]
+    path.chmod(0o444)  # read-only: no exclusive lock there, but the append still lands, as before the lock
+    w.write(str(path), append=True)
+    assert [c.name for c in ingest.collect([str(path)]).cases] == ["flash"] * 3
+    assert stat.S_IMODE(path.stat().st_mode) == 0o444 and os.listdir(tmp_path) == ["a.xml"]
+
+
 def test_wrap_junit_format_without_cases_still_leaves_evidence(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
     report = tmp_path / "report.xml"

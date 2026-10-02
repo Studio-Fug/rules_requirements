@@ -336,6 +336,15 @@ def test_an_interrupted_or_cleanly_exited_run_is_not_the_device():
         assert ("hitl_e2e", "rig") not in cases_of(report)
         assert {v[0] for v in cases_of(report).values()} == {"passed"} and len(report.cases) == 6
 
+    for code in (1, "fatal"):  # every check passed, then a failing exit: listed, but no rig trouble
+        report, plan = plan_for()
+        with pytest.raises(SystemExit):
+            full_run(plan, "cleanup", SystemExit(code))
+        cases = cases_of(report)
+        assert ("hitl_e2e", "rig") not in cases
+        assert cases.pop(("hitl_e2e", "after_checks")) == ("error", [], f"SystemExit: {code}")
+        assert {v[0] for v in cases.values()} == {"passed"} and len(cases) == 6
+
     report, plan = plan_for()
     with pytest.raises(SystemExit), plan.run():
         plan.setup_done()

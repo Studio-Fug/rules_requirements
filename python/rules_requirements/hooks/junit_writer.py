@@ -25,11 +25,11 @@ For runs made of ordered steps and checks, see
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import stat
 import sys
-import tempfile
 import time
 from collections.abc import Iterable as _Iterable
 from contextlib import contextmanager
@@ -335,7 +335,7 @@ class JUnitWriter:
                 root = _merge(_read_root(path), root)
             tree = ET.ElementTree(root)
             ET.indent(tree)
-            fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path) or ".")
+            fd, tmp = _create_temp(path)
             try:
                 with os.fdopen(fd, "wb") as fh:
                     tree.write(fh, encoding="utf-8", xml_declaration=True)
@@ -351,14 +351,19 @@ class JUnitWriter:
 @contextmanager
 def _locked(path: str) -> Iterator[Optional[int]]:
     """Hold an exclusive lock on the file at ``path`` (created empty if
-    missing); yields its permission bits for the replacement file.
+    missing); yields its permission bits for the replacement file, or
+    ``None`` when there is no file to keep the bits of.
 
-    The file is opened read-only, and created read-only when missing:
-    ``flock`` needs no write access, and the file is replaced (``os.replace``),
-    not rewritten, so appending needs only a writable directory, as it did
-    before the lock; a read-only file stays appendable and keeps its mode.
-    Because the file is replaced, a waiter may end up holding the lock on an
-    unlinked inode: it then retries on the current file.
+    The file is replaced (``os.replace``), not rewritten, so appending needs
+    only a writable directory, as it did before the lock: the file is opened
+    for writing where allowed (an NFS client's ``flock`` needs that for an
+    exclusive lock), and read-only otherwise (a local ``flock`` needs no
+    write access). A read-only file stays appendable and keeps its mode; on
+    NFS it is appended to unlocked, as before the lock. A dangling symlink
+    is not followed (that would leave its target behind, empty): the append
+    goes unlocked and replaces the link, as before the lock. Because the
+    file is replaced, a waiter may end up holding the lock on an unlinked
+    inode: it then retries on the current file.
     """
     try:
         import fcntl
@@ -366,21 +371,49 @@ def _locked(path: str) -> Iterator[Optional[int]]:
         yield None
         return
     while True:
+        fd = _open_to_lock(path)
+        if fd is None:
+            yield None
+            return
         try:
-            fd = os.open(path, os.O_RDONLY)
-        except FileNotFoundError:
-            try:  # the first writer creates it; another may beat us to it
-                fd = os.open(path, os.O_RDONLY | os.O_CREAT | os.O_EXCL, 0o666)
-            except FileExistsError:
-                continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as exc:  # NFS: no exclusive lock on a read-only fd
+                if exc.errno != errno.EBADF or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY:
+                    raise
+                yield stat.S_IMODE(os.fstat(fd).st_mode)
+                return
             held, current = os.fstat(fd), _stat(path)
             if current is not None and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
                 yield stat.S_IMODE(held.st_mode)
                 return
         finally:
             os.close(fd)  # also releases the lock
+
+
+def _create_temp(path: str) -> tuple[int, str]:
+    """A new file next to ``path``, created with the mode a plain write would
+    give (0666 less the umask), not ``mkstemp``'s 0600: the replacement keeps
+    that mode when there is no old file's mode to keep (a dangling symlink;
+    Windows)."""
+    while True:
+        tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.{os.urandom(6).hex()}")
+        try:
+            return os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666), tmp
+        except FileExistsError:
+            continue
+
+
+def _open_to_lock(path: str) -> Optional[int]:
+    """An fd on the file at ``path``, created if missing; ``None`` for a
+    dangling symlink. No O_EXCL: it refuses every symlink, so a first writer
+    that met a dangling one would retry forever."""
+    if os.path.islink(path) and not os.path.exists(path):
+        return None
+    try:
+        return os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
+    except PermissionError:  # a read-only file in a writable directory
+        return os.open(path, os.O_RDONLY | os.O_CREAT, 0o666)
 
 
 def _stat(path: str) -> Optional[os.stat_result]:
