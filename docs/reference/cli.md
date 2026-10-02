@@ -19,7 +19,8 @@ Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds; `2`
 when the model is invalid for `scan`, `report` and `graph`, or a report format
 cannot be inferred. `wrap` exits with the wrapped command's status; `case` exits
-`2` when it cannot record the case (no output file, more than one id).
+`2` when it cannot record the case (no output file, more than one id, a
+malformed id or `--artifact`).
 
 The reference below is generated from the command's own argument parser.
 

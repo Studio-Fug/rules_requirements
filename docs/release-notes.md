@@ -15,7 +15,8 @@ byte-identical.
   requirement each). A device failure fails every check it kept from running,
   each through its own case; rig or setup trouble records one untagged
   `<suite>::rig` error and skips the checks that never ran; a planned check
-  never executed is an error. Re-exported from
+  never executed is an error; an operator's `KeyboardInterrupt` or a clean
+  `SystemExit` is never the device's. Re-exported from
   `rules_requirements.hooks.junit_writer`.
 - **`JUnitWriter`**: a singular `requirement=` (one id; a malformed one raises
   RR-E104); `not_reached(names, reason)` for planned cases a device failure kept
@@ -23,7 +24,7 @@ byte-identical.
   (by default `sys.argv[0]`, relative to the workspace); `write(path,
   append=True)`.
 - **`rr case`**: append one test case to a JUnit file from a shell script, with
-  one `--requirement` at most.
+  one `--requirement` at most. Concurrent appends are serialised (POSIX).
 - **`rr wrap --format junit --junit-in PATH`** and
   **`rr_wrapped_test(format = "junit", junit_in = ...)`**: pass on the JUnit a
   runner writes to a fixed path, adding the same exit-status taint as for
@@ -39,8 +40,12 @@ recorded, exactly as before, but the hooks warn with
 - a pytest `rr` / `requirements` marker naming several ids (or several markers
   at one scope naming different ids);
 - `@rr.verifies` with several ids, or stacked decorators naming different ids;
-- a `JUnitWriter` list or tuple naming several ids, positionally or as
-  `requirements=`. Lists of zero or one id are accepted silently.
+- a `JUnitWriter` list, tuple or other iterable naming several ids,
+  positionally or as `requirements=`. Lists of zero or one id are accepted
+  silently.
+
+The pytest warning is raised as the first test a marker applies to sets up, so
+`-W error::DeprecationWarning` errors that test rather than the whole session.
 
 From 0.3 a case naming several ids counts for no requirement; 0.4 rejects such
 declarations.

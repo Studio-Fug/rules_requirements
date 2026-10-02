@@ -74,10 +74,12 @@ def test_parses_units(): ...
 ```
 
 - The positional argument is the id. Several ids — several arguments, a
-  comma- or space-separated string, a list, or several markers at one scope
-  naming different ids — are deprecated: every id is still recorded, and the
-  plugin warns once per declaring test, class or module
-  ([details](#multi-id-deprecation)).
+  comma-separated string, a list, or several markers at one scope naming
+  different ids — are deprecated: every id is still recorded, and the plugin
+  warns once per declaring test (all its parameters), class or module
+  ([details](#multi-id-deprecation)). A space inside one argument
+  (`"REQ-1 REQ-2"`) warns too, but, as before 0.2, the string is recorded as
+  written: one id, which matches no requirement.
 - `level=` names the level the test provides; `artifact=` a mapping of artifact
   identity keys.
 - Markers accumulate: a test gets the ids of every `rr`/`requirements` marker on
@@ -257,7 +259,8 @@ finally:
   write none, or `file=` per case to override it.
 - `write(path, append=False)` writes the JUnit; with `append=True` the cases
   are added to the file already at `path` (to the suite of the same name, else
-  as a new suite).
+  as a new suite), replacing it atomically; on POSIX systems concurrent
+  appends are serialised by a lock on the file.
 
 (checkplan)=
 ## Hardware runs: `CheckPlan`
@@ -312,7 +315,19 @@ Each check becomes the case `<suite>.<step>::<check>` —
 `hitl_e2e.websocket_checks::rename` — carrying its tag, if any. `check(name)`
 records a pass, or a failure with the exception's text (and re-raises);
 `passed`, `failed` and `skipped` record a result directly, by the check's name
-in the current step or as `"<step>.<check>"`.
+in the current step or as `"<step>.<check>"`. Inside the check's own
+`with plan.check(name):` block, such a result is the check's only case — the
+block's end adds no pass, and a later exception no failure:
+
+```python
+with plan.check("board_caps"):
+    if descriptor is None:
+        plan.skipped("board_caps", "no capability descriptor on this board")
+    else:
+        assert descriptor.ok
+```
+
+Step names cannot contain `.`, which separates the step from the check.
 
 How a run is recorded when it stops:
 
@@ -321,12 +336,12 @@ How a run is recorded when it stops:
 | ends normally | Every check as it went. A planned check never recorded is an `error`, "planned check never executed (harness bug)". |
 | stops on a **device failure**: any exception after `setup_done()` (entering a step implies it) that `is_infrastructure` does not claim | The check that raised, as failed; every check not run yet — the rest of the step and all later steps — as failed, `not reached: <step> failed: <exception>`. Each requirement fails through its own checks. |
 | stops on **rig or setup trouble**: an exception before `setup_done()`, or one `is_infrastructure` claims | One untagged `<suite>::rig` error case; every check not run yet as skipped, `not run: rig trouble: <exception>`. Nothing is failed; checks that already passed stay passed. |
+| is **interrupted or exits cleanly**: `KeyboardInterrupt`, or `SystemExit` with code 0 or `None` | As rig trouble, whatever `is_infrastructure` says. A clean exit after every check was recorded adds nothing. (`SystemExit` with another code is classified like any exception.) |
 | hits a **harness bug**: an unknown step or check name, a check outside a step, a check recorded twice | An untagged `<suite>::harness` error case, `HarnessError` raised, and every check not run yet as `error`. |
 
 The exception is re-raised in every case, so the harness exits as it would
-without the plan. `is_infrastructure` defaults to claiming nothing: pass the
-harness's own classifier (reservation errors, ssh's own exit 255, an operator's
-`KeyboardInterrupt`...).
+without the plan. `is_infrastructure` defaults to claiming nothing else: pass
+the harness's own classifier (reservation errors, ssh's own exit 255...).
 
 ```{note}
 **v0.2 behaviour on rig trouble.** In 0.2 a skipped case does not stop a
@@ -360,9 +375,12 @@ rr case --name "boot banner" --status failed --message "no banner after 30 s" \
 | `--out PATH` | The JUnit file (default `$XML_OUTPUT_FILE`). |
 | `--file PATH` | The test code's source file, recorded as `rr.file`. |
 
-`rr case` exits 0 whatever the case's status: the script's own exit status
-still decides whether the test passed. Appends are not safe from concurrent
-processes.
+`rr case` exits 0 whatever the case's status — the script's own exit status
+still decides whether the test passed — and 2 when it cannot record the case
+(no output file, more than one id, a malformed id or `--artifact`, an
+unreadable existing file). The file is replaced atomically, and on POSIX
+systems concurrent appends (`rr case ... &`) are serialised by a lock on it,
+so none is lost; on Windows they are not.
 
 ## `rr wrap`
 
@@ -395,7 +413,10 @@ With `--format junit` the runner's report is copied to the output as it is.
 `--level` becomes the default level of its suites (a case's own `level` wins).
 If the runner exits non-zero although no case in its report failed, the same
 `exit-status` error case is added as for libtest; if it wrote no report at all,
-one error case says so, whatever its exit code.
+or a well-formed file that is not JUnit, one error case says so, whatever its
+exit code. A report without a single case from a run that exited 0 is
+replaced by one synthetic passed case, as for a libtest binary that printed
+nothing, so the run still leaves evidence.
 
 (multi-id-deprecation)=
 ## Deprecated: several ids per test case
@@ -407,9 +428,9 @@ with {py:class}`~rules_requirements.hooks.ids.MultipleRequirementsWarning` (a
 
 | Hook | Deprecated form | Warns |
 | ---- | --------------- | ----- |
-| pytest | a marker with several ids, or several markers at one scope naming different ids | once per declaring test, class or module, in pytest's warnings summary |
+| pytest | a marker with several ids, or several markers at one scope naming different ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
 | unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids | at the decorated definition |
-| `JUnitWriter` | a list or tuple naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
+| `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
 
 Ids that accumulate across scopes — a module-level `pytestmark` plus a
 function's own marker, or a class decorator plus a method decorator — are not
@@ -419,8 +440,9 @@ From 0.3, a case whose evidence names several ids counts for no requirement
 (and every requirement it names reads INVALID); 0.4 rejects multi-id
 declarations outright. Split such a test into one test per requirement, or
 keep the one id it really verifies. To find every remaining use, turn the
-warning into an error: `pytest -W error::DeprecationWarning`, or
-`python -W error::DeprecationWarning` for a script.
+warning into an error: `pytest -W error::DeprecationWarning` (each declaration
+then errors the first test it applies to, at setup; the rest of the session
+runs), or `python -W error::DeprecationWarning` for a script.
 
 The hooks name the problem with a stable code:
 
