@@ -7,6 +7,7 @@ rr_py_test(
     size = "medium",
     srcs = glob(["*.py"]),
     data = [
+        "data/rr_case_fixture.cc",
         ":rr_case_fixture",
         "//:docs/_static/logo/rules_requirements_logo.svg",
         "//:docs/_static/logo/rules_requirements_logo-dark.svg",
