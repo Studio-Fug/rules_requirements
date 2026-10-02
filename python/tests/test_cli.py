@@ -241,11 +241,19 @@ def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
 
     before = (root / "app/tests/test_config.py").read_text()
     rc, out, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--dry-run")
-    assert rc == 1 and "would rewrite app/tests/test_config.py" in err
+    assert rc == 1 and "would hold back app/tests/test_config.py" in err
     assert out.startswith("--- a/app/tests/") and '+@pytest.mark.requirements("REQ-2")' in out
     assert (root / "app/tests/test_config.py").read_text() == before
+    rc, out, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--dry-run", "--partial")
+    assert rc == 1 and "would rewrite app/tests/test_config.py" in err
 
+    # All or nothing by default: test_modes.py is refused, so nothing is written.
     rc, _, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--model", "requirements")
+    assert rc == 1 and "0 file(s) rewritten, 1 refused" in err and "pass --partial" in err
+    assert (root / "app/tests/test_config.py").read_text() == before
+    rc, _, err = run(
+        capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--model", "requirements", "--partial"
+    )
     assert rc == 1 and "4 file(s) rewritten, 1 refused" in err
     assert "refused app/tests/test_modes.py" in err
     assert "//cc:codec_test#Codec::RoundTrip: no Python source of this module" in err

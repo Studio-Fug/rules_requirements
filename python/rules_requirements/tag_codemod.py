@@ -30,11 +30,18 @@ change is undecided (``?``, unless ``unassigned="drop"``), when the
 parametrizations of one test were decided differently (split those by hand
 with ``pytest.param(..., marks=...)``), when a declaration is not a literal
 the codemod can read, or when a change would reach a test the static view
-cannot see: tests a class inherits from another class of the file, tests
-defined inside an ``if``/``try``/``with``/loop block, and decided cases of
-the module the file does not define (inherited from another module, or
-generated). The internal check can only vouch for the tests it sees, so
-those are refused up front.
+cannot see: tests a class inherits from another class (of the file or of
+another module), tests defined inside an ``if``/``try``/``with``/loop block,
+tests bound by an assignment or an import, and decided cases of the module
+the file does not define (inherited from another module, or generated). The
+internal check can only vouch for the tests it sees, so those are refused up
+front.
+
+Across files, every Python file under the root is indexed for what it imports
+and subclasses: a file whose changed classes or tests another file imports or
+subclasses is refused, together with that file. Last, each decided case's
+attribution is derived again from the rewritten sources and compared with the
+worksheet. The caller writes all or nothing (:meth:`ApplyResult.to_write`).
 """
 
 from __future__ import annotations
@@ -119,6 +126,12 @@ class ApplyResult:
     unmatched: list[tuple[CaseKey, str]] = field(default_factory=list)
     untagged: list[CaseKey] = field(default_factory=list)  # decided, but the test declares no id
     outside: list[CaseKey] = field(default_factory=list)  # with ``only``: no scanned module
+    # Decided cases whose attribution, re-derived from the rewritten sources,
+    # differs from the worksheet: nothing may be written.
+    mismatched: list[tuple[CaseKey, str]] = field(default_factory=list)
+    unmatched_files: set[str] = field(default_factory=set)  # the files holding the unmatched cases
+    # Files that import (or subclass) tests or test classes of each other, both ways.
+    depends: dict[str, set[str]] = field(default_factory=dict)
 
     @property
     def refused(self) -> list[FileResult]:
@@ -126,7 +139,28 @@ class ApplyResult:
 
     @property
     def changed(self) -> list[FileResult]:
+        """The files rewritten in memory; :meth:`to_write` says which may be written."""
         return [f for f in self.files if f.status == "changed"]
+
+    @property
+    def blocked(self) -> bool:
+        """Something was refused, unmatched or mismatched: the run is not clean."""
+        return bool(self.refused or self.unmatched or self.mismatched)
+
+    def to_write(self, partial: bool = False) -> list[FileResult]:
+        """The changed files to write. All or nothing by default: nothing
+        when anything was refused or unmatched. With ``partial``, the changed
+        files that neither import from nor are imported by a refused file (or
+        one holding an unmatched case). Never anything when a rewritten
+        source does not give a decided case its owner."""
+        if self.mismatched:
+            return []
+        if not self.blocked:
+            return self.changed
+        if not partial:
+            return []
+        bad = {f.path for f in self.refused} | self.unmatched_files
+        return [f for f in self.changed if f.path not in bad and not self.depends.get(f.path, set()) & bad]
 
 
 # --------------------------------------------------------------------------- #
@@ -210,12 +244,15 @@ class TestFile:
 
     def _collect(self, holder: ast.AST, scope: str, classes: tuple[ast.ClassDef, ...]) -> None:
         body: list[ast.stmt] = getattr(holder, "body", [])
+        defs = {s.name: s for s in body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))}
         for stmt in body:
             if isinstance(stmt, ast.Assign) and [_dotted(t) for t in stmt.targets] == ["pytestmark"]:
                 values = stmt.value.elts if isinstance(stmt.value, (ast.List, ast.Tuple)) else [stmt.value]
                 for v in values:
                     if self.is_decl(v):
                         self._decl(scope, holder, v, "pytestmark", stmt)  # type: ignore[arg-type]
+            elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.ImportFrom)):
+                self._binding(stmt, defs, classes)
             elif isinstance(stmt, ast.ClassDef):
                 self.classes[id(stmt)] = classes + (stmt,)
                 self._decorators(stmt, "class")
@@ -249,6 +286,42 @@ class TestFile:
                         self._hidden_calls.update(id(n) for n in ast.walk(child) if isinstance(n, ast.Call))
                 elif not isinstance(child, ast.Lambda):
                     todo.append(child)
+
+    def _binding(self, stmt: ast.stmt, defs: Mapping[str, ast.AST], classes: tuple[ast.ClassDef, ...]) -> None:
+        """A test bound by an assignment or an import (``test_b = test_a``,
+        ``from helpers import test_shared``, a class attribute): pytest
+        collects it, the codemod does not see it. The declarations of every
+        scope around it must not change, nor those of a function it aliases."""
+        if isinstance(stmt, ast.ImportFrom):
+            names = [a.asname or a.name for a in stmt.names]
+            how = "an import"
+        else:
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]  # type: ignore[attr-defined]
+            names = [
+                n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
+            ]
+            how = "an assignment"
+        for name in names:
+            if not name.startswith(("test", "Test", "*")):
+                continue
+            what = "a star import, which may bring tests" if name == "*" else f"{name} is bound by {how}, not a def"
+            why = (
+                f"line {stmt.lineno}: {what}: pytest collects it as a test the codemod cannot see; "
+                "migrate this file by hand"
+            )
+            for holder in (self.tree, *classes):
+                self.scope_blind.setdefault(id(holder), why)
+            value = getattr(stmt, "value", None)
+            for n in ast.walk(value) if value is not None else ():
+                if isinstance(n, ast.Name) and n.id in defs:
+                    self.scope_blind.setdefault(id(defs[n.id]), why)
+
+    def mark_inherited(self, sub: ast.ClassDef, why: str) -> None:
+        """``sub`` inherits tests or declarations the static view does not
+        follow: distrust its traces, and change nothing that reaches its tests."""
+        self.trace_blind.setdefault(id(sub), why)
+        for holder in (self.tree, *self.classes[id(sub)], *(t.node for t in self.tests_under(sub))):
+            self.scope_blind.setdefault(id(holder), why)
 
     def _inheritance(self) -> None:
         """A test class subclassing another class of this file inherits its
@@ -999,6 +1072,285 @@ def _read(path: str) -> str:
         return fh.read()
 
 
+def _bound_names(stmt: ast.stmt) -> list[str]:
+    """The names a module-level statement binds (looking into if/try/with
+    blocks, not into function or class bodies)."""
+    out: list[str] = []
+    todo: list[ast.AST] = [stmt]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.append(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            out.extend((a.asname or a.name).split(".")[0] for a in node.names if a.name != "*")
+        elif not isinstance(node, ast.Lambda):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                out.append(node.id)
+            todo.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _segments(text: str) -> dict[str, list[str]]:
+    """Module-level name -> the source of the statements binding it (decorators included)."""
+    tree = ast.parse(text)
+    lines = text.splitlines(keepends=True)
+    out: dict[str, list[str]] = {}
+    for stmt in tree.body:
+        first = min([stmt.lineno, *(d.lineno for d in getattr(stmt, "decorator_list", []))])
+        seg = "".join(lines[first - 1 : stmt.end_lineno or stmt.lineno])
+        for name in _bound_names(stmt):
+            out.setdefault(name, []).append(seg)
+    return out
+
+
+def _changed_names(old: str, new: str) -> set[str]:
+    """Module-level names whose statements a rewrite changed or removed."""
+    a, b = _segments(old), _segments(new)
+    return {n for n in set(a) | set(b) if a.get(n) != b.get(n)}
+
+
+def _plain_class(stmt: Optional[ast.stmt]) -> bool:
+    """A class whose subclasses inherit no tests and no declarations from it."""
+    if not isinstance(stmt, ast.ClassDef) or stmt.decorator_list:
+        return False
+    if any(_dotted(b) != "object" for b in stmt.bases) or stmt.keywords:
+        return False
+    for node in ast.walk(stmt):
+        if node is stmt:
+            continue
+        if isinstance(node, ast.ClassDef):
+            return False
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            return False
+        if isinstance(node, ast.ImportFrom) or (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and (node.id == "pytestmark" or node.id.startswith(("test", "Test")))
+        ):
+            return False
+    return True
+
+
+class _Index:
+    """Every scanned Python file's imports and base classes, resolved to the
+    other scanned files they name: who imports or subclasses what.
+
+    ``from m import C [as D]``, ``import m [as n]`` + ``n.C`` and relative
+    imports resolve by module path (a scanned file whose module path ends
+    with the imported one, or the other way round); a base class named by
+    nothing the file imports or defines falls back to every scanned file
+    defining a module-level class of that name."""
+
+    def __init__(self, texts: Mapping[str, str]) -> None:
+        self.parts: dict[str, list[str]] = {}
+        self.trees: dict[str, ast.Module] = {}
+        for rel, text in texts.items():
+            try:
+                self.trees[rel] = ast.parse(text)
+            except (SyntaxError, ValueError):
+                continue
+            self.parts[rel] = _module_parts(rel)
+        self.by_last: dict[str, list[str]] = {}
+        for rel, parts in self.parts.items():
+            if parts:
+                self.by_last.setdefault(parts[-1], []).append(rel)
+        self.top: dict[str, dict[str, ast.stmt]] = {
+            rel: {name: stmt for stmt in tree.body for name in _bound_names(stmt)} for rel, tree in self.trees.items()
+        }
+        self.refs: dict[str, dict[str, set[str]]] = {}  # importer -> imported file -> names used ("*": any)
+        self.binds: dict[str, dict[str, list[tuple[str, str]]]] = {}  # importer -> local name -> (file, name)
+        # file -> (line, class, base spelling, [(file, name)]) for bases in other scanned files
+        self.bases: dict[str, list[tuple[int, str, str, list[tuple[str, str]]]]] = {}
+        for rel in self.trees:
+            self._scan(rel)
+        self.importers: dict[str, dict[str, set[str]]] = {}  # imported file -> importer -> names
+        for g, refs in self.refs.items():
+            for f, names in refs.items():
+                self.importers.setdefault(f, {})[g] = names
+
+    def resolve(self, mod: list[str], rel: str, level: int) -> list[str]:
+        if level:
+            parts = self.parts.get(rel, [])
+            pkg = parts if rel.endswith("__init__.py") else parts[:-1]
+            if level - 1 > len(pkg):
+                return []
+            want = pkg[: len(pkg) - (level - 1)] + mod
+            return [r for r in self.by_last.get(want[-1], []) if self.parts[r] == want] if want else []
+        if not mod:
+            return []
+        out = []
+        for r in self.by_last.get(mod[-1], []):
+            p = self.parts[r]
+            if p[-len(mod) :] == mod or mod[-len(p) :] == p:
+                out.append(r)
+        return out
+
+    def _scan(self, rel: str) -> None:
+        tree = self.trees[rel]
+        refs: dict[str, set[str]] = {}
+        binds: dict[str, list[tuple[str, str]]] = {}
+        aliases: dict[str, list[str]] = {}  # local module spelling -> files
+
+        def add(f: str, name: str) -> None:
+            if f != rel:
+                refs.setdefault(f, set()).add(name)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    mod = a.name.split(".")
+                    if a.asname:
+                        aliases[a.asname] = self.resolve(mod, rel, 0)
+                    else:
+                        for i in range(1, len(mod) + 1):
+                            aliases[".".join(mod[:i])] = self.resolve(mod[:i], rel, 0)
+            elif isinstance(node, ast.ImportFrom):
+                base = node.module.split(".") if node.module else []
+                files = self.resolve(base, rel, node.level)
+                for a in node.names:
+                    if a.name == "*":
+                        for f in files:
+                            add(f, "*")
+                        continue
+                    for f in files:
+                        add(f, a.name)
+                    binds.setdefault(a.asname or a.name, []).extend((f, a.name) for f in files if f != rel)
+                    sub = self.resolve(base + [a.name], rel, node.level)
+                    if sub:
+                        aliases[a.asname or a.name] = sub
+        values = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                head, _, attr = _dotted(node).rpartition(".")
+                for f in aliases.get(head, ()):
+                    add(f, attr)
+            elif isinstance(node, ast.Name) and node.id in aliases and id(node) not in values:
+                for f in aliases[node.id]:
+                    add(f, "*")  # the module itself is passed around
+
+        local = {
+            n.name if not isinstance(n, ast.Name) else n.id
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            or (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store))
+        }
+        bases = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for b in node.bases:
+                spelled = _dotted(b.value if isinstance(b, ast.Subscript) else b)
+                targets = self._base(rel, spelled, binds, aliases, local) if spelled else []
+                for f, name in targets:
+                    add(f, name)
+                if targets:
+                    bases.append((node.lineno, node.name, spelled, targets))
+        self.refs[rel] = refs
+        self.binds[rel] = binds
+        self.bases[rel] = bases
+
+    def _base(
+        self,
+        rel: str,
+        spelled: str,
+        binds: Mapping[str, list[tuple[str, str]]],
+        aliases: Mapping[str, list[str]],
+        local: set[str],
+    ) -> list[tuple[str, str]]:
+        parts = spelled.split(".")
+        if parts[0] in binds or parts[0] in aliases:
+            out = list(binds.get(parts[0], ()))
+            for i in range(len(parts) - 1, 0, -1):
+                head = ".".join(parts[:i])
+                if head in aliases:
+                    out.extend((f, parts[i]) for f in aliases[head])
+                    break
+            return out
+        if parts[0] in local:
+            return []  # this file's own class: see TestFile._inheritance
+        return [
+            (f, parts[-1]) for f, top in self.top.items() if f != rel and isinstance(top.get(parts[-1]), ast.ClassDef)
+        ]
+
+    def inherited(self, rel: str) -> list[tuple[int, str, str]]:
+        """``(line, class, why)`` for the classes of ``rel`` that inherit from
+        a class of another scanned file with tests or declarations."""
+        out = []
+        for line, name, spelled, targets in self.bases.get(rel, []):
+            where = sorted({f for f, n in targets if not _plain_class(self.top.get(f, {}).get(n))})
+            if where:
+                out.append(
+                    (
+                        line,
+                        name,
+                        f"line {line}: class {name} inherits from {spelled} ({', '.join(where)}), which has tests "
+                        "or declarations; the codemod does not follow inheritance across modules, migrate this "
+                        "file by hand",
+                    )
+                )
+        return out
+
+    def depends(self) -> dict[str, set[str]]:
+        """Files that import tests or classes from each other (both ways)."""
+        out: dict[str, set[str]] = {}
+        for g, refs in self.refs.items():
+            for f, names in refs.items():
+                top = self.top.get(f, {})
+                if any(
+                    n == "*" or n not in top or isinstance(top[n], ast.ClassDef) or n.startswith(("test", "Test"))
+                    for n in names
+                ):
+                    out.setdefault(g, set()).add(f)
+                    out.setdefault(f, set()).add(g)
+        return out
+
+
+def _involve(result: ApplyResult, index: _Index, changed: Mapping[str, set[str]]) -> None:
+    """Refuse every file whose changed module-level names another scanned
+    file imports or subclasses, and that file too: pytest collects what it
+    imports, and its subclasses inherit tests and markers, where the
+    codemod's per-file view does not reach. Names a file re-exports
+    propagate."""
+    names = {f: set(n) for f, n in changed.items()}
+    reasons: dict[str, list[str]] = {}
+    work = sorted(names)
+    seen: set[tuple[str, str]] = set()
+    while work:
+        f = work.pop()
+        for g, used in sorted(index.importers.get(f, {}).items()):
+            hit = sorted(names[f]) if "*" in used else sorted(used & names[f])
+            if not hit or (g, f) in seen:
+                continue
+            seen.add((g, f))
+            what = ", ".join(hit)
+            reasons.setdefault(f, []).append(
+                f"{g} imports or subclasses {what} from this file, whose declarations would change; pytest "
+                "collects imported tests and subclasses inherit them, which the codemod does not follow "
+                "across modules: migrate these files by hand"
+            )
+            reasons.setdefault(g, []).append(
+                f"imports or subclasses {what} from {f}, whose declarations would change: the tests collected "
+                "here would change unseen; migrate these files by hand"
+            )
+            again = {local for local, src in index.binds.get(g, {}).items() if any(s == f and n in hit for s, n in src)}
+            if "*" in used:
+                again |= set(hit)
+            if again - names.get(g, set()):
+                names.setdefault(g, set()).update(again)
+                work.append(g)
+    if not reasons:
+        return
+    by_path = {f.path: f for f in result.files}
+    for path, why in reasons.items():
+        fr = by_path.get(path)
+        if fr is None:
+            fr = by_path[path] = FileResult(path, "refused")
+            result.files.append(fr)
+        fr.status = "refused"
+        fr.reasons.extend(r for r in why if r not in fr.reasons)
+    result.files.sort(key=lambda f: f.path)
+
+
 def apply_tags(
     decided: Mapping[CaseKey, str],
     root: str,
@@ -1009,21 +1361,38 @@ def apply_tags(
 ) -> ApplyResult:
     """Rewrite the Python tests under ``root`` per the worksheet's decisions
     (``CaseKey -> id | "none" | "?"``). Nothing is written; the caller writes
-    each changed file's ``new_text``."""
+    the files :meth:`ApplyResult.to_write` returns.
+
+    Every Python file under ``root`` (not only those below ``only``) is
+    indexed for what it imports and subclasses: a file whose changed classes
+    or tests another file imports or subclasses is refused, with that file.
+    Each decided case's attribution is then re-derived from the rewritten
+    sources and compared with the worksheet (``mismatched``)."""
     result = ApplyResult()
     only = list(only)
     scanned = python_files(root, only)
     files: dict[str, TestFile] = {}
     unreadable: dict[str, str] = {}
     newline: dict[str, str] = {}
+    texts: dict[str, str] = {}
+
+    def read(rel: str) -> Optional[str]:
+        if rel not in texts and rel not in unreadable:
+            try:
+                texts[rel] = _read(os.path.join(root, rel))
+            except (OSError, UnicodeDecodeError) as exc:
+                unreadable[rel] = str(exc)
+        return texts.get(rel)
+
+    everything = python_files(root)
+    index = _Index({rel: text for rel in everything for text in [read(rel)] if text is not None})
+    result.depends = index.depends()
 
     def parse(rel: str, require_markers: bool) -> Optional[TestFile]:
-        if rel in files or rel in unreadable:
-            return files.get(rel)
-        try:
-            text = _read(os.path.join(root, rel))
-        except (OSError, UnicodeDecodeError) as exc:
-            unreadable[rel] = str(exc)
+        if rel in files:
+            return files[rel]
+        text = read(rel)
+        if text is None:
             return None
         if require_markers and "mark" not in text and "verifies" not in text:
             return None
@@ -1032,11 +1401,16 @@ def apply_tags(
             newline[rel] = "\r\n"
             text = text.replace("\r\n", "\n")
         try:
-            files[rel] = TestFile(text, rel)
+            tf = TestFile(text, rel)
         except SyntaxError as exc:
             unreadable[rel] = f"syntax error: {exc}"
             return None
-        return files[rel]
+        for line, name, why in index.inherited(rel):
+            for chain in tf.classes.values():
+                if chain[-1].lineno == line and chain[-1].name == name:
+                    tf.mark_inherited(chain[-1], why)
+        files[rel] = tf
+        return tf
 
     for rel in scanned:
         parse(rel, require_markers=True)
@@ -1093,6 +1467,7 @@ def apply_tags(
                     "generated?): the declarations around it are left alone; migrate this file by hand"
                 )
                 files[rel].mark_unseen(classes, why)
+                result.unmatched_files.add(rel)
                 result.unmatched.append(
                     (key, f"no {name} defined in {rel} (inherited from another module, or generated?)")
                 )
@@ -1101,7 +1476,8 @@ def apply_tags(
         targets.setdefault(rel, {}).setdefault(test.qualname, set()).add(decision)
         keys.setdefault((rel, test.qualname), []).append(key)
 
-    for rel in sorted(set(files) | set(unreadable)):
+    rewritten: dict[str, str] = {}  # LF text of the changed files
+    for rel in sorted(set(files) | (set(unreadable) & set(scanned))):
         if rel in unreadable:
             if rel in targets:
                 result.files.append(FileResult(rel, "refused", [unreadable[rel]]))
@@ -1160,9 +1536,48 @@ def apply_tags(
             result.files.append(FileResult(rel, "refused", [str(exc)]))
             continue
         status = "changed" if new_text != tf.text else "unchanged"
+        if status == "changed":
+            rewritten[rel] = new_text
         old_text = tf.text
         if newline.get(rel) == "\r\n":
             old_text, new_text = old_text.replace("\n", "\r\n"), new_text.replace("\n", "\r\n")
         result.files.append(FileResult(rel, status, [], changes, old_text, new_text))
     result.untagged = sorted(set(result.untagged))
+    _involve(result, index, {rel: _changed_names(files[rel].text, text) for rel, text in rewritten.items()})
+    _recheck(result, decided, keys, {f.path: rewritten[f.path] for f in result.changed}, unassigned)
     return result
+
+
+def _recheck(
+    result: ApplyResult,
+    decided: Mapping[CaseKey, str],
+    keys: Mapping[tuple[str, str], list[CaseKey]],
+    rewritten: Mapping[str, str],
+    unassigned: str,
+) -> None:
+    """Re-derive each decided case's attribution from the rewritten sources,
+    with the same static resolver, and compare it with the worksheet."""
+    untagged = set(result.untagged)
+    for rel, text in sorted(rewritten.items()):
+        try:
+            tf = TestFile(text, rel)
+            traces = {t.qualname: tf.trace(t) for t in tf.tests}
+        except (SyntaxError, Unsupported) as exc:
+            for (path, _), ks in keys.items():
+                if path == rel:
+                    result.mismatched.extend((k, f"{rel} no longer reads: {exc}") for k in ks)
+            continue
+        for (path, qualname), ks in sorted(keys.items()):
+            if path != rel:
+                continue
+            for key in ks:
+                decision = decided[key]
+                if key in untagged or (decision == "?" and unassigned != "drop"):
+                    continue
+                want: tuple[str, ...] = () if decision in ("none", "?") else (decision,)
+                got = traces[qualname][0] if qualname in traces else None
+                if got != want and not (decision == "?" and got is not None and len(got) < 2):
+                    shown = "no such test" if got is None else ", ".join(got) or "no id"
+                    result.mismatched.append(
+                        (key, f"the rewritten {rel} gives {shown}, the worksheet {', '.join(want) or 'none'}")
+                    )

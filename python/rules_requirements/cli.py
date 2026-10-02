@@ -403,6 +403,8 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     res = tag_codemod.apply_tags(
         migrate.decisions(doc), root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
     )
+    writes = {f.path for f in res.to_write(partial=args.partial)}
+    held = [f for f in res.changed if f.path not in writes]
     for f in res.changed:
         if args.dry_run:
             sys.stdout.writelines(
@@ -413,10 +415,13 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
                     f"b/{f.path}",
                 )
             )
-        else:
+        elif f.path in writes:
             with open(os.path.join(root, f.path), "w", encoding="utf-8", newline="") as fh:
                 fh.write(f.new_text)
-        print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)
+        if f.path in writes:
+            print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)
+        else:
+            print(f"{'would hold back' if args.dry_run else 'held back'} {f.path} (left unchanged):", file=sys.stderr)
         for change in f.changes:
             print(f"  {change}", file=sys.stderr)
     for f in res.refused:
@@ -451,8 +456,27 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         for e in edits:
             print(f"  {e['requirement']}: {e['action']} {e['target']} ({e['reason']})", file=sys.stderr)
     _warn_no_evidence(all_edits)
-    print(f"{len(res.changed)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
-    return 1 if res.refused or res.unmatched else 0
+    if res.mismatched:
+        print(
+            f"{len(res.mismatched)} decided case(s) would not get their owner from the rewritten sources; "
+            "nothing is written:",
+            file=sys.stderr,
+        )
+        for key, why in res.mismatched:
+            print(f"  {key}: {why}", file=sys.stderr)
+    elif held and args.partial:
+        print(
+            f"{len(held)} rewritten file(s) import from or are imported by a refused file, and are held back",
+            file=sys.stderr,
+        )
+    elif held:
+        print(
+            f"nothing written: {len(held)} rewritten file(s) are held back because of the refusals above; fix "
+            "those, or pass --partial to write the files that do not depend on them",
+            file=sys.stderr,
+        )
+    print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
+    return 1 if res.blocked else 0
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
@@ -637,6 +661,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="a multi-id test without a decision: leave its file unchanged (refuse) or drop its tags",
     )
     ma.add_argument("--line-length", type=int, default=88, help="black's line length, for lines that need wrapping")
+    ma.add_argument(
+        "--partial",
+        action="store_true",
+        help="when files are refused, still write the rewritten files that neither import from nor are imported "
+        "by a refused file (default: write nothing)",
+    )
     ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
     ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
     ma.set_defaults(func=cmd_migrate_apply)

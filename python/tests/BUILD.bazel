@@ -11,6 +11,7 @@ rr_py_test(
         "//:schema/rules_requirements.schema.json",
         "//:schema/worksheet.schema.json",
     ] + glob(["fixtures/**"]),
+    env = {"RR_REQUIRE_BLACK": "1"},  # black-layout tests fail, not skip, without black
     imports = ["."],  # tests import their shared helpers from conftest
     deps = [
         requirement("black"),

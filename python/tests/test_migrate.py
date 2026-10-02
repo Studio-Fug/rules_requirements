@@ -201,6 +201,8 @@ def _one_group(owner, case_owner=_UNSET, counts=("REQ-4", "REQ-5")):
         (7, "7 is not an id; quote ids"),  # YAML read a number
         (True, "is not an id"),
         (None, "empty; write '?'"),  # `owner:` with nothing after it
+        ("", "empty; write '?'"),  # `owner: ''`
+        ("  ", "empty; write '?'"),
     ],
 )
 def test_owner_must_choose_among_the_counted_ids(owner, message):

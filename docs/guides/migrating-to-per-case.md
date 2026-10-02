@@ -110,7 +110,7 @@ groups:
 | `groups[].counts_toward` | The entities the cases count toward today. Only requirements, user needs and mitigations count; tags naming risks, test methods or unknown ids are listed per case as `ignored_tags`. |
 | `groups[].tags`, `target_claims` | Whether those ids come from the tests' tags, from `verified_by`, or both. |
 | `proposed`, `reason` | A hint where the model or the evidence determines an owner. A case tagged with a requirement and its refinement proposes the refinement, because the parent's verdict rolls up from it. A case with its own single tag inside a target claimed whole by another requirement proposes the tag. Everything else is left open. A proposal is never a decision. |
-| `owner` | The decision: one of the ids the case counts toward, `none` (the case verifies none of them; any case, so `None` works too) or `'?'` (still open; quote it, since a bare `?` is not valid YAML). A group's owner applies to each case without an `owner` of its own. A decision chooses among the existing claims: an id the case does not count toward is rejected, as are numbers, booleans and empty values. |
+| `owner` | The decision: one of the ids the case counts toward, `none` (the case verifies none of them; any case, so `None` works too) or `'?'` (still open; quote it, since a bare `?` is not valid YAML). A group's owner applies to each case without an `owner` of its own. A decision chooses among the existing claims: an id the case does not count toward is rejected, as are numbers, booleans and empty values (`owner:` with nothing after it, or `''`). |
 | `target_scope` | Whole-target results, such as an `exit-status` case, that carry several ids today. There is nothing to decide here: from v0.3.0 they carry no ids. |
 
 An `--evidence` path that holds no evidence file is reported as a warning
@@ -203,7 +203,9 @@ alone, and new lines are laid out the way black lays them out, so running
 black (or `ruff format`) afterwards changes nothing. Pass your formatter's
 line length with `--line-length` (default 88). Before writing a file, the
 codemod parses it again and checks that every test's ids, level and artifact
-are exactly the intended ones.
+are exactly the intended ones. Once every file is rewritten in memory, it
+derives each decided case's ids again from the rewritten sources and compares
+them with the worksheet; if any differs, nothing is written.
 
 A file is **refused** and left unchanged, never half-migrated, when:
 
@@ -227,11 +229,22 @@ A file is **refused** and left unchanged, never half-migrated, when:
   `pytest.param(...)`, or a `pytestmark` that shares its line with other code.
 - one scope declares two different levels.
 - a change would reach a test the codemod cannot see: a test class that
-  inherits tests or declarations from another class in the file, a test
-  defined inside an `if`, `try`, `with` or loop block, or a decided case of
+  inherits tests or declarations from another class, in the file or in
+  another module; a test defined inside an `if`, `try`, `with` or loop block;
+  a test bound by an assignment or an import rather than a `def`
+  (`test_b = test_a`, `from helpers import test_shared`, a class attribute,
+  a star import), whether or not it is on the worksheet; or a decided case of
   the module that the file does not define (inherited from another module,
   or generated). Nothing that reaches such a test is changed; migrate the file
   by hand.
+- another file imports or subclasses a class or test whose declarations would
+  change. pytest collects an imported test class or function again in the
+  importing module, and a subclass inherits its base's tests and markers, so
+  the change would reach tests in that file unseen. Both files are refused.
+  The codemod indexes every Python file under `--root` for this, also those
+  outside `--only`: `from m import C` (with or without `as`), `import m` with
+  `m.C`, relative imports and star imports, and a base class it cannot trace
+  to an import by its name.
 - a multi-line declaration it would rewrite has comments inside it (they
   would be lost).
 
@@ -253,8 +266,15 @@ The command also lists, without changing anything:
 Markers added by a `conftest.py` (`item.add_marker`) are invisible to the
 codemod; check them by hand.
 
+It is all or nothing: when a file is refused or a decided case's test was
+not found in its module, nothing is written, and the files it would have
+rewritten are listed as held back. Fix the refusals, or pass `--partial` to
+write the rewritten files that neither import from nor are imported by a
+refused file (or one holding a decided case it could not find).
+
 It exits 0 when every file it had to change was rewritten, 1 when a file was
-refused or a decided case's test was not found in its module, and 2 when the
+refused or a decided case's test was not found in its module (with or without
+`--partial`), and 2 when the
 worksheet is unreadable or an owner is not one of the ids its case counts
 toward (or, with a model, not a requirement, user need or mitigation of it).
 Without `--model` it checks the owners against the model named in the

@@ -22,16 +22,27 @@ def src(text):
     return textwrap.dedent(text).lstrip()
 
 
-try:  # in the Bazel dev pip hub; optional in a plain checkout
+try:  # in the Bazel dev pip hub and the `test` extra; optional in a plain checkout
     import black
 except ImportError:  # pragma: no cover
     black = None
 
 
+def need_black():
+    """black, or skip — except where CI sets RR_REQUIRE_BLACK=1: there a
+    missing black fails the test instead of silently skipping it."""
+    if black is None:
+        if os.environ.get("RR_REQUIRE_BLACK") == "1":
+            pytest.fail("black is not importable, and RR_REQUIRE_BLACK=1 requires it")
+        pytest.skip("black is not installed")
+    return black
+
+
 def assert_black_stable(text, line_length=88):
     """Formatting the codemod's output with black changes nothing."""
-    if black is not None:
-        assert black.format_str(text, mode=black.Mode(line_length=line_length)) == text
+    if black is not None or os.environ.get("RR_REQUIRE_BLACK") == "1":
+        fmt = need_black()
+        assert fmt.format_str(text, mode=fmt.Mode(line_length=line_length)) == text
 
 
 def traces(text):
@@ -79,7 +90,7 @@ def test_fixture_repository(tmp_path, monkeypatch):
 
 
 def test_fixture_output_is_black_stable():
-    pytest.importorskip("black")
+    need_black()
     for name in CHANGED:
         with open(os.path.join(EXPECTED, "app", "tests", name), encoding="utf-8") as fh:
             assert_black_stable(fh.read())
@@ -718,7 +729,7 @@ def test_rewrite_lays_out_like_black_across_lengths(shape, line_length):
     gives exactly what black makes of the same source with the id deleted by
     hand — so black afterwards changes nothing, and the layout is black's
     own (hugged call arguments, exploded collections, magic commas kept)."""
-    pytest.importorskip("black")
+    need_black()
     mode = black.Mode(line_length=line_length)
     wrong = []
     for n in range(1, 90, 2):
@@ -748,3 +759,319 @@ def test_the_internal_check_refuses_a_wrong_rewrite(monkeypatch):
     )
     with pytest.raises(Unsupported, match="set of tests"):
         rewrite(TestFile(text), {"test_a": "A-1"})
+
+
+# --------------------------------------------------------------------------- #
+# Across modules: importers and subclasses in other files                     #
+# --------------------------------------------------------------------------- #
+
+_BASE = """
+import pytest
+
+
+@pytest.mark.rr("A", "B")
+class TestBase:
+    def test_x(self):
+        assert True
+"""
+
+_XMOD_SHEET = """
+schema: rules_requirements/attribution-worksheet/v1
+groups:
+- target: //pkg:t
+  group: base
+  counts_toward: [A, B]
+  owner: A
+  cases:
+  - path: pkg.test_base.TestBase::test_x
+- target: //pkg:t
+  group: sub
+  counts_toward: [A, B]
+  owner: B
+  cases:
+  - path: pkg.test_other.TestSub::test_x
+  - path: pkg.test_other.TestSub::test_y
+"""
+
+
+def _xmod(tmp_path, other="from pkg.test_base import TestBase\n\n\nclass TestSub(TestBase):\n"):
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _BASE)
+    (tmp_path / "pkg" / "test_other.py").write_text(other + "    def test_y(self):\n        assert True\n")
+    return {rel: (tmp_path / rel).read_bytes() for rel in ("pkg/test_base.py", "pkg/test_other.py")}
+
+
+def test_cross_module_inheritance_writes_nothing(tmp_path, capsys):
+    """The verifier's repro: narrowing TestBase's marker in test_base.py to A
+    would give the subclass in test_other.py A as well, against the
+    worksheet. Both files are refused, nothing is written, exit 1."""
+    from rules_requirements import cli
+
+    before = _xmod(tmp_path)
+    assert _runtime_traces(tmp_path, "pkg/test_other.py")["TestSub::test_x"] == ("A", "B")
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(_XMOD_SHEET, encoding="utf-8")
+    rc = cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "refused pkg/test_base.py" in err and "pkg/test_other.py imports or subclasses TestBase" in err
+    assert "refused pkg/test_other.py" in err and "class TestSub inherits from TestBase (pkg/test_base.py)" in err
+    assert {rel: (tmp_path / rel).read_bytes() for rel in before} == before
+
+
+def test_partial_writes_only_files_without_a_refused_dependency(tmp_path, capsys):
+    from rules_requirements import cli
+
+    before = _xmod(tmp_path)
+    unrelated = _repo(
+        tmp_path,
+        "pkg/test_unrelated.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_u():\n    pass\n',
+    )
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        _XMOD_SHEET
+        + "- target: //pkg:t\n  group: u\n  counts_toward: [A, B]\n  owner: B\n"
+        + "  cases:\n  - path: pkg.test_unrelated::test_u\n",
+        encoding="utf-8",
+    )
+    argv = ["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)]
+    assert cli.main(argv) == 1  # all or nothing by default
+    assert "nothing written" in capsys.readouterr().err
+    assert '"A", "B"' in unrelated.read_text(encoding="utf-8")
+    assert cli.main([*argv, "--partial"]) == 1
+    err = capsys.readouterr().err
+    assert "rewrote pkg/test_unrelated.py" in err and "1 file(s) rewritten, 2 refused" in err
+    assert 'pytestmark = pytest.mark.rr("B")' in unrelated.read_text(encoding="utf-8")
+    assert {rel: (tmp_path / rel).read_bytes() for rel in before} == before
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "from pkg.test_base import TestBase\n\n\nclass TestSub(TestBase):\n",
+        "from pkg.test_base import TestBase as Base\n\n\nclass TestSub(Base):\n",
+        "import pkg.test_base\n\n\nclass TestSub(pkg.test_base.TestBase):\n",
+        "import pkg.test_base as tb\n\n\nclass TestSub(tb.TestBase):\n",
+        "from . import test_base\n\n\nclass TestSub(test_base.TestBase):\n",
+        "from .test_base import TestBase\n\n\nclass TestSub(TestBase):\n",
+        "from elsewhere import *  # noqa\n\n\nclass TestSub(TestBase):\n",  # by name
+        "from pkg.test_base import *  # noqa\n\n\nclass TestSub:\n",
+        "from pkg.test_base import TestBase  # collected here too\n\n\nclass TestSub:\n",
+    ],
+)
+def test_importers_and_subclasses_in_other_modules_are_refused(tmp_path, other):
+    """Only test_base.py has a decision; whatever way test_other.py reaches
+    TestBase, its tests would change unseen, so neither file is rewritten."""
+    _xmod(tmp_path, other)
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_base.TestBase::test_x"): "A"}, str(tmp_path))
+    assert sorted(f.path for f in res.refused) == ["pkg/test_base.py", "pkg/test_other.py"], res.files
+    assert res.changed == [] and res.to_write() == [] and res.to_write(partial=True) == []
+
+
+def test_an_import_of_an_unchanged_name_does_not_refuse(tmp_path):
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/helpers.py", "def make():\n    return 1\n")
+    _repo(
+        tmp_path,
+        "pkg/test_a.py",
+        'import pytest\nfrom pkg.helpers import make\n\npytestmark = pytest.mark.rr("A", "B")\n\n\n'
+        "def test_a():\n    assert make()\n",
+    )
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_a::test_a"): "A"}, str(tmp_path))
+    assert [f.path for f in res.to_write()] == ["pkg/test_a.py"] and not res.blocked
+
+
+def test_rewritten_sources_are_rechecked_against_the_worksheet(tmp_path, monkeypatch, capsys):
+    """Whatever produced a rewrite, the decided cases' attribution is
+    re-derived from the rewritten sources; a difference writes nothing."""
+    from rules_requirements import cli
+
+    path = _repo(
+        tmp_path,
+        "pkg/test_a.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n',
+    )
+    before = path.read_bytes()
+    monkeypatch.setattr(
+        tag_codemod, "rewrite", lambda tf, owners, line_length=88: (tf.text.replace('"A", "B"', '"B"'), ["x"])
+    )
+    decided = {CaseKey("//pkg:t", "pkg.test_a::test_a"): "A"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert [str(k) for k, _ in res.mismatched] == ["//pkg:t#pkg.test_a::test_a"]
+    assert "gives B, the worksheet A" in res.mismatched[0][1]
+    assert res.to_write() == [] and res.to_write(partial=True) == []
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: a\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_a::test_a\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path), "--partial"]) == 1
+    assert "would not get their owner" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- #
+# Tests bound by an assignment or an import                                   #
+# --------------------------------------------------------------------------- #
+
+_HIDDEN = {
+    "alias": (
+        """
+        import pytest
+
+        pytestmark = pytest.mark.rr("A", "B")
+
+
+        def test_a():
+            pass
+
+
+        test_b = test_a
+        """,
+        "test_b",
+        "test_b is bound by an assignment",
+    ),
+    "import": (
+        """
+        import pytest
+
+        from pkg.helpers import test_shared  # noqa: F401
+
+        pytestmark = pytest.mark.rr("A", "B")
+
+
+        def test_a():
+            pass
+        """,
+        "test_shared",
+        "test_shared is bound by an import",
+    ),
+    "class-attribute": (
+        """
+        import pytest
+
+
+        class TestK:
+            pytestmark = [pytest.mark.rr("A", "B")]
+
+            def test_a(self):
+                pass
+
+            def helper(self):
+                pass
+
+            test_b = helper
+        """,
+        "TestK::test_b",
+        "test_b is bound by an assignment",
+    ),
+    "aliased-decorator": (
+        """
+        import pytest
+
+
+        @pytest.mark.rr("A", "B")
+        def test_a():
+            pass
+
+
+        test_b = test_a
+        """,
+        "test_b",
+        "test_b is bound by an assignment",
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_HIDDEN))
+def test_tests_bound_by_assignment_or_import_are_refused(tmp_path, shape):
+    """Not in the worksheet (deselected, say), such a test still carries the
+    scope's ids at runtime: narrowing the scope would change it unseen."""
+    text, hidden, message = _HIDDEN[shape]
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/helpers.py", "def test_shared():\n    pass\n")
+    path = _repo(tmp_path, "pkg/test_h.py", text)
+    before = path.read_bytes()
+    assert _runtime_traces(tmp_path, "pkg/test_h.py")[hidden] == ("A", "B")
+    qual = "pkg.test_h.TestK::test_a" if "TestK" in hidden else "pkg.test_h::test_a"
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", qual): "A"}, str(tmp_path))
+    (f,) = res.refused
+    assert f.path == "pkg/test_h.py" and message in f.reasons[0], f.reasons
+    assert res.to_write(partial=True) == [] and path.read_bytes() == before
+
+
+# --------------------------------------------------------------------------- #
+# Matching, exit codes, layout and the backstops                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_longest_module_match_names_the_case(tmp_path):
+    """pkg/__init__.py (pkg) and pkg/test_x.py (pkg.test_x) both match the
+    case path pkg.test_x::test_a; the longer module path is the case's."""
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(
+        tmp_path,
+        "pkg/test_x.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n',
+    )
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_x::test_a"): "A"}, str(tmp_path))
+    assert [f.path for f in res.changed] == ["pkg/test_x.py"] and res.unmatched == []
+
+
+def test_unmatched_cases_alone_exit_1(tmp_path, capsys):
+    from rules_requirements import cli
+
+    _repo(tmp_path, "pkg/test_y.py", 'import pytest\n\npytestmark = pytest.mark.rr("A")\n\n\ndef test_a():\n    pass\n')
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: y\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_y::test_gone\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1 and "0 file(s) rewritten, 0 refused" in err and "pkg.test_y::test_gone" in err
+
+
+def test_call_arguments_hug_on_one_indented_line():
+    """Without black installed too: a declaration too long for one line, whose
+    arguments fit on one indented line, hugs them there (as black does)."""
+    text = 'import pytest\n\n\n@pytest.mark.rr("A-1", "B-2", level="hardware-in-the-loop")\ndef test_a():\n    pass\n'
+    new, _ = rewrite(TestFile(text), {"test_a": "A-1"}, line_length=48)
+    assert new == (
+        'import pytest\n\n\n@pytest.mark.rr(\n    "A-1", level="hardware-in-the-loop"\n)\ndef test_a():\n    pass\n'
+    )
+    assert_black_stable(new, line_length=48)
+
+
+def test_rewrite_refuses_a_test_of_a_distrusted_class():
+    """rewrite() itself refuses a decided test whose class may inherit
+    declarations, even when apply_tags' own screening is bypassed."""
+    text = src(
+        """
+        import pytest
+        from pkg.base import Base
+
+
+        class TestImpl(Base):
+            @pytest.mark.rr("A-1", "B-2")
+            def test_own(self):
+                pass
+        """
+    )
+    assert rewrite(TestFile(text), {"TestImpl.test_own": "A-1"})[1]
+    tf = TestFile(text)
+    tf.mark_unseen(["TestImpl"], "TestImpl may inherit declarations")
+    with pytest.raises(Unsupported, match="may inherit declarations"):
+        rewrite(tf, {"TestImpl.test_own": "A-1"})
+
+
+def test_rewrite_refuses_to_add_a_declaration_to_a_blind_test():
+    text = 'import pytest\n\npytestmark = pytest.mark.rr("A-1", "B-2")\n\n\ndef test_a():\n    pass\n\n\ndef test_b():\n    pass\n'
+    assert rewrite(TestFile(text), {"test_a": "A-1", "test_b": "B-2"})[1]
+    tf = TestFile(text)
+    tf.scope_blind[id(tf.find([], "test_a").node)] = "test_a is reached unseen"
+    with pytest.raises(Unsupported, match="reached unseen"):
+        rewrite(tf, {"test_a": "A-1", "test_b": "B-2"})

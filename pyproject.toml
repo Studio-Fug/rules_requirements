@@ -19,7 +19,7 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-test = ["pytest>=7", "pytest-cov", "jsonschema"]
+test = ["pytest>=7", "pytest-cov", "jsonschema", "black"]
 # LLM-backed agent workflows in `rr serve` (optional; everything else is stdlib).
 agents = ["anthropic>=1"]
 

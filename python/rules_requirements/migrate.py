@@ -575,7 +575,7 @@ def _check_owner(at: str, holder: Mapping[str, Any], problems: list[str]) -> boo
     if isinstance(raw, (list, tuple)) or (isinstance(raw, str) and any(ch in raw.strip() for ch in ", \t")):
         problems.append(f"{at}: {raw!r} names more than one id; a test case verifies at most one")
         return False
-    if raw is None:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
         problems.append(f"{at}: empty; write '?' (quoted) to leave it open, or none")
         return False
     if not isinstance(raw, str):

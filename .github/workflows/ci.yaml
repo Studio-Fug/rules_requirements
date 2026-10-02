@@ -36,6 +36,9 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    env:
+      # The codemod's black-layout tests fail, rather than skip, without black.
+      RR_REQUIRE_BLACK: "1"
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
