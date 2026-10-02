@@ -27,6 +27,7 @@ TEST(Parser, RejectsEmpty) { ... }
 | `@pytest.mark.rr(...)`, `@pytest.mark.requirements(...)` | verifies |
 | `rr::verifies!(...)` (Rust) | verifies |
 | `RR_VERIFIES(...)` (googletest) | verifies |
+| `RR_CASE(name, ID)` (`rr_case.h`) | verifies |
 
 The language hooks ({doc}`hooks`) double as annotations, so a tagged test is
 both evidence (at run time) and a verification link (in the source).
@@ -67,8 +68,9 @@ next to the location (`thermostat/controller.py:27 (class Controller)`):
 Recognised definitions are `def`, `class`, `fn`, `struct`, `enum`, `trait`,
 `impl`, `func`, `function`, `interface`, `type`, `module`, `mod` and
 `namespace` (with common modifiers such as `pub`, `async`, `export`, `static`),
-and googletest's `TEST`, `TEST_F`, `TEST_P` and `TYPED_TEST`, which bind as
-`Suite.Name`.
+googletest's `TEST`, `TEST_F`, `TEST_P` and `TYPED_TEST`, which bind as
+`Suite.Name`, and `RR_CASE(name)`, which binds as `name` (a tagged `RR_CASE`
+binds to itself).
 
 ## Legacy conventions
 
