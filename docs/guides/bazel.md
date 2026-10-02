@@ -9,6 +9,7 @@ load(
     "rr_evidence",
     "rr_golden_test",
     "rr_model",
+    "rr_node_test",
     "rr_py_test",
     "rr_report",
     "rr_rust_test",
@@ -25,6 +26,7 @@ the module provides these targets:
 | `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
 | `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
+| `@rules_requirements//js:verifies.cjs` | The node:test `verifies(t, id)` helper (dependency-free CommonJS). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
 
 Under `bazel run`, the CLI resolves relative paths against the directory you ran
@@ -189,6 +191,38 @@ It understands `--nocapture` output (the result on a line of its own). Call
 `rr::verifies!` on the test's own thread: traces from spawned threads or async
 runtimes cannot be attributed to a test (the wrapper warns about them).
 
+(rr-node-test)=
+### `rr_node_test`
+
+```starlark
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+
+rr_node_test(
+    name = "clocksync_test",
+    rule = js_test,
+    test = ":dist-test/tests/clocksync.test.js",
+    data = [":web_tests_js", ":dist_test_pkg_json"],
+)
+```
+
+A node:test file with one JUnit case per test ({ref}`node-test`). The macro
+creates `<name>`, a `js_test` whose entry point is a generated
+`<name>.rr_node_main.cjs`: it runs the test file in a child node — with the
+same node flags, environment and exit code — and writes the JUnit. A copy of
+the reporter, `<name>.rr_node_reporter.mjs`, sits next to it (rules_js runs
+entry points from the output tree). rules_requirements does not load rules_js
+itself: pass the `js_test` rule as `rule`. Target names are yours, so swapping
+a `js_test` for an `rr_node_test` changes no label, `test_suite` or CI command.
+
+| Attribute | Default | |
+| --------- | ------- | - |
+| `rule` | required | The `js_test` rule from `@aspect_rules_js//js:defs.bzl`. |
+| `test` | required | The node:test file: a source file of this package, or a generated one (e.g. a `ts_project` output). |
+| `data` | `[]` | Runtime data — the rest of the compiled sources, their `package.json`. |
+| `args` | `[]` | Arguments for the test file, baked into the entry point (`$(location)` of `data` is expanded). |
+| `level` | `""` | Level for cases that do not declare one. |
+| `**kwargs` | | Forwarded to the `js_test` (`size`, `tags`, `env`, `timeout`, ...). |
+
 googletest needs no macro: a `cc_test` depending on
 `@rules_requirements//cc:gtest` writes traced JUnit by itself.
 
@@ -285,12 +319,13 @@ starting to fail, a risk's status changing — show up in code review.
 ## Generated mains
 
 The helper tests (`<model>_test`, `rr_annotations_test`, `rr_py_test`,
-`rr_wrapped_test`, `rr_golden_test`) do not use the `args` attribute: Bazel
+`rr_wrapped_test`, `rr_node_test`, `rr_golden_test`) do not use the `args` attribute: Bazel
 passes `args` only under `bazel test` / `bazel run`, so a test run by
 `rr_evidence` would silently lose them. Instead each macro generates a small
 `<name>.rr_main.py` with the arguments baked in (runfiles-relative paths,
 resolved against the working directory at run time), and uses it as the test's
-`main`. The tests therefore behave identically under `bazel test`, `bazel run`
+`main` (`rr_node_test`: `<name>.rr_node_main.cjs`, its `entry_point`, with the
+test file's path baked in too). The tests therefore behave identically under `bazel test`, `bazel run`
 and `rr_evidence`.
 
 ## Compatibility
@@ -298,3 +333,5 @@ and `rr_evidence`.
 Tested with Bazel 7.7.1 and 8.8.1 using bzlmod. The module's dependency floors
 are `rules_python` 2.0.3, `rules_cc` 0.2.22, `rules_rust` 0.71.3 and `googletest`
 1.17.0; newer versions in your workspace win. Python 3.9 or newer.
+`rr_node_test` is tested with `aspect_rules_js` 3.2.2 (its default Node 22) and
+its runner with Node 20, 22 and 24; rules_js is not a dependency of the module.

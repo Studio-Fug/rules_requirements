@@ -11,6 +11,7 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 | unittest | `@rr.verifies("REQ-1")` | `py_test` + `rr.unittest_main()` | `rr.unittest_main()` / `--junit-xml` |
 | googletest | `RR_VERIFIES("REQ-1");` | `cc_test` + `@rules_requirements//cc:gtest` | `--gtest_output=xml:...` |
 | Rust | `rr::verifies!("REQ-1");` | `rr_rust_test` | `rr wrap -- <test binary>` |
+| node:test | `verifies(t, "REQ-1")` or `t.diagnostic("rr.requirement=REQ-1")` | `rr_node_test` | — |
 | anything else | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
 
 (junit-properties)=
@@ -187,6 +188,99 @@ parses libtest's standard output and writes JUnit with the traces attached:
 
 A trace recorded on a thread the test spawns itself carries that thread's name
 and is not attributed to the test; call the macro from the test's own thread.
+
+(node-test)=
+## node:test
+
+A JavaScript or TypeScript test file run by Node's built-in test runner
+(`node:test`: `test()`, `it()`, `describe()`) becomes one JUnit case per test
+with {ref}`rr_node_test <rr-node-test>`. Without it, a rules_js `js_test` runs
+the file as a plain script and Bazel records one synthetic result for the whole
+file — every `test()` in it shares one verdict.
+
+```starlark
+load("@aspect_rules_js//js:defs.bzl", "js_test")
+load("@rules_requirements//rr:defs.bzl", "rr_node_test")
+
+rr_node_test(
+    name = "clocksync_test",
+    rule = js_test,                                  # your rules_js js_test
+    test = ":dist-test/tests/clocksync.test.js",     # compiled from TypeScript
+    data = [":web_tests_js", ":dist_test_pkg_json"],
+)
+```
+
+The file runs exactly as `js_test` runs it — `node <file>`, with rules_js's
+node flags — and the target exits with node's own exit code, so the runner
+never turns a failing test green or a passing one red. Two reporters are
+attached: `spec` writes the usual log, and rules_requirements' reporter
+records the cases, which are written to `$XML_OUTPUT_FILE` once node exits:
+
+| node:test | JUnit case |
+| --------- | ---------- |
+| a test without subtests (`test()`, `it()`, `t.test()`) | `classname` = the file's stem plus the enclosing `describe`s and parent tests, joined with ` > `; `name` = the test's name |
+| a `describe`, or a test with subtests | no case of its own — its leaves are the cases |
+| passed / failed | `passed` / `failed`; a failure's message is the first line, its text the stack |
+| `{ skip }`, `{ todo }`, `t.skip()`, `t.todo()` | `skipped`, with the reason as message |
+
+So `describe("bestSample", ...)` around `it("keeps the min-RTT sample", ...)`
+in `clocksync.test.js` is the case `clocksync > bestSample::keeps the min-RTT
+sample`. Two tests with one name stay two cases. Every case carries an
+`rr.file` property, the test file relative to the workspace.
+
+**Declaring traces.** A test declares what it verifies with a diagnostic:
+
+```js
+const { test } = require("node:test");
+const { verifies } = require(process.env.RR_NODE_VERIFIES); // set by rr_node_test
+
+test("bestSample keeps the min-RTT sample", (t) => {
+  verifies(t, "REQ-13");                  // one id; optional level: verifies(t, "REQ-13", "sil")
+  // the same, by hand:
+  // t.diagnostic("rr.requirement=REQ-13");
+  // t.diagnostic("rr.level=sil");
+  // t.diagnostic("rr.artifact.board_rev=C");
+});
+```
+
+`rr.requirement=`, `rr.level=` and `rr.artifact.<key>=` diagnostics become the
+case's `requirement`, `level` and `artifact.<key>` properties (other
+diagnostics are left alone). They belong to the test that writes them — also
+under `describe(..., { concurrency })` — and a diagnostic that cannot be tied
+to a test, such as one from a hook, is never guessed onto one: it is reported
+as a warning in the test log. The `level` attribute of `rr_node_test` is the
+default for cases that declare none.
+
+`verifies(t, id, level?)` (`@rules_requirements//js:verifies.cjs`; under
+`rr_node_test` its path is in `$RR_NODE_VERIFIES`) adds two guards to the
+diagnostic: the id must be one id — no comma, no whitespace (`RR-E104`) — and a
+test that already verifies one requirement cannot claim a second
+(`RR-E101`); either mistake throws inside the test, which then fails. A test
+case verifies at most one requirement: if raw diagnostics name several ids
+anyway, every one is written (never a silent pick) and the test log carries an
+`RR-E101` warning.
+
+**Failures outside any test** are recorded as `error` cases with the property
+`rr.scope=target` — they belong to the whole target, not to a test:
+
+| Case | When |
+| ---- | ---- |
+| `<stem>::<load>` | node exited non-zero before reporting any test: the file threw while loading, or the process died. |
+| `<stem>::<exit-status>` | node exited non-zero (or was killed) although no test failed — e.g. an unhandled rejection after the tests. |
+| `<stem>::<file>` | a root-level `before()` / `after()` hook failed. Node 22 still exits 0 here, so Bazel passes the target; the report does not. |
+| `<chain>::<hooks>` | a `describe` or a parent test failed outside its subtests (its own hook or body). |
+
+A file that registers no test at all writes an empty suite (`tests="0"`).
+Because these cases name no requirement, they fail every whole-target
+`verified_by` reference to the target, not the requirements its individual
+tests name.
+
+**Node versions.** The reporter needs `--test-reporter`, so Node 20 or newer
+(rules_js's default toolchain is Node 22). On older Node, or with
+`RR_NODE_TEST_PLAIN=1` in the test's environment, the file runs plainly and
+the runner writes one result for the whole target with the property
+`rr.synthetic=true` — what a plain `js_test` gives. rules_requirements' CI runs
+the runner on Node 20, 22 and 24.
 
 ## Hand-rolled harnesses: `JUnitWriter`
 
