@@ -134,6 +134,27 @@ def test_model_edits_from_decisions():
     assert {e["action"] for e in migrate.model_edits(doc) if e["target"] == "//web:clock_test"} == {"open"}
 
 
+def test_target_absent_from_the_evidence_is_never_removed():
+    """A shared target the evidence has no result of (HITL-only, or a wrong
+    --evidence path) says nothing about its references."""
+    model, _ = read_model(os.path.join(REPO, "requirements"))
+    evidence = ingest.collect([os.path.join(REPO, "evidence", "testlogs", "app")])
+    doc = migrate.worksheet(migrate.census(model, evidence))
+    (web,) = [t for t in doc["targets"] if t["target"] == "//web:clock_test"]
+    assert web["cases"] == 0
+    edits = {e["requirement"]: e for e in migrate.model_edits(doc) if e["target"] == "//web:clock_test"}
+    assert {r: e["action"] for r, e in edits.items()} == {"REQ-4": "no-evidence", "REQ-5": "no-evidence"}
+    md = migrate.render_markdown(doc)
+    assert "## Targets without evidence" in md and "**Warning:**" in md
+    assert "| `//web:clock_test` | REQ-5 |" in md and "remove" not in md
+
+
+def test_merge_skips_malformed_groups():
+    model, plan = fixture_plan()
+    doc = migrate.worksheet(plan, previous={"schema": migrate.SCHEMA, "groups": ["just a string", {"a": 1}]})
+    assert doc["summary"]["open"] == 16
+
+
 def test_merge_carries_decisions_forward():
     model, plan = fixture_plan()
     previous = migrate.load_worksheet(os.path.join(REPO, "decided.rrplan"))
@@ -157,8 +178,62 @@ def test_check_worksheet_rejects_bad_decisions():
     assert any("listed twice" in p for p in problems)
     assert any("expected a mapping with target and cases" in p for p in problems)
     assert migrate.check_worksheet({"groups": {}}) == ["groups: expected a list"]
-    # Without a model only the shape is checked.
-    assert not any("REQ-99" in p for p in migrate.check_worksheet(doc))
+    # Without a model, an owner must still be one of the ids the cases count toward.
+    assert any("REQ-99 is not among the ids" in p for p in migrate.check_worksheet(doc))
+
+
+_UNSET = object()
+
+
+def _one_group(owner, case_owner=_UNSET, counts=("REQ-4", "REQ-5")):
+    case = {"path": "m::test_helper_shape", "status": "passed"}
+    if case_owner is not _UNSET:
+        case["owner"] = case_owner
+    group = {"target": "//a:t", "group": "m", "counts_toward": list(counts), "owner": owner, "cases": [case]}
+    return {"schema": migrate.SCHEMA, "groups": [group]}
+
+
+@pytest.mark.parametrize(
+    "owner, message",
+    [
+        ("REQ-9", "REQ-9 is not among the ids group 'm' counts toward (REQ-4, REQ-5)"),  # a typo
+        ("REQ-1", "REQ-1 is not among the ids"),  # a real id, but a new claim
+        (7, "7 is not an id; quote ids"),  # YAML read a number
+        (True, "is not an id"),
+        (None, "empty; write '?'"),  # `owner:` with nothing after it
+    ],
+)
+def test_owner_must_choose_among_the_counted_ids(owner, message):
+    problems = migrate.check_worksheet(_one_group(owner))
+    assert any(message in p for p in problems), problems
+    # The same at case level.
+    problems = migrate.check_worksheet(_one_group("?", case_owner=owner))
+    assert any(message.replace("group 'm'", "//a:t#m::test_helper_shape") in p for p in problems), problems
+
+
+def test_none_is_accepted_in_any_case():
+    # YAML reads `owner: None` as the string "None": it means none, not an id named None.
+    for spelling in ("none", "None", "NONE"):
+        doc = _one_group(spelling)
+        assert migrate.check_worksheet(doc) == []
+        assert set(migrate.decisions(doc).values()) == {"none"}
+    assert migrate.check_worksheet(_one_group("REQ-4")) == []
+    assert migrate.check_worksheet(_one_group("?", case_owner="REQ-5")) == []
+
+
+def test_group_owner_outside_a_cases_own_counts():
+    doc = _one_group("REQ-4")
+    doc["groups"][0]["cases"][0]["counts_toward"] = ["REQ-5", "REQ-6"]
+    (problem,) = migrate.check_worksheet(doc)
+    assert "takes the group's owner REQ-4" in problem and "give it an owner of its own" in problem
+    doc["groups"][0]["cases"][0]["owner"] = "REQ-6"
+    assert migrate.check_worksheet(doc) == []
+
+
+def test_unquoted_open_owner_is_explained(tmp_path):
+    text = f"schema: {migrate.SCHEMA}\ngroups:\n- target: //a:t\n  owner: ?\n  cases: []\n"
+    with pytest.raises(migrate.WorksheetError, match="written with quotes"):
+        migrate.load_worksheet(write(tmp_path, "q.rrplan", text))
 
 
 def test_load_worksheet_errors(tmp_path):

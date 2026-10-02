@@ -2,6 +2,7 @@
 """`rr migrate apply --stage tags`: the ast codemod that splits multi-id tags."""
 
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -69,7 +70,7 @@ def test_fixture_repository(tmp_path, monkeypatch):
     ]
     assert dict(res.unresolved) == {
         CaseKey("//cc:codec_test", "Codec::RoundTrip"): (
-            "no Python test found (another language, or outside the scanned files)"
+            "no Python source of this module was scanned (another language?)"
         ),
         CaseKey("//web:clock_test", "[target]"): "not a Python test case path",
     }
@@ -423,7 +424,7 @@ def test_case_to_source_matching(tmp_path):
     res = tag_codemod.apply_tags(decided, str(tmp_path), unassigned="drop")
     unresolved = dict(res.unresolved)
     assert unresolved[CaseKey("//t:x", "tests.test_x::test_t")].startswith("ambiguous: matches tests in")
-    assert "no Python test found" in unresolved[CaseKey("//t:g", "Suite::Test")]
+    assert "no Python source of this module" in unresolved[CaseKey("//t:g", "Suite::Test")]
     assert res.untagged == [CaseKey("//t:u", "c.test_untagged::test_u")]
     assert sorted(f.path for f in res.changed) == ["a/tests/test_x.py", "b/tests/test_x.py", "c/test_y.py"]
     assert traces(next(f for f in res.changed if f.path == "c/test_y.py").new_text)["test_t"][0] == ("B-2",)
@@ -442,3 +443,308 @@ def test_python_files_skips_tool_directories(tmp_path):
 def test_fixture_sources_are_untouched_by_the_tests():
     with open(os.path.join(REPO, "app", "tests", "test_config.py"), encoding="utf-8") as fh:
         assert 'pytestmark = pytest.mark.requirements("REQ-1", "REQ-2")' in fh.read()
+
+
+# --------------------------------------------------------------------------- #
+# What the static view cannot see: refuse, never mis-attribute                #
+# --------------------------------------------------------------------------- #
+
+
+def _repo(tmp_path, rel, text):
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(src(text), encoding="utf-8")
+    return path
+
+
+def _runtime_traces(tmp_path, rel):
+    """(ids) per test id as the real pytest plugin collects them."""
+    probe = tmp_path / "conftest.py"
+    probe.write_text(
+        "from rules_requirements.hooks.pytest_plugin import trace_of\n\n\n"
+        "def pytest_collection_modifyitems(items):\n"
+        "    for item in items:\n"
+        "        print('TRACE', item.nodeid, ','.join(trace_of(item)[0]))\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "--collect-only", "-q", "-s", "-p", "no:cacheprovider", "-p", "no:randomly"]
+        + ["--rootdir", str(tmp_path), "-c", os.devnull, rel],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+    )
+    probe.unlink()
+    if "No module named" in proc.stderr:
+        pytest.skip(f"pytest is not importable in a subprocess: {proc.stderr.strip()}")
+    out = {}
+    for line in proc.stdout.splitlines():
+        if line.startswith("TRACE "):
+            _, nodeid, ids = line.split(" ", 2)
+            out[nodeid.split("::", 1)[1]] = tuple(i for i in ids.split(",") if i)
+    assert out, proc.stdout + proc.stderr
+    return out
+
+
+def test_inherited_tests_are_refused_not_misattributed(tmp_path):
+    """TestSub inherits test_x and the class marker of TestBase: narrowing
+    TestBase's marker to A-1 would silently give TestSub's tests A-1."""
+    path = _repo(
+        tmp_path,
+        "pkg/test_inh.py",
+        """
+        import pytest
+
+
+        @pytest.mark.rr("A-1", "B-2")
+        class TestBase:
+            def test_x(self):
+                pass
+
+
+        class TestSub(TestBase):
+            def test_y(self):
+                pass
+        """,
+    )
+    # Why: at runtime the subclass's tests carry the base's ids too.
+    assert _runtime_traces(tmp_path, "pkg/test_inh.py") == {
+        "TestBase::test_x": ("A-1", "B-2"),
+        "TestSub::test_x": ("A-1", "B-2"),
+        "TestSub::test_y": ("A-1", "B-2"),
+    }
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_inh.TestBase::test_x"): "A-1",
+        CaseKey("//pkg:t", "pkg.test_inh.TestSub::test_x"): "B-2",
+        CaseKey("//pkg:t", "pkg.test_inh.TestSub::test_y"): "B-2",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    (f,) = res.files
+    assert f.status == "refused" and "class TestSub inherits tests or declarations from TestBase" in f.reasons[0]
+    assert res.untagged == []  # TestSub::test_y is tagged at runtime
+    assert [str(k) for k, _ in res.unmatched] == ["//pkg:t#pkg.test_inh.TestSub::test_x"]
+    assert path.read_text(encoding="utf-8").count('"A-1", "B-2"') == 1
+    # Through rewrite() directly, too.
+    with pytest.raises(Unsupported, match="inherits"):
+        rewrite(TestFile(path.read_text(encoding="utf-8")), {"TestBase.test_x": "A-1"})
+
+
+def test_tests_inside_blocks_are_refused(tmp_path):
+    _repo(
+        tmp_path,
+        "pkg/test_if.py",
+        """
+        import sys
+
+        import pytest
+
+        pytestmark = pytest.mark.rr("A-1", "B-2")
+
+
+        def test_a():
+            pass
+
+
+        if sys.platform:
+
+            def test_hidden():
+                pass
+        """,
+    )
+    assert _runtime_traces(tmp_path, "pkg/test_if.py")["test_hidden"] == ("A-1", "B-2")
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_if::test_a"): "A-1",
+        CaseKey("//pkg:t", "pkg.test_if::test_hidden"): "B-2",
+    }
+    for cases in (decided, {k: v for k, v in decided.items() if "hidden" not in k.path}):
+        res = tag_codemod.apply_tags(cases, str(tmp_path))
+        (f,) = res.files
+        assert f.status == "refused" and "test_hidden is defined inside a if block" in f.reasons[0], f.reasons
+    assert [str(k) for k, _ in tag_codemod.apply_tags(decided, str(tmp_path)).unmatched] == [
+        "//pkg:t#pkg.test_if::test_hidden"
+    ]
+
+
+def test_case_of_a_module_whose_test_is_not_defined_there(tmp_path):
+    """A test inherited from another module: decided, but invisible here.
+    The module marker that reaches it must not change."""
+    _repo(
+        tmp_path,
+        "pkg/test_impl.py",
+        """
+        import pytest
+        from pkg.base import Base
+
+        pytestmark = pytest.mark.rr("A-1", "B-2")
+
+
+        class TestImpl(Base):
+            def test_own(self):
+                pass
+        """,
+    )
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_impl.TestImpl::test_own"): "A-1",
+        CaseKey("//pkg:t", "pkg.test_impl.TestImpl::test_inherited"): "B-2",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    (f,) = res.files
+    assert f.status == "refused" and "TestImpl.test_inherited was decided" in f.reasons[0]
+    ((key, why),) = res.unmatched
+    assert key.path.endswith("test_inherited") and "no TestImpl.test_inherited defined in pkg/test_impl.py" in why
+
+
+def test_verifies_on_an_outer_class_does_not_reach_a_nested_class():
+    """@rr.verifies sets an attribute read from item.cls (the innermost class);
+    pytest markers, by contrast, reach nested classes."""
+    text = src(
+        """
+        import pytest
+        from rules_requirements import rr
+
+
+        @rr.verifies("A-1", "B-2")
+        @pytest.mark.rr("C-3")
+        class TestOuter:
+            def test_a(self):
+                pass
+
+            class TestInner:
+                def test_b(self):
+                    pass
+        """
+    )
+    assert traces(text) == {
+        "TestOuter.test_a": (("A-1", "B-2", "C-3"), "", ()),
+        "TestOuter.TestInner.test_b": (("C-3",), "", ()),
+    }
+    new, _ = rewrite(TestFile(text), {"TestOuter.test_a": "C-3"})
+    assert traces(new) == {"TestOuter.test_a": (("C-3",), "", ()), "TestOuter.TestInner.test_b": (("C-3",), "", ())}
+
+
+def test_runtime_agrees_on_nested_verifies(tmp_path):
+    _repo(
+        tmp_path,
+        "pkg/test_nested.py",
+        """
+        from rules_requirements import rr
+
+
+        @rr.verifies("A-1")
+        class TestOuter:
+            def test_a(self):
+                pass
+
+            class TestInner:
+                def test_b(self):
+                    pass
+        """,
+    )
+    assert _runtime_traces(tmp_path, "pkg/test_nested.py") == {
+        "TestOuter::test_a": ("A-1",),
+        "TestOuter::TestInner::test_b": (),
+    }
+
+
+def test_comments_inside_a_rewritten_declaration_are_not_lost():
+    text = src(
+        """
+        import pytest
+
+        pytestmark = [
+            pytest.mark.rr("A-1", "B-2"),  # the protocol pair
+            pytest.mark.slow,
+        ]
+
+
+        def test_a():
+            pass
+        """
+    )
+    with pytest.raises(Unsupported, match="comments inside"):
+        rewrite(TestFile(text), {"test_a": "A-1"})
+
+
+def test_crlf_files_keep_their_line_endings(tmp_path):
+    body = 'import pytest\n\npytestmark = pytest.mark.rr("A-1", "B-2")\n\n\ndef test_a():\n    pass\n'
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "test_crlf.py").write_bytes(body.replace("\n", "\r\n").encode())
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_crlf::test_a"): "A-1"}, str(tmp_path))
+    (f,) = res.changed
+    assert f.new_text.count("\r\n") == f.new_text.count("\n") and "\n" in f.new_text
+    assert f.old_text == body.replace("\n", "\r\n")
+    changed = [a for a, b in zip(f.old_text.splitlines(), f.new_text.splitlines()) if a != b]
+    assert changed == ['pytestmark = pytest.mark.rr("A-1", "B-2")']
+
+
+def test_only_counts_cases_outside_instead_of_listing_them(tmp_path):
+    for name in ("test_a", "test_b"):
+        _repo(
+            tmp_path,
+            f"pkg/{name}.py",
+            'import pytest\n\npytestmark = pytest.mark.rr("A-1", "B-2")\n\n\ndef test_t():\n    pass\n',
+        )
+    decided = {CaseKey("//pkg:t", f"pkg.{n}::test_t"): "A-1" for n in ("test_a", "test_b")}
+    decided[CaseKey("//cc:t", "Codec::RoundTrip")] = "A-1"
+    res = tag_codemod.apply_tags(decided, str(tmp_path), only=["pkg/test_a.py"])
+    assert [f.path for f in res.changed] == ["pkg/test_a.py"]
+    assert res.unresolved == [] and len(res.outside) == 2
+
+
+# --------------------------------------------------------------------------- #
+# Black stability, swept over lengths                                         #
+# --------------------------------------------------------------------------- #
+
+_SHAPES = {
+    "decorator": '@pytest.mark.rr("A-1", "B-2", level="{f}")\ndef test_a():\n    pass\n',
+    "decorator-artifact": '@pytest.mark.rr("A-1", "B-2", artifact={{"board": "{f}", "rev": "c"}})\ndef test_a():\n    pass\n',
+    "single": 'pytestmark = pytest.mark.requirements("A-1", "B-2", level="{f}")\n',
+    "list": 'pytestmark = [pytest.mark.rr("A-1", "B-2"), pytest.mark.usefixtures("{f}")]\n',
+    "list-one": 'pytestmark = [pytest.mark.rr("A-1", "B-2", level="{f}")]\n',
+    "list-magic": 'pytestmark = [pytest.mark.rr("A-1", "B-2", level="{f}"),]\n',
+    "tuple-one": 'pytestmark = (pytest.mark.rr("A-1", "B-2", level="{f}"),)\n',
+    "list-long-element": (
+        'pytestmark = [pytest.mark.requirements("A-1", "B-2", level="hardware-in-the-loop", '
+        'artifact={{"board": "{f}"}}), pytest.mark.slow]\n'
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_SHAPES))
+@pytest.mark.parametrize("line_length", [88, 100])
+def test_rewrite_lays_out_like_black_across_lengths(shape, line_length):
+    """For every length of a black-formatted input, narrowing a declaration
+    gives exactly what black makes of the same source with the id deleted by
+    hand — so black afterwards changes nothing, and the layout is black's
+    own (hugged call arguments, exploded collections, magic commas kept)."""
+    pytest.importorskip("black")
+    mode = black.Mode(line_length=line_length)
+    wrong = []
+    for n in range(1, 90, 2):
+        body = _SHAPES[shape].format(f="x" * n)
+        if not body.startswith("@"):
+            body += "\n\ndef test_a():\n    pass\n"
+        text = black.format_str("import pytest\n\n\n" + body, mode=mode)
+        new, _ = rewrite(TestFile(text), {"test_a": "A-1"}, line_length=line_length)
+        assert traces(new)["test_a"][0] == ("A-1",)
+        by_hand = black.format_str(re.sub(r'"A-1",(\s*)"B-2"', '"A-1"', text), mode=mode)
+        if new != by_hand or black.format_str(new, mode=mode) != new:
+            wrong.append(n)
+    assert wrong == []
+
+
+def test_the_internal_check_refuses_a_wrong_rewrite(monkeypatch):
+    """The re-parse check is the last line of defence: a rewrite whose result
+    does not trace as intended is refused, whatever produced it."""
+    text = 'import pytest\n\npytestmark = pytest.mark.rr("A-1", "B-2")\n\n\ndef test_a():\n    pass\n'
+    monkeypatch.setattr(tag_codemod, "_apply", lambda tf, *a: tf.text.replace('"A-1", "B-2"', '"B-2"'))
+    with pytest.raises(Unsupported, match="internal check"):
+        rewrite(TestFile(text), {"test_a": "A-1"})
+    monkeypatch.setattr(
+        tag_codemod,
+        "_apply",
+        lambda tf, *a: tf.text.replace('"A-1", "B-2"', '"A-1"') + "\n\ndef test_new():\n    pass\n",
+    )
+    with pytest.raises(Unsupported, match="set of tests"):
+        rewrite(TestFile(text), {"test_a": "A-1"})

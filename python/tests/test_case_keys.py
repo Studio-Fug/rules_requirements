@@ -78,6 +78,26 @@ def test_run_dims_from_path():
     dims = run_dims_from_path("bazel-testlogs/p/t/run_2_of_3/shard_1_of_4/test_attempts/attempt_1.xml")
     assert dims == RunDims(shard=1, shards=4, run=2, runs=3, attempt=1)
     assert run_dims_from_path("p/t/shard_2_of_2/test.xml").attempt == 0
+    # A sharded test run several times: Bazel puts both in one directory name.
+    dims = run_dims_from_path("bazel-testlogs/p/t/shard_1_of_2_run_3_of_4/test_attempts/attempt_2.xml")
+    assert dims == RunDims(shard=1, shards=2, run=3, runs=4, attempt=2)
+    assert run_dims_from_path("p/t/shard_1_of_2run_3_of_4/test.xml") == RunDims()
+
+
+def test_index_cases_sharded_and_repeated(tmp_path):
+    """shard_i_of_n_run_k_of_m: one key in two shards is a duplicate; its runs are one slot each."""
+    t = "bazel-testlogs/a/shr_test"
+    for run in (1, 2):
+        _report(
+            tmp_path, f"{t}/shard_1_of_2_run_{run}_of_2/test.xml", [("both", "passed", [], ""), ("a", "passed", [], "")]
+        )
+        _report(tmp_path, f"{t}/shard_2_of_2_run_{run}_of_2/test.xml", [("both", "passed", [], "")])
+    _report(tmp_path, f"{t}/shard_1_of_2_run_1_of_2/test_attempts/attempt_1.xml", [("a", "failed", [], "")])
+    rows = index_cases(ingest.collect([str(tmp_path)]))
+    assert set(rows) == {CaseKey("//a:shr_test", "suite::both"), CaseKey("//a:shr_test", "suite::a")}
+    assert rows[CaseKey("//a:shr_test", "suite::both")].duplicate
+    a = rows[CaseKey("//a:shr_test", "suite::a")]
+    assert not a.duplicate and (a.status, a.flaky, a.attempts) == ("passed", True, 2)
 
 
 def test_workspace_relative_file():
@@ -132,6 +152,13 @@ def test_ingest_records_the_enclosing_suite(tmp_path):
     assert key_of(case) == CaseKey("suite:s", "suite::t")
 
 
+def test_test_case_positional_fields_are_unchanged():
+    """Third-party ingestors may build TestCase positionally up to properties;
+    fields added in v0.2 come after it."""
+    case = TestCase("n", "passed", "cls", ("R-1",), "unit", {}, "", 0.5, "r.xml", "//a:b", {"k": "v"})
+    assert case.properties == {"k": "v"} and case.target == "//a:b" and case.suite == ""
+
+
 def _report(tmp_path, rel, cases):
     return junit(tmp_path, rel, cases)
 
@@ -172,6 +199,34 @@ def test_index_cases_without_a_final_report_uses_the_last_attempt(tmp_path):
     _report(tmp_path, f"{t}/attempt_2.xml", [("x", "passed", [], "")])
     (row,) = index_cases(ingest.collect([str(tmp_path)]).cases).values()
     assert (row.status, row.flaky, row.attempts) == ("passed", True, 2)
+
+
+def test_crashed_first_attempt_is_not_a_case(tmp_path):
+    """attempt_1 crashed (Bazel's generated report: one [target] error); the
+    final test.xml has per-case passes. The final report is authoritative:
+    no phantom [target] row, and the passing cases are flaky."""
+    t = "bazel-testlogs/a/flaky_test"
+    write(
+        tmp_path,
+        f"{t}/test_attempts/attempt_1.xml",
+        _BAZEL_GENERATED.format(
+            suite="a/flaky_test", case="a/flaky_test", out="Generated test.log", body='<error message="SIGSEGV"/>'
+        ),
+    )
+    _report(tmp_path, f"{t}/test.xml", [("t1", "passed", [], ""), ("t2", "passed", [], "")])
+    rows = index_cases(ingest.collect([str(tmp_path)]))
+    assert set(rows) == {CaseKey("//a:flaky_test", "suite::t1"), CaseKey("//a:flaky_test", "suite::t2")}
+    for row in rows.values():
+        assert (row.status, row.flaky, row.attempts) == ("passed", True, 2)
+    # A key only in earlier attempts of another run (no final report there) still counts.
+    _report(tmp_path, "bazel-testlogs/a/other_test/test_attempts/attempt_1.xml", [("x", "failed", [], "")])
+    assert index_cases(ingest.collect([str(tmp_path)]))[CaseKey("//a:other_test", "suite::x")].status == "failed"
+
+
+def test_unnamed_case_gets_a_placeholder_path(tmp_path):
+    assert case_path("  ", " ") == "[unnamed]"
+    key = CaseKey("//a:esc_test", case_path("", ""))
+    assert CaseKey.parse(str(key)) == key
 
 
 def test_case_row_to_dict():

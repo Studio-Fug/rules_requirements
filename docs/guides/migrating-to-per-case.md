@@ -110,8 +110,15 @@ groups:
 | `groups[].counts_toward` | The entities the cases count toward today. Only requirements, user needs and mitigations count; tags naming risks, test methods or unknown ids are listed per case as `ignored_tags`. |
 | `groups[].tags`, `target_claims` | Whether those ids come from the tests' tags, from `verified_by`, or both. |
 | `proposed`, `reason` | A hint where the model or the evidence determines an owner. A case tagged with a requirement and its refinement proposes the refinement, because the parent's verdict rolls up from it. A case with its own single tag inside a target claimed whole by another requirement proposes the tag. Everything else is left open. A proposal is never a decision. |
-| `owner` | The decision: one entity id, `none` (the case verifies none of them) or `?` (still open). A group's owner applies to each case without an `owner` of its own. |
+| `owner` | The decision: one of the ids the case counts toward, `none` (the case verifies none of them; any case, so `None` works too) or `'?'` (still open; quote it, since a bare `?` is not valid YAML). A group's owner applies to each case without an `owner` of its own. A decision chooses among the existing claims: an id the case does not count toward is rejected, as are numbers, booleans and empty values. |
 | `target_scope` | Whole-target results, such as an `exit-status` case, that carry several ids today. There is nothing to decide here: from v0.3.0 they carry no ids. |
+
+An `--evidence` path that holds no evidence file is reported as a warning
+(`[no-evidence]`), and no evidence at all stops the plan (exit status 2). A
+target named in `verified_by` that the evidence has no result of — a HITL-only
+or manual target planned from software evidence, say — is listed under
+*Targets without evidence*: nothing is decided about it, and its references
+are not unused.
 
 The JSON Schema is `schema/worksheet.schema.json`
 (<https://studio-fug.github.io/rules_requirements/schema/worksheet.schema.json>).
@@ -219,13 +226,25 @@ A file is **refused** and left unchanged, never half-migrated, when:
   artifacts that are not literals, `**kwargs`, a marker inside
   `pytest.param(...)`, or a `pytestmark` that shares its line with other code.
 - one scope declares two different levels.
+- a change would reach a test the codemod cannot see: a test class that
+  inherits tests or declarations from another class in the file, a test
+  defined inside an `if`, `try`, `with` or loop block, or a decided case of
+  the module that the file does not define (inherited from another module,
+  or generated). Nothing that reaches such a test is changed; migrate the file
+  by hand.
+- a multi-line declaration it would rewrite has comments inside it (they
+  would be lost).
 
 The command also lists, without changing anything:
 
+- decided cases whose module it found but whose test is not defined there.
+  These make it exit 1: it cannot vouch for them.
 - decided cases with no Python test (googletest `RR_VERIFIES`, Rust
   `rr::verifies!`, `JUnitWriter` harnesses, records, and whole-target `[target]`
-  results). Edit those by hand so that each case names one id.
-- decided cases whose test carries no tag. Their owner is set in the model.
+  results). Edit those by hand so that each case names one id. With `--only`,
+  cases outside the given paths are only counted.
+- decided cases whose test declares no id in its source. Their owner is set by
+  `verified_by` in the model.
 - the `verified_by` edits the decisions imply: `remove` (no case of the target
   is left for that requirement) or `split` (the requirement keeps some of the
   target's cases while others went elsewhere). A whole-target reference cannot
@@ -235,8 +254,11 @@ Markers added by a `conftest.py` (`item.add_marker`) are invisible to the
 codemod; check them by hand.
 
 It exits 0 when every file it had to change was rewritten, 1 when a file was
-refused, and 2 when the worksheet is unreadable or names an owner that is not a
-requirement, user need or mitigation of the `--model` given.
+refused or a decided case's test was not found in its module, and 2 when the
+worksheet is unreadable or an owner is not one of the ids its case counts
+toward (or, with a model, not a requirement, user need or mitigation of it).
+Without `--model` it checks the owners against the model named in the
+worksheet's `inputs`, when that is still there. Files keep their line endings.
 
 `--only PATH` (repeatable) limits the rewrite to files below a path, so several
 pull requests can migrate disjoint directories in parallel from one worksheet.

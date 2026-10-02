@@ -28,14 +28,21 @@ nothing.
 A file is refused — reported, never half-migrated — when a test it would
 change is undecided (``?``, unless ``unassigned="drop"``), when the
 parametrizations of one test were decided differently (split those by hand
-with ``pytest.param(..., marks=...)``), or when a declaration is not a literal
-the codemod can read.
+with ``pytest.param(..., marks=...)``), when a declaration is not a literal
+the codemod can read, or when a change would reach a test the static view
+cannot see: tests a class inherits from another class of the file, tests
+defined inside an ``if``/``try``/``with``/loop block, and decided cases of
+the module the file does not define (inherited from another module, or
+generated). The internal check can only vouch for the tests it sees, so
+those are refused up front.
 """
 
 from __future__ import annotations
 
 import ast
+import io
 import os
+import tokenize
 from dataclasses import dataclass, field
 from typing import Iterable, Mapping, Optional, Union
 
@@ -45,6 +52,12 @@ from rules_requirements.util import dedupe
 MARKER_NAMES = ("rr", "requirements")
 _SKIP_DIRS = {"node_modules", "__pycache__", "site-packages", "_vendor"}
 _FuncDef = Union[ast.FunctionDef, ast.AsyncFunctionDef]
+# Statements whose bodies pytest still collects tests from, but the codemod does not follow.
+_COMPOUND = tuple(
+    getattr(ast, name)
+    for name in ("If", "For", "AsyncFor", "While", "Try", "TryStar", "With", "AsyncWith", "Match")
+    if hasattr(ast, name)
+)
 
 # What a test declares: ids (accumulated), level (nearest wins), artifact.
 Trace = tuple[tuple[str, ...], str, tuple[tuple[str, str], ...]]
@@ -67,6 +80,12 @@ class Decl:
     artifact: dict[str, str]
     site: str  # "decorator" | "pytestmark"
     stmt: Optional[ast.AST] = None  # the pytestmark assignment
+
+    @property
+    def is_verifies(self) -> bool:
+        """``@rr.verifies``: an attribute, not a pytest marker. On a class it
+        applies to that class's own tests only, never to a nested class's."""
+        return _dotted(self.call.func).rpartition(".")[2] not in MARKER_NAMES
 
 
 @dataclass
@@ -94,8 +113,12 @@ class FileResult:
 @dataclass
 class ApplyResult:
     files: list[FileResult] = field(default_factory=list)
-    unresolved: list[tuple[CaseKey, str]] = field(default_factory=list)  # no Python test found
-    untagged: list[CaseKey] = field(default_factory=list)  # decided, but the test carries no tag
+    unresolved: list[tuple[CaseKey, str]] = field(default_factory=list)  # no Python test to rewrite
+    # A Python module of the case was scanned, but it does not define the test:
+    # the codemod cannot vouch for it (it leaves the scopes around it alone).
+    unmatched: list[tuple[CaseKey, str]] = field(default_factory=list)
+    untagged: list[CaseKey] = field(default_factory=list)  # decided, but the test declares no id
+    outside: list[CaseKey] = field(default_factory=list)  # with ``only``: no scanned module
 
     @property
     def refused(self) -> list[FileResult]:
@@ -136,7 +159,16 @@ class TestFile:
         self.decls: list[Decl] = []
         self.tests: list[TestFn] = []
         self.problems: list[str] = []
+        self.classes: dict[int, tuple[ast.ClassDef, ...]] = {}  # id(class) -> its chain, outermost first
+        # Where the static view is incomplete. ``scope_blind``: holders (module,
+        # class, test function) whose declarations also reach tests the codemod
+        # cannot see, so changing them is refused. ``trace_blind``: classes whose
+        # tests' static traces may miss declarations (inherited ones).
+        self.scope_blind: dict[int, str] = {}
+        self.trace_blind: dict[int, str] = {}
+        self._hidden_calls: set[int] = set()
         self._collect(self.tree, "module", ())
+        self._inheritance()
         self._unsupported()
 
     # -- names ------------------------------------------------------------ #
@@ -185,12 +217,103 @@ class TestFile:
                     if self.is_decl(v):
                         self._decl(scope, holder, v, "pytestmark", stmt)  # type: ignore[arg-type]
             elif isinstance(stmt, ast.ClassDef):
+                self.classes[id(stmt)] = classes + (stmt,)
                 self._decorators(stmt, "class")
                 self._collect(stmt, "class", classes + (stmt,))
             elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self._decorators(stmt, "function")
                 if stmt.name.startswith("test"):
                     self.tests.append(TestFn(stmt, classes))
+            elif isinstance(stmt, _COMPOUND):
+                self._hidden(stmt, classes)
+
+    def _hidden(self, stmt: ast.stmt, classes: tuple[ast.ClassDef, ...]) -> None:
+        """Tests (and test classes) defined inside an ``if``/``try``/``with``/
+        loop block: pytest collects them, the codemod does not follow them. The
+        declarations of every scope around them must not change."""
+        kind = type(stmt).__name__.lower().replace("async", "")
+        todo: list[ast.AST] = [stmt]
+        while todo:
+            node = todo.pop()
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    self._hidden_calls.update(id(d) for d in child.decorator_list)
+                    if isinstance(child, ast.ClassDef) or child.name.startswith("test"):
+                        why = (
+                            f"line {child.lineno}: {child.name} is defined inside a {kind} block, where the codemod "
+                            "cannot follow it; migrate this file by hand"
+                        )
+                        for holder in (self.tree, *classes):
+                            self.scope_blind.setdefault(id(holder), why)
+                    if isinstance(child, ast.ClassDef):
+                        self._hidden_calls.update(id(n) for n in ast.walk(child) if isinstance(n, ast.Call))
+                elif not isinstance(child, ast.Lambda):
+                    todo.append(child)
+
+    def _inheritance(self) -> None:
+        """A test class subclassing another class of this file inherits its
+        tests and (pytest >= 7.2) its markers: refuse to change anything they
+        share, and distrust the subclass's static traces."""
+        by_name: dict[str, ast.ClassDef] = {}
+        for chain in self.classes.values():
+            by_name.setdefault(".".join(c.name for c in chain), chain[-1])
+        bases: dict[int, list[ast.ClassDef]] = {
+            cid: [b for b in (by_name.get(_dotted(e)) for e in chain[-1].bases) if b is not None]
+            for cid, chain in self.classes.items()
+        }
+        for cid, chain in self.classes.items():
+            sub = chain[-1]
+            ancestors: list[ast.ClassDef] = []
+            todo = list(bases[cid])
+            while todo:
+                b = todo.pop()
+                if all(b is not a for a in ancestors) and b is not sub:
+                    ancestors.append(b)
+                    todo.extend(bases[id(b)])
+            if not any(self.tests_under(a) or any(d.holder is a for d in self.decls) for a in ancestors):
+                continue
+            why = (
+                f"line {sub.lineno}: class {sub.name} inherits tests or declarations from "
+                f"{', '.join(a.name for a in ancestors)} in this file; the codemod does not follow inheritance, "
+                "migrate this file by hand"
+            )
+            self.trace_blind.setdefault(id(sub), why)
+            for c in (sub, *ancestors):
+                for holder in (self.tree, *self.classes[id(c)], *(t.node for t in self.tests_under(c))):
+                    self.scope_blind.setdefault(id(holder), why)
+
+    def blind_class(self, test: TestFn) -> Optional[str]:
+        """Why ``test``'s static trace cannot be trusted, if it cannot."""
+        for c in test.classes:
+            if id(c) in self.trace_blind:
+                return self.trace_blind[id(c)]
+        return None
+
+    def mark_unseen(self, classes: list[str], why: str) -> None:
+        """A decided case of this module whose test is not defined here
+        (inherited from another module, or generated): the declarations of
+        the scopes it sits in reach it unseen, and a class of that path may
+        inherit declarations too."""
+        found = self.resolve_classes(classes)
+        for holder in (self.tree, *found):
+            self.scope_blind.setdefault(id(holder), why)
+        if found and len(found) == len(classes):
+            self.trace_blind.setdefault(id(found[-1]), why)
+
+    def resolve_classes(self, names: list[str]) -> list[ast.ClassDef]:
+        """The classes of this file along a ``Outer.Inner`` path, as far as they exist."""
+        out: list[ast.ClassDef] = []
+        holder: ast.AST = self.tree
+        for name in names:
+            nxt = None
+            for stmt in getattr(holder, "body", []):
+                if isinstance(stmt, ast.ClassDef) and stmt.name == name:
+                    nxt = stmt
+            if nxt is None:
+                break
+            out.append(nxt)
+            holder = nxt
+        return out
 
     def _decorators(self, node: ast.AST, scope: str) -> None:
         for deco in getattr(node, "decorator_list", []):
@@ -234,15 +357,34 @@ class TestFile:
         known = {id(d.call) for d in self.decls}
         for node in ast.walk(self.tree):
             if isinstance(node, ast.Call) and self.is_decl(node) and id(node) not in known:
-                self.problems.append(
-                    f"line {node.lineno}: a declaration outside a decorator or pytestmark (e.g. pytest.param marks)"
-                )
+                if id(node) in self._hidden_calls:
+                    self.problems.append(
+                        f"line {node.lineno}: a declaration inside an if/try/with/loop block, where the codemod "
+                        "cannot follow it"
+                    )
+                else:
+                    self.problems.append(
+                        f"line {node.lineno}: a declaration outside a decorator or pytestmark (e.g. pytest.param marks)"
+                    )
 
     # -- semantics -------------------------------------------------------- #
 
+    @staticmethod
+    def applies(d: Decl, test: TestFn) -> bool:
+        """Whether ``d`` reaches ``test`` as the pytest plugin resolves it:
+        markers reach every test below their scope; ``@rr.verifies`` on a
+        class only the tests of that class itself (``item.cls``)."""
+        if d.holder is test.node:
+            return True
+        if d.scope == "module":
+            return True
+        if d.is_verifies and d.scope == "class":
+            return bool(test.classes) and test.classes[-1] is d.holder
+        return any(c is d.holder for c in test.classes)
+
     def chain(self, test: TestFn, decls: Iterable[Decl] | None = None) -> list[list[Decl]]:
         """The declarations applying to ``test``, nearest scope first."""
-        pool = list(self.decls if decls is None else decls)
+        pool = [d for d in (self.decls if decls is None else decls) if self.applies(d, test)]
         holders: list[ast.AST] = [test.node, *reversed(test.classes), self.tree]
         return [[d for d in pool if d.holder is h] for h in holders]
 
@@ -266,7 +408,11 @@ class TestFile:
     def tests_under(self, holder: ast.AST) -> list[TestFn]:
         if holder is self.tree:
             return list(self.tests)
-        return [t for t in self.tests if t.node is holder or holder in t.classes]
+        return [t for t in self.tests if t.node is holder or any(c is holder for c in t.classes)]
+
+    def reached_by(self, d: Decl) -> list[TestFn]:
+        """The tests ``d`` applies to."""
+        return [t for t in self.tests_under(d.holder) if self.applies(d, t)]
 
     def find(self, classes: list[str], name: str) -> Optional[TestFn]:
         found = None
@@ -287,39 +433,145 @@ def _quote(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _bracketed(head: str, items: list[str], tail: str, indent: str, line_length: int) -> list[str]:
-    """``head + items + tail`` as black lays it out: one line, the items on one
-    indented line, or one item per line with a magic trailing comma."""
-    one = f"{indent}{head}{', '.join(items)}{tail}"
-    if len(one) <= line_length or not items:
+@dataclass
+class _Br:
+    """A bracketed expression black may split: ``head`` + items + ``closing``.
+
+    ``collection`` (a list/tuple/set/dict literal): black explodes its body,
+    one item per line, rather than keeping it on one indented line as it
+    does for call arguments. ``magic``: the source ends it with a trailing
+    comma, which keeps black from joining it. ``one_tuple``: ``(x,)``.
+    """
+
+    head: str
+    items: list[Union[str, _Br]]
+    closing: str
+    collection: bool = False
+    magic: bool = False
+    one_tuple: bool = False
+
+    def flat(self) -> str:
+        body = ", ".join(_flat(i) for i in self.items)
+        return f"{self.head}{body}{',' if self.one_tuple else ''}{self.closing}"
+
+    def forced(self) -> bool:
+        """Black cannot join it onto one line (a magic trailing comma, here or inside)."""
+        return self.magic or any(isinstance(i, _Br) and i.forced() for i in self.items)
+
+
+_Part = Union[str, _Br]
+
+
+def _flat(part: _Part) -> str:
+    return part if isinstance(part, str) else part.flat()
+
+
+def _layout(part: _Part, indent: str, tail: str, line_length: int) -> list[str]:
+    """``part`` as black lays it out at ``indent``, followed by ``tail``: on
+    one line if it fits; else split at its brackets — a call's arguments on
+    one indented line when they fit there, otherwise (and always for a
+    collection) one per line with a trailing comma. A lone item gets no comma
+    (black adds none where there is no delimiter); each line still too long
+    is split the same way."""
+    one = f"{indent}{_flat(part)}{tail}"
+    if isinstance(part, str) or not part.items or (len(one) <= line_length and not part.forced()):
         return [one]
     inner = indent + "    "
-    body = inner + ", ".join(items)
-    if len(body) <= line_length and all("\n" not in i for i in items):
-        return [f"{indent}{head}", body, f"{indent}{tail}"]
-    return [f"{indent}{head}", *(f"{inner}{i}," for i in items), f"{indent}{tail}"]
+    if not part.collection and not part.magic and not any(isinstance(i, _Br) and i.forced() for i in part.items):
+        body = inner + ", ".join(_flat(i) for i in part.items)
+        if len(body) <= line_length:
+            return [f"{indent}{part.head}", body, f"{indent}{part.closing}{tail}"]
+    if len(part.items) == 1 and not part.magic and not part.one_tuple:
+        middle = _layout(part.items[0], inner, "", line_length)
+    else:
+        middle = [line for item in part.items for line in _layout(item, inner, ",", line_length)]
+    return [f"{indent}{part.head}", *middle, f"{indent}{part.closing}{tail}"]
 
 
-def _call_text(text: str, decl: Decl, ids: list[str], level: str | None, artifact: dict[str, str] | None) -> str:
-    """The declaration's call with ``ids`` and, when given, a new level/artifact."""
-    return decl.callee + "(" + ", ".join(_call_args(text, decl, ids, level, artifact)) + ")"
+def _span(node: ast.AST) -> tuple[int, int, int, int]:
+    """``(line, col, end line, end col)`` of a node that has a position (1-based lines, byte columns)."""
+    line = int(getattr(node, "lineno", 1))
+    end_line = getattr(node, "end_lineno", None) or line
+    return line, int(getattr(node, "col_offset", 0)), int(end_line), int(getattr(node, "end_col_offset", None) or 0)
 
 
-def _call_args(text: str, decl: Decl, ids: list[str], level: str | None, artifact: dict[str, str] | None) -> list[str]:
-    args = [_quote(i) for i in ids]
+def _trailing_comma(text: str, node: ast.AST, last: Optional[ast.AST]) -> bool:
+    """Whether the source has a comma between ``last`` (the final child) and the end of ``node``."""
+    if last is None:
+        return False
+    lines = text.splitlines(keepends=True)
+    _, _, start_line, start_col = _span(last)
+    _, _, end_line, end_col = _span(node)
+    chunk = lines[start_line - 1 : end_line]
+    if not chunk:
+        return False
+    if len(chunk) == 1:
+        between = chunk[0][_col(chunk[0], start_col) : _col(chunk[0], end_col)]
+    else:
+        between = chunk[0][_col(chunk[0], start_col) :] + "".join(chunk[1:-1]) + chunk[-1][: _col(chunk[-1], end_col)]
+    return "," in between  # (comments inside a re-rendered span are refused beforehand)
+
+
+def _expr(text: str, node: ast.AST, line: int) -> _Part:
+    """An expression as a :class:`_Br` tree black can split, from its source.
+
+    Calls and collection literals are taken apart; anything else must sit on
+    one line."""
+    if isinstance(node, ast.Call):
+        func = ast.get_source_segment(text, node.func)
+        if func is None or "\n" in func:
+            raise Unsupported(f"line {line}: a multi-line callee")
+        children = sorted([*node.args, *node.keywords], key=lambda n: _span(n)[:2])
+        args = [_keyword(text, c, line) if isinstance(c, ast.keyword) else _expr(text, c, line) for c in children]
+        return _Br(func + "(", args, ")", magic=_trailing_comma(text, node, children[-1] if children else None))
+    seg = ast.get_source_segment(text, node) or ""
+    brackets = {ast.List: "[]", ast.Set: "{}", ast.Dict: "{}", ast.Tuple: "()"}
+    pair = brackets.get(type(node))
+    if pair and seg.startswith(pair[0]) and seg.endswith(pair[1]):
+        if isinstance(node, ast.Dict):
+            items: list[_Part] = []
+            for k, v in zip(node.keys, node.values):
+                value = _flat(_expr(text, v, line))
+                items.append(f"**{value}" if k is None else f"{_flat(_expr(text, k, line))}: {value}")
+            last: Optional[ast.AST] = node.values[-1] if node.values else None
+        else:
+            elts = node.elts  # type: ignore[attr-defined]
+            items = [_expr(text, e, line) for e in elts]
+            last = elts[-1] if elts else None
+        one_tuple = isinstance(node, ast.Tuple) and len(items) == 1
+        magic = not one_tuple and _trailing_comma(text, node, last)
+        return _Br(pair[0], items, pair[1], collection=True, magic=magic, one_tuple=one_tuple)
+    if "\n" in seg or not seg:
+        raise Unsupported(f"line {line}: a multi-line expression the codemod cannot lay out")
+    return seg
+
+
+def _keyword(text: str, kw: ast.keyword, line: int) -> _Part:
+    value = _expr(text, kw.value, line)
+    prefix = "**" if kw.arg is None else f"{kw.arg}="
+    if isinstance(value, str):
+        return prefix + value
+    return _Br(prefix + value.head, value.items, value.closing, value.collection, value.magic, value.one_tuple)
+
+
+def _artifact_part(artifact: Mapping[str, str]) -> _Br:
+    return _Br("artifact={", [f"{_quote(k)}: {_quote(v)}" for k, v in artifact.items()], "}", collection=True)
+
+
+def _call_args(
+    text: str, decl: Decl, ids: list[str], level: str | None, artifact: dict[str, str] | None
+) -> list[_Part]:
+    args: list[_Part] = [_quote(i) for i in ids]
     for kw in decl.call.keywords:
         if kw.arg == "level" and level is not None:
             continue
         if kw.arg == "artifact" and artifact is not None:
             continue
-        seg = ast.get_source_segment(text, kw)
-        if seg is None or "\n" in seg:
-            raise Unsupported(f"line {decl.call.lineno}: a multi-line keyword argument")
-        args.append(seg)
+        args.append(_keyword(text, kw, decl.call.lineno))
     if level:
         args.append(f"level={_quote(level)}")
     if artifact:
-        args.append("artifact={" + ", ".join(f"{_quote(k)}: {_quote(v)}" for k, v in artifact.items()) + "}")
+        args.append(_artifact_part(artifact))
     return args
 
 
@@ -433,7 +685,7 @@ def rewrite(tf: TestFile, owners: Mapping[str, Optional[str]], line_length: int 
     for d in tf.decls:
         if d.scope == "function" or not d.ids:
             continue
-        tests = tf.tests_under(d.holder)
+        tests = tf.reached_by(d)
         if not tests:
             continue
         owners_here = {owner_of(t) for t in tests}
@@ -480,6 +732,16 @@ def rewrite(tf: TestFile, owners: Mapping[str, Optional[str]], line_length: int 
             changes.append(f"{t.qualname}: {was} -> {', '.join(target[0]) or 'none'}")
     if not changes:
         return tf.text, []
+    for t in tf.tests:
+        why = tf.blind_class(t)
+        if why and t.qualname in owners:
+            raise Unsupported(why)
+    for d in tf.decls:
+        if id(d) in new and id(d.holder) in tf.scope_blind:
+            raise Unsupported(tf.scope_blind[id(d.holder)])
+    for node_id in added:
+        if node_id in tf.scope_blind:
+            raise Unsupported(tf.scope_blind[node_id])
 
     text = _apply(tf, new, added, line_length)
     text = _drop_unused_imports(text, _names(tf.tree))
@@ -538,6 +800,7 @@ def _apply(tf: TestFile, new: dict[int, Optional[Decl]], added: dict[int, Decl],
             tail = lines[last][_col(lines[last], d.call.end_col_offset or 0) :].rstrip("\n")
             if head.strip() != "@" or (tail.strip() and not tail.strip().startswith("#")):
                 raise Unsupported(f"line {first + 1}: a decorator that does not stand on its own lines")
+            _no_comments_inside(tf, d.call)
             if repl is None:
                 ed.drop(first, last)
             else:
@@ -561,17 +824,22 @@ def _apply(tf: TestFile, new: dict[int, Optional[Decl]], added: dict[int, Decl],
 def _render_decl(
     text: str, old: Decl, repl: Decl, indent: str, prefix: str, line_length: int, fresh: bool = False
 ) -> list[str]:
-    level = repl.level if fresh else None
-    artifact = repl.artifact if fresh else None
     if fresh:
-        args = [_quote(i) for i in repl.ids]
-        if level:
-            args.append(f"level={_quote(level)}")
-        if artifact:
-            args.append("artifact={" + ", ".join(f"{_quote(k)}: {_quote(v)}" for k, v in artifact.items()) + "}")
+        args: list[_Part] = [_quote(i) for i in repl.ids]
+        if repl.level:
+            args.append(f"level={_quote(repl.level)}")
+        if repl.artifact:
+            args.append(_artifact_part(repl.artifact))
+        magic = False
     else:
-        args = _call_args(text, old, repl.ids, level, artifact)
-    return _bracketed(f"{prefix}{old.callee}(", args, ")", indent, line_length)
+        args = _call_args(text, old, repl.ids, None, None)
+        magic = _trailing_comma(text, old.call, _last_arg(old.call))
+    return _layout(_Br(f"{prefix}{old.callee}(", args, ")", magic=magic), indent, "", line_length)
+
+
+def _last_arg(call: ast.Call) -> Optional[ast.AST]:
+    children = [*call.args, *call.keywords]
+    return max(children, key=lambda n: _span(n)[2:]) if children else None
 
 
 def _rewrite_pytestmark(
@@ -584,22 +852,21 @@ def _rewrite_pytestmark(
     tail = lines[last][_col(lines[last], stmt.end_col_offset or 0) :].rstrip("\n")
     if head.strip() or (tail.strip() and not tail.strip().startswith("#")):
         raise Unsupported(f"line {first + 1}: a pytestmark that shares its line with other statements")
+    _no_comments_inside(tf, stmt)
     value = stmt.value
     is_seq = isinstance(value, (ast.List, ast.Tuple))
     elements = value.elts if isinstance(value, (ast.List, ast.Tuple)) else [value]
     mine = {id(d.call): d for d in decls}
-    items: list[str] = []
+    items: list[_Part] = []
     for el in elements:
         d = mine.get(id(el))
         if d is not None and id(d) in new:
             repl = new[id(d)]
             if repl is not None:
-                items.append(_call_text(text, d, repl.ids, None, None))
+                magic = _trailing_comma(text, d.call, _last_arg(d.call))
+                items.append(_Br(f"{d.callee}(", _call_args(text, d, repl.ids, None, None), ")", magic=magic))
         else:
-            seg = ast.get_source_segment(text, el)
-            if seg is None or "\n" in seg:
-                raise Unsupported(f"line {first + 1}: a multi-line pytestmark element")
-            items.append(seg)
+            items.append(_expr(text, el, first + 1))
     if not items:
         # Remove the statement and the comment block directly above it.
         top = first
@@ -609,19 +876,45 @@ def _rewrite_pytestmark(
         return
     indent = head
     if is_seq:
+        assert isinstance(value, (ast.List, ast.Tuple))
         opening, closing = ("[", "]") if isinstance(value, ast.List) else ("(", ")")
-        if not isinstance(value, ast.List) and len(items) == 1:
-            items[0] += ","
-        rendered = _bracketed(f"pytestmark = {opening}", items, closing, indent, line_length)
+        one_tuple = isinstance(value, ast.Tuple) and len(items) == 1
+        magic = not one_tuple and _trailing_comma(text, value, value.elts[-1] if value.elts else None)
+        whole = _Br(f"pytestmark = {opening}", items, closing, collection=True, magic=magic, one_tuple=one_tuple)
+        rendered = _layout(whole, indent, "", line_length)
     else:
-        rendered = [f"{indent}pytestmark = {items[0]}"]
-        if len(rendered[0]) > line_length:
-            d = decls[0]
-            repl = new.get(id(d)) or d
-            rendered = _render_decl(text, d, repl, indent, "pytestmark = ", line_length)
+        (item,) = items
+        if isinstance(item, _Br):
+            item = _Br("pytestmark = " + item.head, item.items, item.closing, magic=item.magic)
+            rendered = _layout(item, indent, "", line_length)
+        else:
+            rendered = [f"{indent}pytestmark = {item}"]
     if tail.strip():
         rendered[-1] += tail
     ed.put(first, last, rendered)
+
+
+def _source_between(tf: TestFile, line: int, col: int, node: ast.AST) -> str:
+    """The source from ``(line, col)`` up to the end of ``node``."""
+    _, _, end_line, end_col = _span(node)
+    lines = tf.lines[line - 1 : end_line]
+    if len(lines) == 1:
+        return lines[0][_col(lines[0], col) : _col(lines[0], end_col)]
+    return lines[0][_col(lines[0], col) :] + "".join(lines[1:-1]) + lines[-1][: _col(lines[-1], end_col)]
+
+
+def _no_comments_inside(tf: TestFile, node: ast.AST) -> None:
+    """Refuse to re-render a statement or call that holds comments: they would be lost."""
+    first, col, last, _ = _span(node)
+    if first == last:
+        return
+    segment = _source_between(tf, first, col, node)
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(segment).readline))
+    except (tokenize.TokenError, SyntaxError):
+        return
+    if any(tok.type == tokenize.COMMENT for tok in tokens):
+        raise Unsupported(f"line {first}: a multi-line declaration with comments inside (they would be lost)")
 
 
 def _col(line: str, byte_offset: int) -> int:
@@ -700,6 +993,12 @@ def _split_case(path: str) -> Optional[tuple[list[str], str]]:
     return classname.split("."), base
 
 
+def _read(path: str) -> str:
+    """A source file's text, its line endings as they are (CRLF stays CRLF)."""
+    with open(path, encoding="utf-8", newline="") as fh:
+        return fh.read()
+
+
 def apply_tags(
     decided: Mapping[CaseKey, str],
     root: str,
@@ -712,22 +1011,36 @@ def apply_tags(
     (``CaseKey -> id | "none" | "?"``). Nothing is written; the caller writes
     each changed file's ``new_text``."""
     result = ApplyResult()
+    only = list(only)
+    scanned = python_files(root, only)
     files: dict[str, TestFile] = {}
     unreadable: dict[str, str] = {}
-    for rel in python_files(root, only):
-        full = os.path.join(root, rel)
+    newline: dict[str, str] = {}
+
+    def parse(rel: str, require_markers: bool) -> Optional[TestFile]:
+        if rel in files or rel in unreadable:
+            return files.get(rel)
         try:
-            with open(full, encoding="utf-8") as fh:
-                text = fh.read()
+            text = _read(os.path.join(root, rel))
         except (OSError, UnicodeDecodeError) as exc:
             unreadable[rel] = str(exc)
-            continue
-        if "mark" not in text and "verifies" not in text:
-            continue
+            return None
+        if require_markers and "mark" not in text and "verifies" not in text:
+            return None
+        if "\r\n" in text and text.count("\r\n") == text.count("\n"):
+            # CRLF throughout: edit it as LF, write it back as CRLF.
+            newline[rel] = "\r\n"
+            text = text.replace("\r\n", "\n")
         try:
             files[rel] = TestFile(text, rel)
         except SyntaxError as exc:
             unreadable[rel] = f"syntax error: {exc}"
+            return None
+        return files[rel]
+
+    for rel in scanned:
+        parse(rel, require_markers=True)
+    modules = [(rel, _module_parts(rel)) for rel in scanned]
 
     # Map each decided case to (file, test).
     targets: dict[str, dict[str, set[str]]] = {}  # file -> qualname -> decisions
@@ -738,29 +1051,53 @@ def apply_tags(
             result.unresolved.append((key, "not a Python test case path"))
             continue
         parts, base = split
-        best: list[tuple[str, TestFn]] = []
-        best_len = 0
-        for rel, tf in files.items():
-            mod = _module_parts(rel)
+        # Every scanned module the case path can name, by the length of the
+        # module path matched; the longest match is the case's module.
+        matches: list[tuple[int, str]] = []
+        for rel, mod in modules:
             for k in range(len(mod)):
                 suffix = mod[k:]
-                if parts[: len(suffix)] != suffix:
-                    continue
-                test = tf.find(parts[len(suffix) :], base)
-                if test is not None:
-                    if len(suffix) > best_len:
-                        best, best_len = [(rel, test)], len(suffix)
-                    elif len(suffix) == best_len:
-                        best.append((rel, test))
-                break
-        if not best:
-            result.unresolved.append((key, "no Python test found (another language, or outside the scanned files)"))
+                if parts[: len(suffix)] == suffix:
+                    matches.append((len(suffix), rel))
+                    break
+        if not matches:
+            if only:
+                result.outside.append(key)
+            else:
+                result.unresolved.append((key, "no Python source of this module was scanned (another language?)"))
             continue
-        if len(best) > 1:
-            where = ", ".join(rel for rel, _ in best)
+        best_len = max(n for n, _ in matches)
+        found: list[tuple[str, TestFn]] = []
+        missing: list[tuple[str, list[str]]] = []
+        for n, rel in matches:
+            if n != best_len:
+                continue
+            tf = parse(rel, require_markers=False)
+            test = tf.find(parts[n:], base) if tf is not None else None
+            if test is not None:
+                found.append((rel, test))
+            elif tf is not None:
+                missing.append((rel, parts[n:]))
+        if len(found) > 1:
+            where = ", ".join(rel for rel, _ in found)
             result.unresolved.append((key, f"ambiguous: matches tests in {where}"))
             continue
-        rel, test = best[0]
+        if not found:
+            if not missing:
+                result.unresolved.append((key, "its source could not be read"))
+                continue
+            for rel, classes in missing:
+                name = ".".join([*classes, base])
+                why = (
+                    f"{name} was decided ({key}) but is not defined in {rel} (inherited from another module, or "
+                    "generated?): the declarations around it are left alone; migrate this file by hand"
+                )
+                files[rel].mark_unseen(classes, why)
+                result.unmatched.append(
+                    (key, f"no {name} defined in {rel} (inherited from another module, or generated?)")
+                )
+            continue
+        rel, test = found[0]
         targets.setdefault(rel, {}).setdefault(test.qualname, set()).add(decision)
         keys.setdefault((rel, test.qualname), []).append(key)
 
@@ -786,8 +1123,14 @@ def apply_tags(
             q = t.qualname
             ids = traces[q][0]
             got = planned.get(q, set())
-            if not ids and got:
-                # Decided, but carries no tag: its ownership is a model edit.
+            blind = tf.blind_class(t)
+            if blind and got - {"?"}:
+                # Its static trace may miss inherited declarations.
+                if blind not in reasons:
+                    reasons.append(blind)
+                continue
+            if not ids and got and not blind:
+                # Decided, but declares no id: its ownership is a model edit.
                 result.untagged.extend(keys.get((rel, q), []))
                 continue
             if len(ids) < 2 and got <= {*ids, "?"}:
@@ -817,6 +1160,9 @@ def apply_tags(
             result.files.append(FileResult(rel, "refused", [str(exc)]))
             continue
         status = "changed" if new_text != tf.text else "unchanged"
-        result.files.append(FileResult(rel, status, [], changes, tf.text, new_text))
+        old_text = tf.text
+        if newline.get(rel) == "\r\n":
+            old_text, new_text = old_text.replace("\n", "\r\n"), new_text.replace("\n", "\r\n")
+        result.files.append(FileResult(rel, status, [], changes, old_text, new_text))
     result.untagged = sorted(set(result.untagged))
     return result

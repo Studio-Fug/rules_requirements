@@ -262,19 +262,45 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _collect_evidence(args: argparse.Namespace, command: str) -> ingest.Evidence | None:
+    """The evidence named by ``--evidence``; None (after saying why) when it holds no evidence at all.
+
+    A path that contributes no evidence file is a warning: a mistyped path
+    must not read as "this target has no results".
+    """
+    for spec in getattr(args, "ingestor", None) or []:
+        ingest.load_ingestor(spec)
+    paths = [_path(p) for p in args.evidence]
+    ev = ingest.collect(paths, only=args.format or None)
+    used = set(ev.files)
+    for given, path in zip(args.evidence, paths):
+        if not any(f in used for f in ingest.expand([path])):
+            print(f"warning: [no-evidence] {given}: no evidence file found there", file=sys.stderr)
+    if not ev.files:
+        print(f"rr {command}: no evidence found in {' '.join(args.evidence) or '(nothing given)'}", file=sys.stderr)
+        return None
+    return ev
+
+
+def _tsv(text: str) -> str:
+    """One TSV field: tabs, newlines and backslashes escaped (the JSON output keeps them)."""
+    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+
+
 def cmd_cases(args: argparse.Namespace) -> int:
     from rules_requirements.case_keys import index_cases, is_unscoped
 
-    for spec in args.ingestor or []:
-        ingest.load_ingestor(spec)
-    ev = ingest.collect([_path(p) for p in args.evidence], only=args.format or None)
+    ev = _collect_evidence(args, "cases")
+    if ev is None:
+        return 2
     rows = [r for r in index_cases(ev).values() if not args.target or r.key.target in args.target]
     if args.json:
         print(json.dumps([r.to_dict() for r in rows], indent=2, ensure_ascii=False))
     else:
         for r in rows:
             flags = [f for f in ("synthetic", "target_scope", "flaky", "duplicate") if getattr(r, f)]
-            print("\t".join([str(r.key), r.status, ",".join(r.declared) or "-", ",".join(flags) or "-", r.file or "-"]))
+            fields = [str(r.key), r.status, ",".join(r.declared) or "-", ",".join(flags) or "-", r.file or "-"]
+            print("\t".join(_tsv(f) for f in fields))
     targets = {r.key.target for r in rows}
     print(f"{len(rows)} case(s) in {len(targets)} target(s)", file=sys.stderr)
     unscoped = sorted(t for t in targets if is_unscoped(t))
@@ -301,7 +327,14 @@ def cmd_migrate_plan(args: argparse.Namespace) -> int:
         except migrate.WorksheetError as exc:
             print(f"rr migrate: {exc}", file=sys.stderr)
             return 2
-    evidence = ingest.collect([_path(p) for p in args.evidence], only=args.format or None)
+        problems = migrate.check_worksheet(previous)
+        for problem in problems:
+            print(f"rr migrate: {args.merge}: {problem}", file=sys.stderr)
+        if problems:
+            return 2
+    evidence = _collect_evidence(args, "migrate plan")
+    if evidence is None:
+        return 2
     plan = migrate.census(model, evidence)
     doc = migrate.worksheet(
         plan,
@@ -321,7 +354,21 @@ def cmd_migrate_plan(args: argparse.Namespace) -> int:
         f"{s['decided']} decided, {s['open']} open",
         file=sys.stderr,
     )
+    _warn_no_evidence(migrate.model_edits(doc))
     return 0
+
+
+def _warn_no_evidence(edits: list[dict[str, str]]) -> None:
+    missing: dict[str, list[str]] = {}
+    for e in edits:
+        if e["action"] == "no-evidence":
+            missing.setdefault(e["target"], []).append(e["requirement"])
+    for target, reqs in missing.items():
+        print(
+            f"warning: [no-evidence] {target} (verified_by of {', '.join(reqs)}) has no result in the evidence "
+            "given: nothing is decided about it, and its references are not unused",
+            file=sys.stderr,
+        )
 
 
 def cmd_migrate_apply(args: argparse.Namespace) -> int:
@@ -335,8 +382,15 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         print(f"rr migrate: {exc}", file=sys.stderr)
         return 2
     model = None
-    if args.model:
-        model, ok = _load(args.model, quiet=True)
+    model_paths = list(args.model)
+    if not model_paths:
+        # The model the worksheet was planned with, when it is still there.
+        planned = (doc.get("inputs") or {}).get("model") if isinstance(doc.get("inputs"), dict) else None
+        if isinstance(planned, list) and planned and all(os.path.exists(_path(str(p))) for p in planned):
+            model_paths = [str(p) for p in planned]
+            print(f"rr migrate: checking owners against the planned model: {' '.join(model_paths)}", file=sys.stderr)
+    if model_paths:
+        model, ok = _load(model_paths, quiet=True)
         if not ok:
             print("rr: requirements model is invalid (see above)", file=sys.stderr)
             return 2
@@ -360,7 +414,7 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
                 )
             )
         else:
-            with open(os.path.join(root, f.path), "w", encoding="utf-8") as fh:
+            with open(os.path.join(root, f.path), "w", encoding="utf-8", newline="") as fh:
                 fh.write(f.new_text)
         print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)
         for change in f.changes:
@@ -369,21 +423,36 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         print(f"refused {f.path} (left unchanged):", file=sys.stderr)
         for reason in f.reasons:
             print(f"  {reason}", file=sys.stderr)
+    if res.unmatched:
+        print(
+            f"{len(res.unmatched)} decided case(s) are not defined where the codemod looked; check them by hand:",
+            file=sys.stderr,
+        )
+        for key, why in res.unmatched:
+            print(f"  {key}: {why}", file=sys.stderr)
     if res.unresolved:
         print(f"{len(res.unresolved)} decided case(s) have no Python test to rewrite:", file=sys.stderr)
         for key, why in res.unresolved:
             print(f"  {key}: {why}", file=sys.stderr)
+    if res.outside:
+        print(f"{len(res.outside)} decided case(s) outside --only were skipped", file=sys.stderr)
     if res.untagged:
-        print(f"{len(res.untagged)} decided case(s) carry no tag; their owner is set in the model:", file=sys.stderr)
+        print(
+            f"{len(res.untagged)} decided case(s) declare no id in their source; their owner is set by "
+            "verified_by in the model:",
+            file=sys.stderr,
+        )
         for key in res.untagged:
             print(f"  {key}", file=sys.stderr)
-    edits = [e for e in migrate.model_edits(doc) if e["action"] in ("remove", "split")]
+    all_edits = migrate.model_edits(doc)
+    edits = [e for e in all_edits if e["action"] in ("remove", "split")]
     if edits:
         print("model edits the decisions imply (verified_by):", file=sys.stderr)
         for e in edits:
             print(f"  {e['requirement']}: {e['action']} {e['target']} ({e['reason']})", file=sys.stderr)
+    _warn_no_evidence(all_edits)
     print(f"{len(res.changed)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
-    return 1 if res.refused else 0
+    return 1 if res.refused or res.unmatched else 0
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
@@ -550,6 +619,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_arg(mp)
     mp.add_argument("--evidence", nargs="*", default=["bazel-testlogs"], help="evidence files/dirs/globs")
     mp.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
+    mp.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
     mp.add_argument("--out", default="", help="worksheet to write (.rrplan, YAML); stdout if no output is given")
     mp.add_argument("--json", default="", help="also write the worksheet as JSON")
     mp.add_argument("--md", default="", help="also write the worksheet as Markdown")

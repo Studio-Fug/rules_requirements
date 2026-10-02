@@ -150,11 +150,15 @@ its path within that target, written `<target>#<path>`:
   removed, so re-tagging a test never renames its case. A target that only
   produced Bazel's generated report has one case, `[target]`.
 - **Not identity**: retries (`test_attempts/attempt_N.xml`), repetitions
-  (`run_k_of_n`), shards (`shard_i_of_n`) and a second evidence root. They are
+  (`run_k_of_n`), shards (`shard_i_of_n`, or `shard_i_of_n_run_k_of_m` for a
+  sharded test run several times) and a second evidence root. They are
   folded into one result per key: the final attempt decides, with an earlier
   failure under a final pass marked *flaky*; across runs and roots the worst
   status wins; one key in two shards (or twice in one report) is marked
-  *duplicate*.
+  *duplicate*. A key seen only in an earlier attempt of a run that has a
+  final report (typically the `[target]` result of an attempt that crashed)
+  is not a case: its failure marks that run's passing cases *flaky*.
+- A case whose classname and name are both empty gets the path `[unnamed]`.
 
 `rr cases` prints every key in a set of evidence, with its status, the ids its
 evidence declares, flags (`synthetic`, `target_scope`, `flaky`, `duplicate`)
@@ -166,6 +170,11 @@ $ rr cases --evidence bazel-testlogs --target //pi/server:server_test
 ...
 $ rr cases --evidence bazel-testlogs --json > cases.json
 ```
+
+In the tab-separated output, a tab, newline or backslash inside a field is
+written `\t`, `\n` or `\\`; the JSON output keeps names as they are. An
+`--evidence` path that holds no evidence file is a warning, and no evidence at
+all is an error (exit status 2).
 
 Copy keys from here rather than guessing them. The keys do not change any
 verdict today; they are what {doc}`migrating-to-per-case` assigns owners to.

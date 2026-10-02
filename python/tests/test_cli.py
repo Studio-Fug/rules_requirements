@@ -248,7 +248,7 @@ def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
     rc, _, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--model", "requirements")
     assert rc == 1 and "4 file(s) rewritten, 1 refused" in err
     assert "refused app/tests/test_modes.py" in err
-    assert "//cc:codec_test#Codec::RoundTrip: no Python test found" in err
+    assert "//cc:codec_test#Codec::RoundTrip: no Python source of this module" in err
     assert "REQ-5: remove //web:clock_test" in err and "REQ-6: split //app/tests:smoke_test" in err
     assert (root / "app/tests/test_config.py").read_text() != before
 
@@ -256,6 +256,87 @@ def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
         capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--only", "app/tests/test_smoke.py"
     )
     assert rc == 0 and "0 file(s) rewritten, 0 refused" in err
+    # Cases outside --only are counted, not listed as "another language".
+    assert "decided case(s) outside --only were skipped" in err and "no Python source" not in err
+
+
+def test_migrate_apply_refuses_inherited_tests(capsys, tmp_path):
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "test_inh.py").write_text(
+        "import pytest\n\n\n"
+        '@pytest.mark.rr("REQ-1", "REQ-2")\n'
+        "class TestBase:\n    def test_x(self):\n        pass\n\n\n"
+        "class TestSub(TestBase):\n    def test_y(self):\n        pass\n",
+        encoding="utf-8",
+    )
+    sheet = write(
+        tmp_path,
+        "w.rrplan",
+        """
+        schema: rules_requirements/attribution-worksheet/v1
+        groups:
+        - target: //pkg:t
+          group: pkg.test_inh.TestBase
+          counts_toward: [REQ-1, REQ-2]
+          owner: REQ-1
+          cases: [{path: pkg.test_inh.TestBase::test_x}]
+        - target: //pkg:t
+          group: pkg.test_inh.TestSub
+          counts_toward: [REQ-1, REQ-2]
+          owner: REQ-2
+          cases: [{path: pkg.test_inh.TestSub::test_x}, {path: pkg.test_inh.TestSub::test_y}]
+        """,
+    )
+    before = (tmp_path / "pkg" / "test_inh.py").read_text(encoding="utf-8")
+    rc, _, err = run(capsys, "migrate", "apply", sheet, "--stage", "tags", "--root", str(tmp_path))
+    assert rc == 1 and "refused pkg/test_inh.py" in err and "inherits" in err
+    assert "not defined where the codemod looked" in err and "TestSub::test_x" in err
+    assert "declare no id" not in err
+    assert (tmp_path / "pkg" / "test_inh.py").read_text(encoding="utf-8") == before
+    # An owner the case does not count toward is rejected even without a model.
+    with open(sheet, encoding="utf-8") as fh:
+        typo = write(tmp_path, "typo.rrplan", fh.read().replace("owner: REQ-2", "owner: REQ-9"))
+    rc, _, err = run(capsys, "migrate", "apply", typo, "--stage", "tags", "--root", str(tmp_path), "--dry-run")
+    assert rc == 2 and "REQ-9 is not among the ids" in err
+
+
+def test_migrate_plan_and_cases_without_evidence(capsys, model_path, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    rc, out, err = run(capsys, "migrate", "plan", "--model", model_path, "--evidence", str(empty))
+    assert rc == 2 and out == "" and "no evidence found" in err and "[no-evidence]" in err
+    rc, _, err = run(capsys, "cases", "--evidence", str(tmp_path / "nonexistent"))
+    assert rc == 2 and "no evidence found" in err
+    # One good path and one mistyped one: a warning naming the bad path.
+    good = junit(tmp_path, "logs/report.xml", [("a", "passed", ["REQ-1"], "")])
+    rc, _, err = run(capsys, "cases", "--evidence", good, str(tmp_path / "typo"))
+    assert rc == 0 and f"[no-evidence] {tmp_path / 'typo'}" in err and str(good) not in err.split("[no-evidence]")[1]
+
+
+def test_migrate_plan_rejects_a_malformed_merge(capsys, model_path, tmp_path):
+    good = junit(tmp_path, "logs/report.xml", [("a", "passed", ["REQ-1"], "")])
+    for i, groups in enumerate(('["just a string"]', "{a: 1}")):
+        bad = write(
+            tmp_path, f"m{i}.rrplan", f"schema: rules_requirements/attribution-worksheet/v1\ngroups: {groups}\n"
+        )
+        rc, _, err = run(capsys, "migrate", "plan", "--model", model_path, "--evidence", good, "--merge", bad)
+        assert rc == 2 and "Traceback" not in err and ("expected a mapping" in err or "expected a list" in err)
+
+
+def test_cases_tsv_escapes_control_characters(capsys, tmp_path):
+    logs = tmp_path / "bazel-testlogs" / "pkg" / "t"
+    logs.mkdir(parents=True)
+    (logs / "test.xml").write_text(
+        '<testsuite name="s"><testcase classname="m" name="line&#10;two&#9;tab"/>'
+        '<testcase classname="  " name=" "/></testsuite>',
+        encoding="utf-8",
+    )
+    rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"))
+    lines = out.splitlines()
+    assert rc == 0 and len(lines) == 2 and all(len(line.split("\t")) == 5 for line in lines)
+    assert "//pkg:t#m::line\\ntwo\\ttab" in out and "//pkg:t#[unnamed]" in out
+    rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"), "--json")
+    assert {r["path"] for r in json.loads(out)} == {"m::line\ntwo\ttab", "[unnamed]"}
 
 
 def test_migrate_apply_rejects_bad_worksheets(capsys, model_path, tmp_path):

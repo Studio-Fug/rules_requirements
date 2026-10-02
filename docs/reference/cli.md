@@ -20,8 +20,11 @@ paths resolve against the directory Bazel was invoked from.
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds; `2`
 when the model is invalid for `scan`, `report`, `graph` and `migrate`, or a
-report format cannot be inferred. `migrate apply` exits `1` when it refused a
-file and `2` when the worksheet is unreadable or names an unknown owner. `wrap` exits with the wrapped command's status.
+report format cannot be inferred. `cases` and `migrate plan` exit `2` when the
+`--evidence` paths hold no evidence at all. `migrate apply` exits `1` when it
+refused a file or could not find a decided case's test in the module it
+names, and `2` when the worksheet is unreadable or an owner is not one of
+the ids its case counts toward. `wrap` exits with the wrapped command's status.
 
 The reference below is generated from the command's own argument parser.
 

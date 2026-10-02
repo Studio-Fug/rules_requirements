@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
 
@@ -38,6 +39,7 @@ from rules_requirements.util import dedupe, natural_key
 SCHEMA = "rules_requirements/attribution-worksheet/v1"
 OPEN = "?"
 NONE = "none"
+NO_EVIDENCE = "no-evidence"  # a model_edits action
 
 # Entities a tag counts toward today (trace.build_matrix); a tag naming a risk
 # or test method is misdirected evidence and counts for nothing.
@@ -178,7 +180,11 @@ def worksheet(
     cases and groups that are still contested.
     """
     prev_cases = decisions(previous) if previous else {}
-    prev_groups = {(g.get("target"), g.get("group")): g.get("owner") for g in (previous or {}).get("groups", [])}
+    prev_groups = {
+        (g.get("target"), g.get("group")): g.get("owner")
+        for g in (previous or {}).get("groups", []) or []
+        if isinstance(g, dict)
+    }
     by_group: dict[tuple[str, str], list[Unit]] = {}
     for unit in plan.contested:
         by_group.setdefault((unit.row.key.target, _group_of(unit.row)), []).append(unit)
@@ -260,6 +266,8 @@ def worksheet(
 
 def _owner(value: Any) -> str:
     text = "" if value is None else str(value).strip()
+    if text.lower() == NONE:
+        return NONE  # "None", "NONE": the keyword, whatever its case
     return text or OPEN
 
 
@@ -296,19 +304,25 @@ def model_edits(doc: Mapping[str, Any]) -> list[dict[str, str]]:
     ``action`` is ``remove`` (no case of the target is left for it), ``keep``
     (it still owns cases there, and no case went to anyone else),
     ``split`` (it keeps some cases while others went elsewhere — a whole-target
-    reference cannot express that; it needs case selectors, from v0.3) or
-    ``open`` (undecided cases remain).
+    reference cannot express that; it needs case selectors, from v0.3),
+    ``open`` (undecided cases remain) or ``no-evidence`` (the evidence given
+    has no result of the target, so nothing can be said: never a reason to
+    remove the reference).
     """
     decided = decisions(doc)
     out = []
-    for t in doc.get("targets", []):
+    for t in doc.get("targets", []) or []:
+        if not isinstance(t, dict) or "target" not in t:
+            continue
         target = t["target"]
         mine = {k: v for k, v in decided.items() if k.target == target}
-        for req in t.get("claimed_by", []):
-            owns = bool(t.get("uncontested", {}).get(req)) or any(v == req for v in mine.values())
+        for req in t.get("claimed_by", []) or []:
+            owns = bool((t.get("uncontested") or {}).get(req)) or any(v == req for v in mine.values())
             elsewhere = any(v not in (req, OPEN) for v in mine.values())
             pending = any(v == OPEN for v in mine.values())
-            if pending:
+            if not t.get("cases") and not mine:
+                action, why = NO_EVIDENCE, f"the evidence given has no result of {target}; re-plan with its testlogs"
+            elif pending:
                 action, why = "open", "undecided cases remain"
             elif not owns:
                 action, why = "remove", f"no case of {target} is left for {req}"
@@ -429,7 +443,18 @@ def render_markdown(doc: Mapping[str, Any]) -> str:
                     for c in g.get("cases", [])
                 ],
             )
-    edits = [e for e in model_edits(doc) if e["action"] != "open"]
+    missing = [e for e in model_edits(doc) if e["action"] == NO_EVIDENCE]
+    if missing:
+        out += [
+            "## Targets without evidence",
+            "",
+            "**Warning:** the evidence given has no result of these targets, so nothing can be decided about "
+            "them. Their `verified_by` references are not unused: re-run the plan with their test logs "
+            "(a HITL or manual run, or a corrected `--evidence` path).",
+            "",
+        ]
+        table(["Target", "Claimed by"], [[_code(e["target"]), e["requirement"]] for e in missing])
+    edits = [e for e in model_edits(doc) if e["action"] not in ("open", NO_EVIDENCE)]
     if edits:
         out += ["## Model edits implied by the decisions", ""]
         table(
@@ -457,19 +482,29 @@ class WorksheetError(ValueError):
 
 def load_worksheet(path: str) -> dict[str, Any]:
     """Read a ``.rrplan`` (YAML) or ``.json`` worksheet; raise :class:`WorksheetError`."""
+    text = ""
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         doc = json.loads(text) if path.endswith(".json") else yaml.safe_load(text)
     except (OSError, ValueError, yaml.YAMLError) as exc:
-        raise WorksheetError(f"{path}: cannot read worksheet: {exc}") from exc
+        hint = ""
+        if isinstance(exc, yaml.YAMLError) and re.search(r"owner:\s*\?\s*(#|$)", text, re.MULTILINE):
+            hint = " (an open owner is written with quotes: owner: '?')"
+        raise WorksheetError(f"{path}: cannot read worksheet: {exc}{hint}") from exc
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         raise WorksheetError(f"{path}: not an attribution worksheet (expected schema: {SCHEMA})")
     return doc
 
 
 def check_worksheet(doc: Mapping[str, Any], model: Model | None = None) -> list[str]:
-    """Problems with a (possibly hand-edited) worksheet; empty when usable."""
+    """Problems with a (possibly hand-edited) worksheet; empty when usable.
+
+    Each owner must be a string: ``?``, ``none`` (any case), or one of the
+    entities the case counts toward today — a decision chooses among the
+    existing claims, it never adds one. With a ``model``, the id must also be
+    a requirement, user need or mitigation of it.
+    """
     problems = []
     verifiable = verifiable_ids(model) if model is not None else None
     seen: set[CaseKey] = set()
@@ -481,24 +516,72 @@ def check_worksheet(doc: Mapping[str, Any], model: Model | None = None) -> list[
         if not isinstance(g, dict) or not isinstance(g.get("target"), str) or not isinstance(g.get("cases"), list):
             problems.append(f"{where}: expected a mapping with target and cases")
             continue
-        values = [(f"{where}.owner", g.get("owner"))]
+        group_counts = _id_list(g.get("counts_toward"))
+        group_owner = _owner(g.get("owner")) if _check_owner(f"{where}.owner", g, problems) else OPEN
+        if not _check_id(
+            f"{where}.owner", group_owner, group_counts, f"group {g.get('group', '')!r}", verifiable, problems
+        ):
+            group_owner = OPEN
         for ci, c in enumerate(g["cases"]):
+            at = f"{where}.cases[{ci}]"
             if not isinstance(c, dict) or not isinstance(c.get("path"), str):
-                problems.append(f"{where}.cases[{ci}]: expected a mapping with a path")
+                problems.append(f"{at}: expected a mapping with a path")
                 continue
             key = CaseKey(g["target"], c["path"])
             if key in seen:
-                problems.append(f"{where}.cases[{ci}]: {key} is listed twice")
+                problems.append(f"{at}: {key} is listed twice")
             seen.add(key)
+            counts = _id_list(c["counts_toward"]) if "counts_toward" in c else group_counts
             if "owner" in c:
-                values.append((f"{where}.cases[{ci}].owner", c["owner"]))
-        for at, raw in values:
-            value = _owner(raw)
-            if isinstance(raw, (list, tuple)) or any(ch in value for ch in ", \t"):
-                problems.append(f"{at}: {raw!r} names more than one id; a test case verifies at most one")
-            elif value not in (OPEN, NONE) and verifiable is not None and value not in verifiable:
-                problems.append(f"{at}: {value} is not a requirement, user need or mitigation of the model")
+                if _check_owner(f"{at}.owner", c, problems):
+                    _check_id(f"{at}.owner", _owner(c["owner"]), counts, str(key), verifiable, problems)
+            elif group_owner not in (OPEN, NONE) and counts is not None and group_owner not in counts:
+                problems.append(
+                    f"{at}: takes the group's owner {group_owner}, which {key} does not count toward "
+                    f"({', '.join(counts)}); give it an owner of its own"
+                )
     return problems
+
+
+def _check_id(
+    at: str, value: str, counts: list[str] | None, what: str, verifiable: set[str] | None, problems: list[str]
+) -> bool:
+    """Whether a decided id is one ``what`` counts toward (and, with a model, an entity of it)."""
+    if value in (OPEN, NONE):
+        return True
+    if verifiable is not None and value not in verifiable:
+        problems.append(f"{at}: {value} is not a requirement, user need or mitigation of the model")
+        return False
+    if counts is not None and value not in counts:
+        problems.append(
+            f"{at}: {value} is not among the ids {what} counts toward ({', '.join(counts) or 'none'}); "
+            "an owner is one of those, or none"
+        )
+        return False
+    return True
+
+
+def _id_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    return [str(v).strip() for v in value]
+
+
+def _check_owner(at: str, holder: Mapping[str, Any], problems: list[str]) -> bool:
+    """Whether ``holder``'s owner (if any) is a well-formed decision."""
+    if "owner" not in holder:
+        return True
+    raw = holder["owner"]
+    if isinstance(raw, (list, tuple)) or (isinstance(raw, str) and any(ch in raw.strip() for ch in ", \t")):
+        problems.append(f"{at}: {raw!r} names more than one id; a test case verifies at most one")
+        return False
+    if raw is None:
+        problems.append(f"{at}: empty; write '?' (quoted) to leave it open, or none")
+        return False
+    if not isinstance(raw, str):
+        problems.append(f"{at}: {raw!r} is not an id; quote ids that YAML reads as numbers or booleans")
+        return False
+    return True
 
 
 def plan_paths(paths: Iterable[str]) -> list[str]:
