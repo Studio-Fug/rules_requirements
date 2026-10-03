@@ -342,7 +342,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 def cmd_wrap(args: argparse.Namespace) -> int:
     from rules_requirements.hooks import wrap
 
-    return wrap.main(args.rest)
+    return wrap.main(args.rest, prog="rr wrap")
 
 
 def cmd_case(args: argparse.Namespace) -> int:
@@ -504,7 +504,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["wrap"]:
+        # Everything after `wrap` is wrap's own: argparse.REMAINDER would
+        # refuse a leading option (`rr wrap --junit-xml ...`, `--help`).
+        return cmd_wrap(argparse.Namespace(rest=argv[1:]))
+    args = build_parser().parse_args(argv)
     return int(args.func(args))
 
 

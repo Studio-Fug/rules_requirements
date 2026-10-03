@@ -137,6 +137,10 @@ byte-identical (the thermostat and integration report goldens are unchanged).
 - `rr_wrapped_test` with a `py_binary` (or any target building more than its
   executable) as `test` failed analysis under Bazel 7 ("expands to more than
   one file"); the wrapper now runs the target's executable.
+- `rr wrap` rejected its own options when they came first, as documented
+  (`rr wrap --junit-xml rust.xml -- ./test`, `rr wrap --help`: "unrecognized
+  arguments"); only `python -m rules_requirements.hooks.wrap` and the Bazel
+  macros worked. Everything after `wrap` now goes to the wrapper.
 
 ### Deprecated
 

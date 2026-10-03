@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
+import sys
 
 import pytest
 from conftest import MODEL, junit, write
@@ -155,8 +156,18 @@ def test_path_prefers_working_directory_but_falls_back_to_cwd(tmp_path, monkeypa
 
 
 def test_wrap_subcommand(capsys, tmp_path):
-    with pytest.raises(SystemExit):
-        cli.main(["wrap", "--junit-xml", str(tmp_path / "x.xml")])
+    # The documented spelling: wrap's options come first, then the command.
+    xml = tmp_path / "x.xml"
+    rc = cli.main(["wrap", "--junit-xml", str(xml), "--suite", "s", "--", sys.executable, "-c", "pass"])
+    assert rc == 0 and xml.exists()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["wrap", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.startswith("usage: rr wrap") and "--junit-in" in out
+    with pytest.raises(SystemExit) as exc:  # no command to run
+        cli.main(["wrap", "--junit-xml", str(xml)])
+    assert exc.value.code != 0
 
 
 def test_ingest_with_extra_ingestor_spec(capsys, tmp_path, monkeypatch):

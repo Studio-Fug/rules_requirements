@@ -38,6 +38,8 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
 ### Fixed
 
 - `rr_wrapped_test` accepts a `py_binary` as `test` under Bazel 7.
+- `rr wrap --junit-xml ... -- CMD` and `rr wrap --help` work (the CLI
+  rejected options before the command).
 
 ### Deprecated
 

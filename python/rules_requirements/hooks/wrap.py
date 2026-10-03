@@ -74,8 +74,10 @@ def _traced(trace: str) -> dict[str, list[str]]:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def main(argv: list[str] | None = None, prog: str | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog=prog, description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--format", choices=FORMATS, default="libtest")
     parser.add_argument("--junit-xml", default="")
     parser.add_argument("--suite", default="")
