@@ -90,8 +90,9 @@
 // -Werror=unused-value. An id that is empty or holds anything but ASCII
 // letters, digits, '_', '-' and '.' (the grammar [A-Za-z0-9_.-]+, whatever
 // config.id_pattern allows) is reported as an error case without running it
-// [RR-E104], and nothing inside a case can add another. Only `RR_CASE(name, "ID")` written on one line is also an
-// annotation for `rr scan`; the list form's ids are evidence only.
+// [RR-E104], and nothing inside a case can add another. Only
+// `RR_CASE(name, "ID")` written on one line is also an annotation for
+// `rr scan`; the list form's ids are evidence only.
 //
 // Flags (others are ignored, so the binary still accepts its own):
 //   --rr_list         print every case key (`suite::case [id]`) and exit

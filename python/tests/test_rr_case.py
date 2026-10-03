@@ -737,3 +737,11 @@ def test_an_rr_evidence_timeout_ends_the_running_case(binary, tmp_path):
     finally:
         if _alive(child):
             os.kill(child, signal.SIGKILL)
+
+
+def test_the_headers_comment_prose_fits_100_columns():
+    # The header's own documentation is read in editors and on GitHub; a
+    # reflow once left a 114-column line. Code lines follow clang-format.
+    with open(os.path.join(_INCLUDE, "rr_case.h"), encoding="utf-8") as fh:
+        long = [n for n, line in enumerate(fh, 1) if line.lstrip().startswith("//") and len(line.rstrip("\n")) > 100]
+    assert long == [], f"cc/rr_case.h: comment lines over 100 columns: {long}"
