@@ -12,3 +12,52 @@ cc_library(
     hdrs = ["rr_gtest.h"],
     includes = ["."],
 )
+
+# `#include "rr_case.h"` — RR_CASE / RR_CHECK / rr::RunCases: per-case JUnit
+# for plain-assert C++ tests, each case in its own forked child. Header-only,
+# no dependencies.
+cc_library(
+    name = "case",
+    hdrs = ["rr_case.h"],
+    includes = ["."],
+    deps = select({
+        "@bazel_tools//src/conditions:linux": [":gcov_dump_under_coverage"],
+        "//conditions:default": [],
+    }),
+)
+
+# Under `bazel coverage` on Linux, a case child starts its counts from zero
+# with __gcov_reset and writes them with __gcov_dump: unlike gcc's __gcov_fork
+# and __gcov_exit, these two cover every instrumented shared library as well
+# as the executable, whether or not the test's own source is instrumented (by
+# default a cc_test links its cc_library deps as shared libraries). gcc's
+# libgcov.a keeps each of them in an archive member nothing else pulls in, and
+# rr_case.h's weak references cannot pull one in, so the test binary is
+# linked with them explicitly. `-u` makes the references strong and GNU ld
+# then fails a link that has no definition, so --coverage comes too: the
+# runtime is linked even into a test that turns the `coverage` feature off.
+# Not tested: clang, whose compiler-rt profile runtime (--coverage and
+# -fprofile-instr-generate) defines both as well.
+cc_library(
+    name = "gcov_dump_under_coverage",
+    linkopts = select({
+        ":coverage": [
+            "--coverage",
+            "-Wl,-u,__gcov_dump",
+            "-Wl,-u,__gcov_reset",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:private"],
+)
+
+config_setting(
+    name = "coverage",
+    values = {"collect_code_coverage": "true"},
+    visibility = ["//visibility:private"],
+)
+
+exports_files([
+    "BUILD.bazel",
+    "rr_case.h",
+])

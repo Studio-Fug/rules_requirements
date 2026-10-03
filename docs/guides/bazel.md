@@ -25,6 +25,7 @@ the module provides these targets:
 | `@rules_requirements//python` | The Python library (`py_library`, standard library only). |
 | `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
 | `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
+| `@rules_requirements//cc:case` | Per-case JUnit for plain-assert C++ tests (`#include "rr_case.h"`). |
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
 | `@rules_requirements//js:verifies.cjs` | The node:test `verifies(t, id)` helper (dependency-free CommonJS). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
@@ -224,7 +225,9 @@ a `js_test` for an `rr_node_test` changes no label, `test_suite` or CI command.
 | `**kwargs` | | Forwarded to the `js_test` (`size`, `tags`, `env`, `timeout`, ...). |
 
 googletest needs no macro: a `cc_test` depending on
-`@rules_requirements//cc:gtest` writes traced JUnit by itself.
+`@rules_requirements//cc:gtest` writes traced JUnit by itself, and so does a
+plain-assert `cc_test` depending on `@rules_requirements//cc:case`
+({ref}`rr_case.h <rr-case-h>`).
 
 ## Evidence and reports
 
@@ -247,7 +250,7 @@ again only when something they depend on changes.
 | Attribute | Default | |
 | --------- | ------- | - |
 | `tests` | required | Test targets to run. |
-| `timeout` | `300` | Per-test timeout in seconds; a test that exceeds it is recorded as failed. |
+| `timeout` | `300` | Per-test timeout in seconds; a test that exceeds it gets `SIGTERM` (then `SIGKILL` 2 s later) and is recorded as failed. |
 | `local` | `False` | Add `no-remote-exec` to the action. |
 | `testonly` | `True` | |
 

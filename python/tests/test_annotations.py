@@ -68,6 +68,21 @@ def test_symbol_binding_stops_at_unrelated_code():
     assert refs[0].symbol == "fn go"
 
 
+def test_rr_case_tag_names_its_case():
+    src = (
+        "RR_CASE(plain_case) { RR_CHECK(true); }\n"
+        'RR_CASE(tagged_case, "REQ-7") {\n'
+        "  RR_CHECK(true);\n"
+        "}\n"
+        "// @rr(REQ-8): the case below\n"
+        "RR_CASE(commented_case) {}\n"
+    )
+    got = [(r.ids, r.relation, r.line, r.symbol) for r in extract(src, "fw/codec_test.cc", Config())]
+    # An untagged RR_CASE is no reference; a tagged one verifies, in any file.
+    assert got == [(("REQ-7",), "verifies", 2, "tagged_case"), (("REQ-8",), "verifies", 5, "commented_case")]
+    assert extract('RR_CASE(x, "REQ-1") {}', "src/lib.cc", Config())[0].relation == "verifies"
+
+
 @pytest.mark.parametrize(
     "path, is_test",
     [

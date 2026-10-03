@@ -10,6 +10,7 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 | pytest | `@pytest.mark.rr("REQ-1", level="sil")` | `rr_py_test` | pip-installed plugin, `pytest --junitxml=...` |
 | unittest | `@rr.verifies("REQ-1")` | `py_test` + `rr.unittest_main()` | `rr.unittest_main()` / `--junit-xml` |
 | googletest | `RR_VERIFIES("REQ-1");` | `cc_test` + `@rules_requirements//cc:gtest` | `--gtest_output=xml:...` |
+| plain-assert C++ | `RR_CASE(name, "REQ-1") { ... }` | `cc_test` + `@rules_requirements//cc:case` | `--rr_junit=...` |
 | Rust | `rr::verifies!("REQ-1");` | `rr_rust_test` | `rr wrap -- <test binary>` |
 | node:test | `verifies(t, "REQ-1")` or `t.diagnostic("rr.requirement=REQ-1")` | `rr_node_test` | — |
 | anything else | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
@@ -152,6 +153,133 @@ with `--gtest_output=xml:results.xml`.
 and recorded as one comma-separated `requirements` property. The helpers are
 also available as functions — `rules_requirements::Verifies({...})`,
 `Level(...)`, `Artifact(key, value)`.
+
+(rr-case-h)=
+## Plain-assert C++: `rr_case.h`
+
+Many C and C++ tests are a `main()` that calls test functions full of
+`assert()`: the first failure aborts the binary, and Bazel can only report the
+whole target. `rr_case.h` turns such a binary into one JUnit case per test
+function, without googletest. The header is C++ (11 or later); a C-style
+`assert()` test uses it when compiled as C++:
+
+```cpp
+#include "rr_case.h"
+
+RR_CASE(wifi_settings_vector) {                  // one case
+  RR_CHECK(Encode(kSettings) == kWireVector);    // like assert(), kept under NDEBUG
+}
+
+RR_CASE(rejects_truncated_frame, "REQ-7") {      // optional: the one id it verifies
+  assert(!Decode(kTruncated));                   // plain assert() works too
+}
+
+int main(int argc, char** argv) { return rr::RunCases(argc, argv, "improv_codec"); }
+```
+
+An existing main converts without moving its test functions — list them:
+
+```cpp
+int main(int argc, char** argv) {
+  return rr::RunCases(argc, argv, "improv_codec", {
+      {"wifi_settings_vector", test_wifi_settings_vector},
+      {"rejects_truncated_frame", test_rejects_truncated_frame, "REQ-7"},
+  });
+}
+```
+
+In Bazel, add `@rules_requirements//cc:case` to the `cc_test`'s `deps`; the
+library is header-only and has no dependencies. Under `bazel test` the JUnit
+goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
+
+- **Isolation.** On POSIX each case runs in its own forked child, with core
+  dumps suppressed. A failing `assert()` or `RR_CHECK`, a crash, an uncaught
+  exception or a non-zero `exit()` fails that case only — the message says how
+  (`terminated by SIGABRT: codec_test.cc:31: RR_CHECK(n == 4) failed`,
+  `terminated by SIGSEGV`, `exited with status 1: uncaught exception: ...`) —
+  and the next case still runs. The binary exits 1 if any case failed, so the
+  target fails exactly as it did before. Without `fork` (Windows) the cases
+  run in-process, and a failing `assert()` ends the binary there.
+- **No shared state.** Each case starts from the parent as it was before the
+  first case: a global, heap object or `chdir` set by one case is gone in the
+  next, so a case must not depend on an earlier one (in a plain `main` it
+  could). Start no threads before `rr::RunCases` — `fork` copies only the
+  calling thread, so a lock another thread held stays locked in the child.
+- **Child lifetime.** A child ends with `_exit`, so `atexit` handlers and
+  static destructors run once, in the runner, never per case. A hung case
+  does not outlive its runner: a `SIGTERM`, `SIGINT` or `SIGHUP` to the
+  runner (an `rr_evidence` timeout sends `SIGTERM`, then `SIGKILL` after 2 s)
+  kills the running case's child first, and on Linux the child also dies with
+  a runner killed by `SIGKILL`. The signal then goes to what the program had
+  for it: by default it ends the runner as the signal would have; a handler
+  the program installed before `rr::RunCases` runs as it would have (if it
+  returns, the runner goes on and reports the killed case as failed); a
+  signal the program ignores stays ignored. A case starts with the runner's
+  own signal mask and signal dispositions, as they were before
+  `rr::RunCases`. Tests run by `rr_evidence` stay in the action's process
+  group, so a cancelled build reaches them too.
+- **Coverage** (Linux and other ELF targets). A child starts its case's
+  counts from zero and writes them before it ends, so a line run in a case
+  is counted once per run of it, and a line run before the cases once, in the
+  test executable and in every instrumented shared library it loads (by
+  default `bazel coverage` links a `cc_test`'s `cc_library` deps as shared
+  libraries). That takes libgcov's `__gcov_reset` and `__gcov_dump`, which
+  gcc links only on request: `@rules_requirements//cc:case` adds
+  `-Wl,-u,__gcov_dump -Wl,-u,__gcov_reset` to the link under `bazel coverage`
+  on Linux. A `--coverage` build of your own outside `bazel coverage` needs
+  the same two link options; without them, code in a shared library that
+  only cases run is not counted at all, and unless the test's own source is
+  instrumented (`--instrument_test_targets`), code run before the cases is
+  counted once more per case. Verified with gcc 13: shared and static links,
+  the test's own source instrumented or not, and `bazel coverage` with Bazel
+  7.7.1 and 8.8.1. Not tested: clang, with `--coverage` (compiler-rt defines
+  `__gcov_dump` and `__gcov_reset` itself) or with
+  `-fprofile-instr-generate` (`__llvm_profile_reset_counters`,
+  `__llvm_profile_write_file`; `LLVM_PROFILE_FILE` needs `%p` or `%m`, as
+  Bazel sets it). On macOS the children's coverage is lost.
+- **Leaks.** Under LeakSanitizer (ELF targets) a case that leaks memory fails
+  (`exited with status 1: rr_case: LeakSanitizer found memory leaked by this
+  case`). The runner checks once before the first case: memory leaked before
+  any case ran (in `main` or a static initializer) fails the binary without
+  failing any case (`rr_case: LeakSanitizer found memory leaked before any
+  case ran`), and the cases' own checks are then skipped, since a child's
+  leak could no longer be told apart from it. On macOS the children's leak
+  checks are lost.
+- **Case keys.** Each case is `<testcase classname="<suite>" name="<case>">`,
+  reported as `<suite>::<case>` (`improv_codec::wifi_settings_vector`). Case
+  names must be unique within a suite; a duplicate is reported as an error.
+- **One requirement per case.** A case names at most one id, recorded as its
+  `requirement` property. `RR_CASE(name, "REQ-1", "REQ-2")` does not compile
+  (`RR-E101`; with 16 or more ids the error is an unrelated one), nor does
+  `RR_CASE(name, ("REQ-1", "REQ-2"))`. In the list form that comma
+  expression compiles, with no warning at all unless `-Wall` or
+  `-Wunused-value` is on, and records just `REQ-2`, so build such tests with
+  `-Werror=unused-value`. An id that is
+  empty or holds anything but ASCII letters, digits, `_`, `-` and `.` makes
+  the case an error without running it (`RR-E104`). `rr_case.h` accepts ids
+  matching `[A-Za-z0-9_.-]+` only: a project whose `config.id_pattern` allows
+  other characters must use another hook. There is no call to add ids from
+  inside a case. The id is optional: a case without one is still a
+  test case in the report, and a whole-target `verified_by` reference covers it.
+- **Evidence and annotations.** `RR_CASE(name, "REQ-1")` written on one line
+  is also an annotation for `rr scan`; the list form's ids
+  (`{"name", fn, "REQ-7"}`) are evidence only, like an `RR_CASE` that a
+  formatter splits across lines. `RR_CASE` also records where the case is
+  defined, as the `<testcase>`'s `file` and `line`.
+- **Killed runs.** The JUnit is rewritten before each case with that case
+  recorded as an error, so a binary killed mid-case (a Bazel timeout) still
+  reports the cases that finished and names the one that did not.
+- **Selection.** `bazel test --test_filter=GLOB[,GLOB...]` runs the cases whose
+  name or `suite::case` key matches (`*`, `?`), and `shard_count` is honoured.
+
+| Flag | Meaning |
+| ---- | ------- |
+| `--rr_list` | Print every case key (`suite::case [REQ-1]`) and exit. |
+| `--rr_case=NAME` | Run one case in-process, without fork or JUnit — for a debugger. |
+| `--rr_junit=PATH` | Write the JUnit here instead of `$XML_OUTPUT_FILE`. |
+
+Other arguments are left to the test. `rr_case.h` records no level: a tagged
+case provides the model's `default_provided_level`.
 
 ## Rust
 

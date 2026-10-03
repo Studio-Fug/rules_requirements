@@ -13,7 +13,8 @@ The universal form is a comment (or docstring) tag::
 files (``test_*.py``, ``*_test.*``, ``tests/`` ...); ``@rr.implements`` /
 ``@rr.verifies`` state it explicitly. The language hooks are recognised too:
 ``@pytest.mark.rr(...)`` / ``@pytest.mark.requirements(...)``,
-``rr::verifies!(...)`` (Rust) and ``RR_VERIFIES(...)`` (googletest).
+``rr::verifies!(...)`` (Rust), ``RR_VERIFIES(...)`` (googletest) and
+``RR_CASE(name, "ID")`` (``rr_case.h``).
 
 Each :class:`Reference` records the ids, the relation, the location, the
 trailing description and — when a definition follows the tag — the symbol it
@@ -43,6 +44,8 @@ _TAGS = [
     (re.compile(r"\bmark\.(?:rr|requirements)\((?P<ids>[^)]*)\)"), VERIFIES, False),
     (re.compile(r"\brr::verifies!\s*\((?P<ids>[^)]*)\)"), VERIFIES, True),
     (re.compile(r"\bRR_VERIFIES\s*\((?P<ids>[^)]*)\)"), VERIFIES, True),
+    # rr_case.h: the tag is the case's own definition, `RR_CASE(name, "ID") {`.
+    (re.compile(r"\bRR_CASE\s*\(\s*\w+\s*,(?P<ids>[^)]*)\)"), VERIFIES, False),
 ]
 _DESCRIPTION = re.compile(r"^\s*:\s*(?P<text>.+?)\s*(?:\*/|-->|\"\"\"|''')?\s*$")
 
@@ -52,6 +55,7 @@ _DEF = re.compile(
     r"(?P<name>[A-Za-z_][\w:]*)"
 )
 _GTEST = re.compile(r"^\s*(?:TEST|TEST_F|TEST_P|TYPED_TEST)\s*\(\s*(?P<suite>\w+)\s*,\s*(?P<name>\w+)")
+_RR_CASE = re.compile(r"^\s*RR_CASE\s*\(\s*(?P<name>\w+)")
 # Lines to look past while searching for the annotated definition (attributes,
 # decorators, comments); a blank line ends the search.
 _SKIPPABLE = re.compile(r"^\s*(?:#\[|@|//|#(?!\w)|\*|/\*)")
@@ -102,6 +106,9 @@ def _def_name(line: str) -> str:
     g = _GTEST.match(line)
     if g:
         return f"{g.group('suite')}.{g.group('name')}"
+    c = _RR_CASE.match(line)
+    if c:
+        return c.group("name")
     d = _DEF.match(line)
     if d:
         return f"{d.group('kw')} {d.group('name').rstrip(':')}"
@@ -157,7 +164,8 @@ def extract(text: str, path: str, config: Config) -> list[Reference]:
                         path=path,
                         line=index + 1,
                         text=desc.group("text") if desc else "",
-                        symbol=_symbol(lines, index, m.start(), inside),
+                        # A tag that is itself a definition (RR_CASE) names it.
+                        symbol=_def_name(line[m.start() :]) or _symbol(lines, index, m.start(), inside),
                     )
                 )
     return refs

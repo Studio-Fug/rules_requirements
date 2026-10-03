@@ -27,6 +27,7 @@ TEST(Parser, RejectsEmpty) { ... }
 | `@pytest.mark.rr(...)`, `@pytest.mark.requirements(...)` | verifies |
 | `rr::verifies!(...)` (Rust) | verifies |
 | `RR_VERIFIES(...)` (googletest) | verifies |
+| `RR_CASE(name, ID)` (`rr_case.h`), on one line | verifies |
 
 The language hooks ({doc}`hooks`) double as annotations, so a tagged test is
 both evidence (at run time) and a verification link (in the source).
@@ -41,6 +42,9 @@ Details:
   without a recognisable id is ignored.
 - Text after `):` up to the end of the line is the annotation's
   **description** (a trailing `*/`, `-->`, `"""` or `'''` is dropped).
+- `RR_CASE(name, "ID")` is recognised only when written on one line. The
+  ids of `rr_case.h`'s list form (`{"name", fn, "REQ-7"}`) are evidence
+  only, not annotations.
 - Any entity kind can be annotated — `# @rr(MIT-2)` on the function that
   realises a risk control is as useful as a requirement link.
 
@@ -67,8 +71,9 @@ next to the location (`thermostat/controller.py:27 (class Controller)`):
 Recognised definitions are `def`, `class`, `fn`, `struct`, `enum`, `trait`,
 `impl`, `func`, `function`, `interface`, `type`, `module`, `mod` and
 `namespace` (with common modifiers such as `pub`, `async`, `export`, `static`),
-and googletest's `TEST`, `TEST_F`, `TEST_P` and `TYPED_TEST`, which bind as
-`Suite.Name`.
+googletest's `TEST`, `TEST_F`, `TEST_P` and `TYPED_TEST`, which bind as
+`Suite.Name`, and `RR_CASE(name)`, which binds as `name` (a tagged `RR_CASE`
+binds to itself).
 
 ## Legacy conventions
 

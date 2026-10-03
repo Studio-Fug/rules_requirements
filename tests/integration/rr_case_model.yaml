@@ -1,0 +1,18 @@
+# rr_case.h integration model: one requirement per case of rr_case_test.cc,
+# so the golden report proves each case's single id survives the trip through
+# JUnit into the report, and that a failing case fails nothing else.
+project:
+  name: rules_requirements rr_case.h integration
+user_needs:
+  - id: UN-1
+    title: Trace plain-assert C++ tests case by case
+requirements:
+  - id: REQ-1
+    title: A passing case verifies the one requirement it names
+    satisfies: [UN-1]
+  - id: REQ-2
+    title: A failing case fails its own requirement
+    satisfies: [UN-1]
+  - id: REQ-3
+    title: The cases after a failing one still run and count
+    satisfies: [UN-1]
