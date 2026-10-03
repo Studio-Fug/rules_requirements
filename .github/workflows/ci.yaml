@@ -55,6 +55,29 @@ jobs:
           print(f"### Line coverage: {rate:.1f}%")
           PY
 
+  node:
+    # rr_node_test's runner reads node:test's reporter events; pin their shape
+    # on every Node line the runner supports.
+    name: node:test conformance (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 18 runs the fallback (one synthetic result); the others per case.
+        node: ["18", "20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - run: pip install -e ".[test]"
+      # RR_NODE_MIN: a node that is missing or unreadable fails the job
+      # instead of skipping every test.
+      - run: RR_NODE="$(command -v node)" RR_NODE_MIN="${{ matrix.node }}" pytest -rs python/tests/test_node_runner.py
+
   bazel:
     name: Bazel ${{ matrix.bazel }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
