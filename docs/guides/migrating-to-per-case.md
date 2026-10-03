@@ -250,10 +250,17 @@ A file is **refused** and left unchanged, never half-migrated, when:
   and `with ... as` targets, `:=` anywhere in the scope, `from m import ...`
   (also `as`, and star imports, which may bring tests), `del`, `global`,
   `except ... as`, `match` captures, `Class.test_x = ...`,
-  `globals()["test_x"] = ...` and `setattr(..., "test_x", ...)`; also, from
-  inside a function, `global test_x`, `globals()[...]` / `setattr` stores,
-  and `exec` / `eval` / `globals()` / `setattr` with a computed name at the
-  top of a module or class. A name is a test name when pytest's
+  `globals()["test_x"] = ...` and `setattr(..., "test_x", ...)`, and `exec`
+  / `eval` / `globals()` / `setattr` with a computed name at the top of a
+  module or class. Bindings from inside a function body, which may run at
+  import time, count too, and then nothing in the file is changed: `global
+  test_x`; an attribute store, `setattr` / `delattr` or `__setattr__` naming
+  a test or with a computed name, on anything but a method's own `self`
+  (`TestK.test_x = ...`, `sys.modules[__name__].test_x = ...`); any use of
+  `globals()`, `vars(x)` or `x.__dict__` (except `self.__dict__`); `exec` and
+  `eval`. A class deriving from another may be a `unittest.TestCase`, which
+  pytest collects whatever its name, so `Alias = Checks` counts as a test
+  name bound by an assignment too. A name is a test name when pytest's
   `python_functions` or `python_classes` match it (`test` and `Test` by
   default; the codemod also reads the patterns configured in `pytest.ini`,
   `pyproject.toml`, `tox.ini` or `setup.cfg` under `--root`). A literal
@@ -268,12 +275,25 @@ A file is **refused** and left unchanged, never half-migrated, when:
   the change would reach tests in that file unseen. Both files are refused.
   The codemod indexes every Python file under `--root` for this, also those
   outside `--only`: `from m import C` (with or without `as`), `import m` with
-  `m.C`, relative imports and star imports, and a base class it cannot trace
-  to an import by its name. Files are read in their own encoding (a PEP 263
-  coding cookie or a BOM, as Python reads them) and written back in it.
+  `m.C` (also `pkg.sub.C` with only `pkg` imported), relative imports and
+  star imports, `importlib.import_module("m")` and `__import__("m")` with a
+  literal module name (also relative ones), and a base class it cannot trace
+  to an import by its name. A package passed around as an object
+  (`getattr(pkg, ...)`, `__import__("pkg")`) reaches every module below it. Files are read in
+  their own encoding (a PEP 263 coding cookie or a BOM, as Python reads
+  them) and written back in it.
 - a file under `--root` cannot be read or parsed, while some declaration
   would change: it may import or subclass anything. That file is refused by
-  name, together with every file that would change.
+  name, together with every file that would change. A file holding a decided
+  case that cannot be read or parsed (an unknown coding cookie, or syntax
+  newer than the Python running `rr`) is refused by name too.
+- a test module, or a file a test module imports, imports a module by a call
+  whose module the codemod cannot name: `importlib.import_module(name)` with
+  a computed name, `importlib.util.spec_from_file_location`,
+  `runpy.run_path`, `exec` of a computed string or of a literal naming an
+  import, and the like. pytest collects what it imports there, which may be
+  any test or class, so when any declaration in the tree would change, that
+  file and every file that would change are refused.
 - a class has a base the codemod cannot resolve statically: a name bound by
   an assignment or a `def` (`B = importlib.import_module("m").C`,
   `B = __import__(...)`, `try: from m import B` / `except: B = object`) or an
@@ -315,8 +335,9 @@ when one star-imports the other or passes it around as a module object, or
 imports, references (`m.name`) or subclasses a class of it, a test-named
 name, or a name not defined at its top level. Importing a plain helper
 function or constant does not link files: changing a file never changes what
-such a name holds. A file that cannot be read, and a class whose base cannot
-be resolved, are linked to the files refused with them.
+such a name holds. A file that cannot be read, a class whose base cannot
+be resolved, and an import call whose module cannot be named are linked to
+the files refused with them.
 
 It exits 0 when every file it had to change was rewritten, 1 when a file was
 refused or a decided case's test was not found in its module (with or without

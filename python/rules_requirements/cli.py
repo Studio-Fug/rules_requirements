@@ -677,8 +677,9 @@ def build_parser() -> argparse.ArgumentParser:
         "such case and is not linked to a refused file or one holding such a case (default: write nothing). Two "
         "files are linked when one star-imports the other or passes it around as a module, or imports, "
         "references or subclasses a class, a test-named name or a name not defined at its top level; importing "
-        "a plain helper function or constant does not link them. A file that cannot be read, and a class whose "
-        "base cannot be resolved, are linked to the files refused with them",
+        "a plain helper function or constant does not link them. A file that cannot be read, a class whose base "
+        "cannot be resolved, and an import call whose module cannot be named are linked to the files refused "
+        "with them",
     )
     ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
     ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")

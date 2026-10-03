@@ -1053,6 +1053,93 @@ for _shape, _body, _hidden, _message in [
     ("class-alias", "\nTestAlias = TestK\n", "TestAlias::test_a", "TestAlias is bound by an assignment"),
 ]:
     _HIDDEN[_shape] = (_CLASS.format(body=_body), _hidden, _message)
+# From inside a function that runs at import time (round 4): every way a
+# function body can bind a name in the module or a class.
+_RUN = "\n\n_install()\n"
+_AT_RUN_TIME = "may bind tests the codemod cannot name, at run time"
+for _shape, _post, _hidden, _message in [
+    (
+        "fn-attribute",
+        "class TestI:\n    pass\n\n\ndef _install():\n    TestI.test_s = helper\n" + _RUN,
+        "TestI::test_s",
+        "test_s is bound by an attribute assignment, at run time",
+    ),
+    (
+        "fn-setattr",
+        'class TestI:\n    pass\n\n\ndef _install():\n    setattr(TestI, "test_s", helper)\n' + _RUN,
+        "TestI::test_s",
+        "test_s is bound by setattr(), at run time",
+    ),
+    (
+        "fn-setattr-computed",
+        'import sys  # noqa: E402\n\n\ndef _install(n="test_" + "d"):\n'
+        "    setattr(sys.modules[__name__], n, helper)\n" + _RUN,
+        "test_d",
+        "setattr() with a computed name " + _AT_RUN_TIME,
+    ),
+    (
+        "fn-setattr-alias",
+        'class TestI:\n    pass\n\n\ndef _install():\n    s = setattr\n    s(TestI, "test_q", helper)\n' + _RUN,
+        "TestI::test_q",
+        "setattr " + _AT_RUN_TIME,
+    ),
+    (
+        "fn-dunder-setattr",
+        'class TestI:\n    pass\n\n\ndef _install():\n    type.__setattr__(TestI, "test_t", helper)\n' + _RUN,
+        "TestI::test_t",
+        "__setattr__() " + _AT_RUN_TIME,
+    ),
+    (
+        "fn-classmethod",
+        "class TestI:\n    @classmethod\n    def install(cls):\n        cls.test_c = helper\n\n\nTestI.install()\n",
+        "TestI::test_c",
+        "test_c is bound by an attribute assignment, at run time",
+    ),
+    (
+        "fn-globals-item",
+        'def _install():\n    globals()["test_g"] = helper\n' + _RUN,
+        "test_g",
+        "globals() " + _AT_RUN_TIME,
+    ),
+    ("fn-globals-update", "def _install():\n    globals().update(test_u=helper)\n" + _RUN, "test_u", "globals() "),
+    (
+        "fn-globals-alias",
+        'def _install():\n    g = globals()\n    g["test_g"] = helper\n' + _RUN,
+        "test_g",
+        "globals() " + _AT_RUN_TIME,
+    ),
+    (
+        "fn-exec",
+        'def _install():\n    exec("test_e = helper", {"__builtins__": {}}, globals())\n' + _RUN,
+        "test_e",
+        _AT_RUN_TIME,
+    ),
+    (
+        "fn-sys-modules",
+        "def _install():\n    import sys\n\n    sys.modules[__name__].test_mm = helper\n" + _RUN,
+        "test_mm",
+        "test_mm is bound by an attribute assignment, at run time",
+    ),
+    (
+        "fn-module-dict",
+        'def _install():\n    import sys\n\n    sys.modules[__name__].__dict__["test_md"] = helper\n' + _RUN,
+        "test_md",
+        "sys.modules[__name__].__dict__ " + _AT_RUN_TIME,
+    ),
+    (
+        "fn-vars",
+        'def _install():\n    import sys\n\n    vars(sys.modules[__name__])["test_v"] = helper\n' + _RUN,
+        "test_v",
+        "vars() " + _AT_RUN_TIME,
+    ),
+    (
+        "module-setattr-alias",
+        'class TestI:\n    pass\n\n\n_s = setattr\n_s(TestI, "test_q", helper)\n',
+        "TestI::test_q",
+        "setattr, which may bind tests the codemod cannot name",
+    ),
+]:
+    _HIDDEN[_shape] = (_MODULE.format(post=_post), _hidden, _message)
 
 
 @pytest.mark.parametrize("shape", sorted(_HIDDEN))
@@ -1185,6 +1272,17 @@ def test_every_other_binding_of_a_test_name_is_refused(shape):
         "import pkg.helpers as test_mod  # noqa: E402\n",  # nor is a module
         "def check(x):\n    test_local = x\n    return test_local\n",  # a function's own variable
         'CONFIG = {}\nCONFIG["test_mode"] = True\n',  # a dict key
+        # A method's own instance (pytest collects from the class, not an instance).
+        "class Helper:\n    def __init__(self, name):\n        self.test_data = 1\n        setattr(self, name, 2)\n"
+        '        setattr(self, "test_s", 3)\n        object.__setattr__(self, "test_f", 4)\n'
+        '        super().__setattr__("test_y", 5)\n        self.__dict__.update(x=1)\n',
+        # A closure still sees the method's instance.
+        "class Helper:\n    def run(self):\n        def inner():\n            self.test_data = 1\n\n        inner()\n",
+        # pytest's monkeypatch, at test time only.
+        'def _patch(monkeypatch):\n    monkeypatch.setattr("os.sep", "/")\n',
+        # A class that may be a TestCase, instantiated or read, is not aliased.
+        "import unittest  # noqa: E402\n\n\nclass Base(unittest.TestCase):\n    LIMIT = 1\n\n\n"
+        "CASE = Base()\nLIMIT = Base.LIMIT\n",
     ],
 )
 def test_bindings_that_cannot_hold_a_test_do_not_refuse(post):
@@ -1214,6 +1312,23 @@ _OPAQUE = {
     "augmented-pytestmark": (
         'AB = pytest.mark.rr("A", "B")\npytestmark = []\npytestmark += [AB]\n\n\ndef test_x():\n    pass\n',
         "pytestmark bound by an assignment",
+    ),
+    # An annotated pytestmark holding a literal is no data to exempt (round 4).
+    "annotated-pytestmark": (
+        'pytestmark: list = [pytest.mark.rr("A", "B")]\n\n\ndef test_x():\n    pass\n',
+        "pytestmark bound by an assignment",
+    ),
+    "class-annotated-pytestmark": (
+        'class TestK:\n    pytestmark: list = [pytest.mark.rr("A", "B")]\n\n    def test_x(self):\n        pass\n',
+        "pytestmark bound by an assignment",
+    ),
+    "second-pytestmark": (
+        'pytestmark = pytest.mark.rr("C")\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_x():\n    pass\n',
+        "a second pytestmark assignment in one scope",
+    ),
+    "with-args": (
+        '@pytest.mark.rr.with_args("A", "B")\ndef test_x():\n    pass\n',
+        "the decorator @pytest.mark.rr.with_args",
     ),
 }
 
@@ -1558,3 +1673,193 @@ def test_configured_test_names_count_as_tests(tmp_path):
     assert res.unmatched == []
     (f,) = res.refused
     assert "check_b is bound by an assignment" in f.reasons[0], f.reasons
+
+
+def test_a_test_case_class_bound_to_another_name_is_refused(tmp_path):
+    """pytest collects a unittest.TestCase whatever name it is bound to:
+    ``Alias = Checks`` collects Alias::test_x and Alias::test_y, which the
+    class's narrowed marker would reach unseen."""
+    text = (
+        'import unittest\n\nimport pytest\n\n\n@pytest.mark.rr("A", "B")\nclass Checks(unittest.TestCase):\n'
+        "    def test_x(self):\n        pass\n\n    def test_y(self):\n        pass\n\n\nAlias = Checks\n"
+    )
+    path = _repo(tmp_path, "pkg/test_u.py", text)
+    assert _runtime_traces(tmp_path, "pkg/test_u.py")["Alias::test_x"] == ("A", "B")
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_u.Checks::test_x"): "A",
+        CaseKey("//pkg:t", "pkg.test_u.Checks::test_y"): "B",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    (f,) = res.refused
+    assert "Alias is bound by an assignment to Checks, which may be a unittest.TestCase" in f.reasons[0], f.reasons
+    assert res.to_write(partial=True) == [] and path.read_text(encoding="utf-8") == src(text)
+    # Without the alias, the same decisions are rewritten.
+    path.write_text(src(text.replace("\n\n\nAlias = Checks\n", "\n")), encoding="utf-8")
+    assert [f.path for f in tag_codemod.apply_tags(decided, str(tmp_path)).to_write()] == ["pkg/test_u.py"]
+
+
+_UNITTEST_BASE = (
+    'import unittest\n\nimport pytest\n\n\n@pytest.mark.rr("A", "B")\nclass BaseCase(unittest.TestCase):\n'
+    "    def test_x(self):\n        pass\n\n    def test_y(self):\n        pass\n"
+)
+# BaseCase at run time (pytest imports test_base.py first), named nowhere.
+_DYNAMIC_BASE = (
+    'import unittest\n\nB = next(c for c in unittest.TestCase.__subclasses__() if c.__name__ == "BaseCase")\n\n\n'
+)
+
+
+@pytest.mark.parametrize(
+    "files, unknown",
+    [
+        # Checks is not named like a test class, but sits in a test module.
+        ({"pkg/test_other.py": _DYNAMIC_BASE + "class Checks(B):\n    pass\n"}, "pkg/test_other.py"),
+        # Mid sits in a helper no test module imports, but Deeper subclasses it.
+        (
+            {
+                "pkg/helpers.py": _DYNAMIC_BASE + "class Mid(B):\n    pass\n",
+                "pkg/helpers2.py": "from pkg.helpers import Mid\n\n\nclass Deeper(Mid):\n    pass\n",
+                "pkg/test_other.py": "from pkg.helpers2 import Deeper as Collected  # noqa: F401\n",
+            },
+            "pkg/helpers.py",
+        ),
+    ],
+)
+def test_an_unresolved_base_reached_by_a_test_refuses(tmp_path, files, unknown):
+    """Each clause of _Index.counting_unknown: a class with an unresolved base
+    in a test module, or one another class subclasses, may be BaseCase."""
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _UNITTEST_BASE)
+    for rel, text in files.items():
+        _repo(tmp_path, rel, text)
+    runtime = _runtime_traces(tmp_path, "pkg")  # test_base.py, then test_other.py
+    assert runtime.get("Checks::test_x", runtime.get("Collected::test_x")) == ("A", "B"), runtime
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_x"): "A",
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_y"): "B",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert sorted(f.path for f in res.refused) == sorted(["pkg/test_base.py", unknown]), res.files
+    assert res.to_write(partial=True) == []
+
+
+@pytest.mark.parametrize(
+    "head",
+    [b"# -*- coding: nonexistent-enc -*-\n", b"def broken(:\n    pass\n\n\n"],
+    ids=["unknown-coding", "syntax-error"],
+)
+def test_a_decided_case_in_a_file_that_cannot_be_read_is_refused(tmp_path, capsys, head):
+    """The decided case's own file cannot be decoded (an unknown coding
+    cookie) or parsed (syntax this interpreter does not know): refuse it by
+    name and exit 1, never report the case as having no Python test."""
+    from rules_requirements import cli
+
+    body = b'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n'
+    bad = tmp_path / "pkg" / "test_m.py"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(head + body)
+    ok = _repo(tmp_path, "pkg/test_ok.py", _PLAIN)
+    before = {p: p.read_bytes() for p in (bad, ok)}
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: m\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_m::test_a\n  - path: pkg.test_ok::test_a\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path), "--partial"])
+    err = capsys.readouterr().err
+    assert rc == 1 and "refused pkg/test_m.py" in err and "refused pkg/test_ok.py" in err, err
+    assert "pkg.test_m::test_a was decided, but this file cannot be read or parsed (" in err, err
+    assert "pkg/test_m.py cannot be read or parsed (" in err and "(cannot be read" not in err, err
+    assert "no Python test to rewrite" not in err
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize(
+    "files, message",
+    [
+        # A constant module name resolves like ``import pkg.test_base``.
+        (
+            {"pkg/test_other.py": 'import importlib\n\nB = importlib.import_module("pkg.test_base").BaseCase\n'},
+            "imports or subclasses",
+        ),
+        ({"pkg/test_other.py": 'B = __import__("pkg.test_base", fromlist=["x"]).BaseCase\n'}, "imports or subclasses"),
+        (
+            {
+                "pkg/test_other.py": 'import importlib\n\nB = importlib.import_module(".test_base", __package__).BaseCase\n'
+            },
+            "imports or subclasses",
+        ),
+        (
+            {"pkg/test_other.py": 'B = __import__("test_base", globals(), None, ["x"], 1).BaseCase\n'},
+            "imports or subclasses",
+        ),
+        (
+            {"pkg/test_other.py": 'B = __import__("", globals(), None, ["test_base"], 1).test_base.BaseCase\n'},
+            "imports or subclasses",
+        ),
+        # Anything else may import any file.
+        (
+            {"pkg/test_other.py": 'import importlib\n\nN = "pkg.test_base"\nB = importlib.import_module(N).BaseCase\n'},
+            "importlib.import_module(N) imports a module the codemod cannot name",
+        ),
+        (
+            {
+                "pkg/loader.py": "import importlib\n\n\ndef load(n):\n    return importlib.import_module(n)\n",
+                "pkg/test_other.py": 'from pkg.loader import load\n\nB = load("pkg.test_base").BaseCase\n',
+            },
+            "importlib.import_module(n) imports a module the codemod cannot name",
+        ),
+        (
+            {"pkg/test_other.py": 'exec("from pkg.test_base import BaseCase as B")\n'},
+            "imports a module the codemod cannot name",
+        ),
+        # A submodule reached as an attribute of its package.
+        ({"pkg/test_other.py": "import pkg\n\nB = pkg.test_base.BaseCase\n"}, "imports or subclasses"),
+        ({"pkg/test_other.py": "import pkg as p\n\nB = p.test_base.BaseCase\n"}, "imports or subclasses"),
+        ({"pkg/test_other.py": 'B = __import__("pkg").test_base.BaseCase\n'}, "imports or subclasses"),
+        (
+            {"pkg/util.py": "", "pkg/test_other.py": 'B = __import__("pkg.util").test_base.BaseCase\n'},
+            "imports or subclasses",
+        ),
+        ({"pkg/test_other.py": "import pkg\n\nB = getattr(pkg, 'test_base').BaseCase\n"}, "imports or subclasses"),
+        (
+            {"pkg/test_other.py": 'import importlib\n\nB = importlib.import_module("pkg").test_base.BaseCase\n'},
+            "imports or subclasses",
+        ),
+    ],
+)
+def test_a_test_case_imported_by_a_call_is_refused(tmp_path, files, message):
+    """pkg/test_other.py collects BaseCase again as B (a unittest.TestCase is
+    collected whatever its name), reached through an import call or as an
+    attribute of its package: narrowing BaseCase's marker would change B's
+    tests unseen."""
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _UNITTEST_BASE)
+    for rel, text in files.items():
+        _repo(tmp_path, rel, text)
+    assert _runtime_traces(tmp_path, "pkg")["B::test_x"] == ("A", "B")  # test_base.py, then test_other.py
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_x"): "A",
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_y"): "B",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    refused = {f.path: f.reasons for f in res.refused}
+    assert "pkg/test_base.py" in refused and set(refused) & set(files), res.files
+    assert any(message in r for rs in refused.values() for r in rs), refused
+    assert res.to_write(partial=True) == []
+
+
+def test_an_import_call_out_of_the_tree_does_not_refuse(tmp_path):
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _UNITTEST_BASE)
+    _repo(
+        tmp_path,
+        "pkg/test_other.py",
+        'import importlib\n\n\ndef test_json():\n    assert importlib.import_module("json")\n',
+    )
+    decided = {
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_x"): "A",
+        CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_y"): "B",
+    }
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert [f.path for f in res.to_write()] == ["pkg/test_base.py"] and not res.blocked

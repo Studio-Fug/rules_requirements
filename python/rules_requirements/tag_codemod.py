@@ -40,16 +40,21 @@ generated), and any test name (pytest's ``python_functions`` /
 ``python_classes``) bound other than by a ``def`` / ``class`` statement:
 assignment, ``for`` / ``with`` target, walrus, import, ``del``, ``global``,
 ``except ... as``, match capture, attribute or ``globals()`` store,
-``setattr``. The internal check can only vouch for the tests it sees, so
+``setattr`` (and from inside a function: ``global``, attribute stores and
+``setattr`` on anything but the method's own ``self``, namespace dictionaries,
+``exec`` / ``eval``), or a class that may be a ``unittest.TestCase`` bound to
+another name. The internal check can only vouch for the tests it sees, so
 those are refused up front.
 
 Across files, every Python file under the root is indexed (in its own
 encoding, as Python reads it) for what it imports and subclasses: a file
 whose changed classes or tests another file imports or subclasses is refused,
-together with that file. A file that cannot be read or parsed, and a class
-whose base cannot be resolved statically, may hide either: when anything
-(for the latter, any class) would change, they are refused with the changed
-files. Last, each decided case's attribution is derived again from the
+together with that file (``importlib.import_module("m")`` with a literal name
+is an import of ``m``). A file that cannot be read or parsed, an import call
+whose module cannot be named, and a class whose base cannot be resolved
+statically may hide either: when anything (for the latter, any class) would
+change, they are refused with the changed files. A decided case's own file
+that cannot be read or parsed is refused. Last, each decided case's attribution is derived again from the
 rewritten sources and compared with the worksheet. The caller writes all or
 nothing (:meth:`ApplyResult.to_write`).
 """
@@ -78,6 +83,20 @@ _SAFE_BUILTINS = {"staticmethod", "classmethod", "property"}
 _SAFE_MODULES = {"unittest", "unittest.mock", "mock"}
 # Calls that bind names at run time, which the codemod cannot follow.
 _DYNAMIC_CALLS = {"setattr", "delattr", "exec", "eval", "globals", "locals", "vars"}
+# Calls that import a module by a path or name the index may not see.
+_IMPORT_CALLS = {
+    "import_module",
+    "__import__",
+    "spec_from_file_location",
+    "spec_from_loader",
+    "module_from_spec",
+    "SourceFileLoader",
+    "SourcelessFileLoader",
+    "load_source",
+    "load_module",
+    "run_path",
+    "run_module",
+}
 # Values that are never a test function or class, whatever name they are bound to.
 _DATA = (
     ast.Constant,
@@ -400,9 +419,13 @@ class TestFile:
         self._hidden_calls: set[int] = set()
         self._defs: dict[str, list[ast.AST]] = {}  # every def / class of the file, by name
         self._assigned: set[str] = set()  # names bound by something other than def / class / import
+        # Classes deriving from another class: any may be a unittest.TestCase.
+        self._derived: set[str] = set()
         for node in ast.walk(self.tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 self._defs.setdefault(node.name, []).append(node)
+            if isinstance(node, ast.ClassDef) and any(_dotted(b) != "object" for b in node.bases):
+                self._derived.add(node.name)
         self._assigned.update(
             n.id for n in _outside_functions(self.tree) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store)
         )
@@ -569,12 +592,17 @@ class TestFile:
         ``pytestmark`` bound that way is unreadable."""
         found: list[tuple[int, str, str]] = []  # (line, name, how); "*": a star import, "": dynamic
         loads: set[str] = set()
+        bare: set[str] = set()  # loaded as a value: not called, not an attribute's object
+        inner: set[int] = set()  # the callees and attribute objects met so far
         # ``test_cases = [...]``: a literal is never a test, whatever its name.
+        # A literal bound to ``pytestmark`` other than by a plain assignment
+        # (``pytestmark: list = [...]``) is still a pytestmark the codemod
+        # does not read: never exempt.
         data: set[int] = set()
         if isinstance(stmt, (ast.Assign, ast.AnnAssign)) and isinstance(stmt.value, _DATA):
             targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
             if all(isinstance(t, ast.Name) for t in targets):
-                data = {id(t) for t in targets}
+                data = {id(t) for t in targets if isinstance(t, ast.Name) and t.id != "pytestmark"}
         start: list[ast.AST] = [stmt.value] if isinstance(stmt, ast.Assign) and plain_pytestmark else [stmt]
         todo: list[tuple[ast.AST, str]] = [(n, "a statement") for n in start]
         while todo:
@@ -596,9 +624,17 @@ class TestFile:
             if isinstance(node, ast.NamedExpr):
                 todo.extend([(node.target, "an assignment expression"), (node.value, how)])
                 continue
+            if isinstance(node, ast.Call):
+                inner.add(id(node.func))
+            elif isinstance(node, ast.Attribute):
+                inner.add(id(node.value))
             if isinstance(node, ast.Name):
                 if isinstance(node.ctx, ast.Load):
                     loads.add(node.id)
+                    if id(node) not in inner:
+                        bare.add(node.id)
+                        if node.id in _DYNAMIC_CALLS:  # ``s = setattr``: called elsewhere
+                            found.append((line, "", node.id))
                 elif id(node) not in data:
                     found.append((line, node.id, "a del statement" if isinstance(node.ctx, ast.Del) else how))
             elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
@@ -633,12 +669,20 @@ class TestFile:
             if name == "pytestmark":
                 self._opaque(holder, f"line {line}: pytestmark bound by {how}")
                 continue
-            if name and name != "*" and not self.names.any(name):
+            # A class that derives from another may be a unittest.TestCase,
+            # which pytest collects whatever name it is bound to.
+            cases = sorted(n for n in bare if n in self._derived)
+            if name and name != "*" and not self.names.any(name) and not cases:
                 continue
             if name == "*":
                 what = "a star import, which may bring tests"
             elif not name:
                 what = f"{how}, which may bind tests the codemod cannot name"
+            elif not self.names.any(name):
+                what = (
+                    f"{name} is bound by {how} to {', '.join(cases)}, which may be a unittest.TestCase (pytest "
+                    "collects one whatever its name)"
+                )
             else:
                 what = f"{name} is bound by {how}, not a def"
             why = (
@@ -655,35 +699,99 @@ class TestFile:
                     self._blind_later.append((node, why))
 
     def _file_bindings(self) -> None:
-        """Bindings from inside function bodies that reach the module or a
-        class at import time (``global test_x``, ``globals()[...] = ...``,
-        ``setattr(cls, "test_x", ...)``): they may bind any test, so nothing
-        in the file may change."""
-        for node in ast.walk(self.tree):
-            name, how = None, ""
-            if isinstance(node, (ast.Global, ast.Nonlocal)):
-                hit = [n for n in node.names if self.names.any(n) or n == "pytestmark"]
-                name, how = (hit[0], _HOW[type(node).__name__]) if hit else (None, "")
-            elif isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load) and _namespace(node.value):
-                key = node.slice
-                if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                    name, how = (key.value, "an item assignment") if self.names.any(key.value) else (None, "")
-                else:
-                    name, how = "", "a computed globals() key"
-            elif isinstance(node, ast.Call) and _dotted(node.func) in ("setattr", "delattr") and len(node.args) > 1:
-                arg = node.args[1]
-                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and self.names.any(arg.value):
-                    name, how = arg.value, f"{_dotted(node.func)}()"
-            if name is None:
-                continue
-            what = f"{name} is bound by {how}" if name else f"{how} may bind tests the codemod cannot name"
-            self._blind_later.append(
-                (
-                    None,
-                    f"line {getattr(node, 'lineno', 0)}: {what}, at run time: pytest may collect it as a test "
-                    "the codemod cannot see; migrate this file by hand",
+        """Bindings from inside function bodies, which may reach the module or
+        a class when the function runs (at import time, say): ``global
+        test_x``; an attribute store, ``setattr`` / ``delattr`` or
+        ``__setattr__`` naming a test (or with a computed name) on anything
+        but a method's own ``self``; a namespace dictionary (``globals()``,
+        ``vars(x)``, ``x.__dict__``); ``exec`` / ``eval``. Any of them may
+        bind any test, so nothing in the file may change."""
+        # (node, the names holding a method's own instance there, inside a function)
+        todo: list[tuple[ast.AST, frozenset[str], bool]] = [(self.tree, frozenset(), False)]
+        methods: set[int] = set()  # functions whose first parameter is the instance
+        judged: set[int] = set()  # callees already judged with their call
+        while todo:
+            node, own, in_fn = todo.pop()
+            skip: set[int] = set()  # children already queued here
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                params = node.args
+                names = [a.arg for a in [*params.posonlyargs, *params.args, *params.kwonlyargs]]
+                own = own - set(names)
+                for child in [*getattr(node, "decorator_list", []), *params.defaults, *params.kw_defaults]:
+                    if child is not None:
+                        todo.append((child, own, in_fn))
+                        skip.add(id(child))
+                if id(node) in methods and names:
+                    own = own | {names[0]}
+                in_fn = True
+            elif isinstance(node, ast.ClassDef):
+                for stmt in node.body:
+                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not any(
+                        _dotted(d) in ("staticmethod", "classmethod") for d in stmt.decorator_list
+                    ):
+                        methods.add(id(stmt))
+            hit = self._run_time_binding(node, own, judged) if in_fn and id(node) not in judged else None
+            if hit is not None:
+                name, how = hit
+                what = f"{name} is bound by {how}" if name else f"{how} may bind tests the codemod cannot name"
+                self._blind_later.append(
+                    (
+                        None,
+                        f"line {getattr(node, 'lineno', 0)}: {what}, at run time (from inside a function): pytest "
+                        "may collect it as a test the codemod cannot see; migrate this file by hand",
+                    )
                 )
+            todo.extend((c, own, in_fn) for c in ast.iter_child_nodes(node) if id(c) not in skip)
+
+    def _run_time_binding(self, node: ast.AST, own: frozenset[str], judged: set[int]) -> Optional[tuple[str, str]]:
+        """``(name, how)`` when ``node``, inside a function, may bind a test
+        (``name`` empty: one the codemod cannot name), else None."""
+
+        def mine(obj: ast.AST) -> bool:  # the method's own instance, or super()
+            return (isinstance(obj, ast.Name) and obj.id in own) or (
+                isinstance(obj, ast.Call) and _dotted(obj.func) == "super"
             )
+
+        def testy(name: str) -> bool:
+            return name == "pytestmark" or self.names.any(name)
+
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            hit = [n for n in node.names if testy(n)]
+            return (hit[0], _HOW[type(node).__name__]) if hit else None
+        if isinstance(node, ast.Attribute):
+            if not isinstance(node.ctx, ast.Load) and testy(node.attr) and not mine(node.value):
+                return node.attr, "an attribute assignment"
+            if node.attr in ("__dict__", "__setattr__", "__delattr__") and not mine(node.value):
+                return "", self._shown(node)
+            return None
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr not in ("__setattr__", "__delattr__"):
+                return None
+            judged.add(id(node.func))
+            if mine(node.func.value) or (node.args and mine(node.args[0])):  # object.__setattr__(self, ...)
+                return None
+            return "", f"{node.func.attr}()"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            fn = node.func.id
+            if fn in ("setattr", "delattr"):
+                judged.add(id(node.func))
+                if len(node.args) < 2 or any(isinstance(a, ast.Starred) for a in node.args[:2]):
+                    return "", f"{fn}()"
+                obj, key = node.args[0], node.args[1]
+                if not (isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                    return None if mine(obj) else ("", f"{fn}() with a computed name")
+                return (key.value, f"{fn}()") if testy(key.value) and not mine(obj) else None
+            if fn == "vars":
+                judged.add(id(node.func))
+                return ("", "vars()") if node.args else None  # vars() alone: the function's locals
+            return None
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in ("globals", "exec", "eval", "setattr", "delattr", "vars")
+        ):
+            return "", f"{node.id}()" if node.id in ("globals", "exec", "eval") else node.id
+        return None
 
     def mark_inherited(self, sub: ast.ClassDef, why: str) -> None:
         """``sub`` inherits tests or declarations the static view does not
@@ -1541,9 +1649,13 @@ class _Index:
     """Every scanned Python file's imports and base classes, resolved to the
     other scanned files they name: who imports or subclasses what.
 
-    ``from m import C [as D]``, ``import m [as n]`` + ``n.C`` and relative
-    imports resolve by module path (a scanned file whose module path ends
-    with the imported one, or the other way round); a base class named by
+    ``from m import C [as D]``, ``import m [as n]`` + ``n.C`` (also
+    ``n.sub.C``), relative imports and ``importlib.import_module("m")`` /
+    ``__import__("m")`` with a literal name resolve by module path (a
+    scanned file whose module path ends with the imported one, or the other
+    way round); a package passed around as an object reaches every scanned
+    file below it. An import call whose module it cannot name is
+    ``dynamic``: it may import any file. A base class named by
     nothing the file imports, defines or assigns falls back to every scanned
     file defining a module-level class of that name. A base class it cannot
     resolve statically (a name bound by an assignment or a def, such as
@@ -1576,6 +1688,7 @@ class _Index:
         self.bases: dict[str, list[tuple[int, str, str, list[tuple[str, str]]]]] = {}
         self.unknown: dict[str, list[tuple[int, str, str]]] = {}  # file -> (line, class, base) not resolved
         self.local_bases: dict[str, set[str]] = {}  # file -> its classes another class of it subclasses
+        self.dynamic: dict[str, list[tuple[int, str]]] = {}  # file -> (line, call) importing it cannot name
         for rel in self.trees:
             self._scan(rel)
         self.importers: dict[str, dict[str, set[str]]] = {}  # imported file -> importer -> names
@@ -1599,6 +1712,14 @@ class _Index:
             if p[-len(mod) :] == mod or mod[-len(p) :] == p:
                 out.append(r)
         return out
+
+    def package(self, rel: str) -> list[str]:
+        """``rel``, and when it is a package's ``__init__.py`` every scanned
+        file below that package (reachable as its attributes)."""
+        if not rel.endswith("__init__.py"):
+            return [rel]
+        parts = self.parts.get(rel, [])
+        return [rel, *(f for f, p in self.parts.items() if f != rel and p[: len(parts)] == parts)]
 
     def _scan(self, rel: str) -> None:
         tree = self.trees[rel]
@@ -1633,15 +1754,60 @@ class _Index:
                     sub = self.resolve(base + [a.name], rel, node.level)
                     if sub:
                         aliases[a.asname or a.name] = sub
+        # Imports by a call: a constant module name resolves like an import
+        # of the module object; anything else may import any file.
+        dynamic: list[tuple[int, str]] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = _dotted(node.func)
+            last = name.rpartition(".")[2]
+            arg = node.args[0] if node.args else None
+            const = arg.value if isinstance(arg, ast.Constant) and isinstance(arg.value, str) else None
+            if last in ("import_module", "__import__") and const is not None:
+                # Relative or not, a module path matches every scanned file it
+                # may name (see resolve); ``__import__``'s fromlist may name
+                # submodules.
+                mod = [p for p in const.split(".") if p]
+                fromlist = next((k.value for k in node.keywords if k.arg == "fromlist"), None)
+                fromlist = node.args[3] if last == "__import__" and len(node.args) > 3 else fromlist
+                subs = [
+                    e.value
+                    for e in getattr(fromlist, "elts", [])
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str) and e.value != "*"
+                ]
+                if last == "__import__" and not subs:
+                    mod = mod[:1]  # __import__("a.b") returns the package a
+                paths = ([mod] if mod else []) + [mod + [n] for n in subs]
+                if not paths:  # a package relative to one the codemod cannot name
+                    dynamic.append((node.lineno, ast.unparse(node)))
+                    continue
+                for path in paths:
+                    for f in self.resolve(path, rel, 0):
+                        for g in self.package(f):
+                            add(g, "*")  # the module object itself (a package: any submodule)
+            elif last in _IMPORT_CALLS or (name in ("exec", "eval") and (const is None or "import" in const)):
+                if name == "eval" and const is None:
+                    continue  # eval cannot run an import statement; a literal naming one is caught
+                dynamic.append((node.lineno, ast.unparse(node)))
         values = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
                 head, _, attr = _dotted(node).rpartition(".")
                 for f in aliases.get(head, ()):
                     add(f, attr)
+                hp = head.split(".") if head and head not in aliases else []
+                for k in range(len(hp) - 1, 0, -1):
+                    # ``pkg.sub.C`` with only ``pkg`` imported: sub is a submodule.
+                    if ".".join(hp[:k]) in aliases:
+                        for f in aliases[".".join(hp[:k])]:
+                            for g in self.resolve(self.parts.get(f, []) + hp[k:], rel, 0):
+                                add(g, attr)
+                        break
             elif isinstance(node, ast.Name) and node.id in aliases and id(node) not in values:
                 for f in aliases[node.id]:
-                    add(f, "*")  # the module itself is passed around
+                    for g in self.package(f):
+                        add(g, "*")  # the module itself is passed around (a package: any submodule)
 
         classes = {n.name for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
         # Names bound by anything but a class statement or an import.
@@ -1675,6 +1841,8 @@ class _Index:
         self.bases[rel] = bases
         self.unknown[rel] = unknown
         self.local_bases[rel] = local_bases
+        if dynamic:
+            self.dynamic[rel] = dynamic
 
     def _base(
         self,
@@ -1753,6 +1921,18 @@ class _Index:
                 ):
                     out.append((rel, line, name, base))
         return out
+
+    def counting_dynamic(self) -> list[tuple[str, int, str]]:
+        """``(file, line, call)`` for the imports by a call the index cannot
+        resolve, in a test module or a file a test module imports: what they
+        import pytest may collect there."""
+        tested = {f for g, refs in self.refs.items() if self.names.test_module(g) for f in refs}
+        return [
+            (rel, line, call)
+            for rel, entries in sorted(self.dynamic.items())
+            if self.names.test_module(rel) or rel in tested
+            for line, call in entries
+        ]
 
     def depends(self) -> dict[str, set[str]]:
         """Files linked both ways because one reaches into the other: it star-
@@ -1835,7 +2015,8 @@ def _unreadable(result: ApplyResult, unreadable: Mapping[str, str], rewritten: I
             result,
             path,
             [
-                f"{why}: the codemod cannot index this file, which may import or subclass tests or classes whose "
+                f"it cannot be read or parsed ({why}): the codemod cannot index this file, which may import or "
+                "subclass tests or classes whose "
                 f"declarations would change ({', '.join(changed)}); fix it, or migrate these files by hand"
             ],
             link=changed,
@@ -1844,7 +2025,39 @@ def _unreadable(result: ApplyResult, unreadable: Mapping[str, str], rewritten: I
             _refuse(
                 result,
                 rel,
-                [f"{path} cannot be read ({why}): it may import or subclass this file's tests or classes unseen"],
+                [
+                    f"{path} cannot be read or parsed ({why}): it may import or subclass this file's tests or "
+                    "classes unseen"
+                ],
+            )
+
+
+def _dynamic_imports(result: ApplyResult, index: _Index, rewritten: Iterable[str]) -> None:
+    """An import by a call the index cannot resolve may import any file, and
+    pytest collects what a test module imports: when any declaration in the
+    tree would change, refuse its file and every file that would change."""
+    changed = sorted(rewritten)
+    if not changed:
+        return
+    for rel, line, call in index.counting_dynamic():
+        shown = call if len(call) <= 60 else call[:57] + "..."
+        _refuse(
+            result,
+            rel,
+            [
+                f"line {line}: {shown} imports a module the codemod cannot name statically: it may import tests or "
+                f"classes whose declarations would change ({', '.join(changed)}); migrate these files by hand"
+            ],
+            link=changed,
+        )
+        for f in changed:
+            _refuse(
+                result,
+                f,
+                [
+                    f"{rel} line {line}: {shown} imports a module the codemod cannot name statically, which may be "
+                    "this one: the tests collected there would change unseen; migrate these files by hand"
+                ],
             )
 
 
@@ -1912,7 +2125,7 @@ def apply_tags(
             try:
                 texts[rel], encodings[rel] = _read(os.path.join(root, rel))
             except (OSError, UnicodeDecodeError, SyntaxError, LookupError) as exc:
-                unreadable[rel] = f"cannot be read: {exc}"
+                unreadable[rel] = str(exc)
         return texts.get(rel)
 
     everything = python_files(root)
@@ -1973,6 +2186,17 @@ def apply_tags(
                 result.unresolved.append((key, "no Python source of this module was scanned (another language?)"))
             continue
         best_len = max(n for n, _ in matches)
+        unread = [rel for n, rel in matches if n == best_len and parse(rel, require_markers=False) is None]
+        if unread:
+            # Its own file (or one it may be in) cannot be read or parsed: it
+            # cannot be vouched for, so the file is refused, never skipped.
+            for rel in unread:
+                why = (
+                    f"{key} was decided, but this file cannot be read or parsed ({unreadable[rel]}): migrate it "
+                    "by hand, or make it readable"
+                )
+                _refuse(result, rel, [why])
+            continue
         found: list[tuple[str, TestFn]] = []
         missing: list[tuple[str, list[str]]] = []
         for n, rel in matches:
@@ -1989,9 +2213,6 @@ def apply_tags(
             result.unresolved.append((key, f"ambiguous: matches tests in {where}"))
             continue
         if not found:
-            if not missing:
-                result.unresolved.append((key, "its source could not be read"))
-                continue
             for rel, classes in missing:
                 name = ".".join([*classes, base])
                 why = (
@@ -2011,9 +2232,7 @@ def apply_tags(
     rewritten: dict[str, str] = {}  # LF text of the changed files
     for rel in sorted(set(files) | (set(unreadable) & set(scanned))):
         if rel in unreadable:
-            if rel in targets:
-                result.files.append(FileResult(rel, "refused", [unreadable[rel]]))
-            continue
+            continue  # refused above if a decided case may be in it
         tf = files[rel]
         planned = targets.get(rel, {})
         try:
@@ -2090,6 +2309,7 @@ def apply_tags(
     changed = {rel: _changed_names(files[rel].text, text) for rel, text in rewritten.items()}
     _involve(result, index, changed)
     _unreadable(result, unreadable, rewritten)
+    _dynamic_imports(result, index, rewritten)
     _unresolved_bases(
         result,
         index,
