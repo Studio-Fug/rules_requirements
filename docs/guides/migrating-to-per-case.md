@@ -227,16 +227,41 @@ A file is **refused** and left unchanged, never half-migrated, when:
 - a declaration is not something it can read statically: ids, levels or
   artifacts that are not literals, `**kwargs`, a marker inside
   `pytest.param(...)`, or a `pytestmark` that shares its line with other code.
+- a decided test, or a class or module around it, carries a decorator or a
+  `pytestmark` element that may hold ids the codemod cannot see: a variable
+  holding a marker (`AB = pytest.mark.rr("A", "B")`, then `@AB`), an alias
+  such as `m = pytest.mark` with `@m.rr(...)`, a helper's decorator
+  (`@tagged("A")`, or any decorator from a third-party library), a
+  `pytest.param(..., marks=AB)`, or a `pytestmark` that is augmented,
+  annotated, assigned twice or bound inside a block. What it reads: the
+  `rr` / `requirements` / `verifies` declarations, any other
+  `pytest.mark.NAME` marker, the rest of `pytest` (`pytest.fixture`),
+  `staticmethod` / `classmethod` / `property`, and what `unittest` and `mock`
+  provide (`mock.patch`).
 - one scope declares two different levels.
 - a change would reach a test the codemod cannot see: a test class that
   inherits tests or declarations from another class, in the file or in
   another module; a test defined inside an `if`, `try`, `with` or loop block;
-  a test bound by an assignment or an import rather than a `def`
-  (`test_b = test_a`, `from helpers import test_shared`, a class attribute,
-  a star import), whether or not it is on the worksheet; or a decided case of
-  the module that the file does not define (inherited from another module,
-  or generated). Nothing that reaches such a test is changed; migrate the file
-  by hand.
+  a decided case of the module that the file does not define (inherited from
+  another module, or generated); or a test name bound other than by a `def`
+  or `class` statement, whether or not it is on the worksheet. That covers
+  every way of binding a name in a module or class body: assignments
+  (tuple, starred, annotated and augmented ones too, `test_b = test_a`), `for`
+  and `with ... as` targets, `:=` anywhere in the scope, `from m import ...`
+  (also `as`, and star imports, which may bring tests), `del`, `global`,
+  `except ... as`, `match` captures, `Class.test_x = ...`,
+  `globals()["test_x"] = ...` and `setattr(..., "test_x", ...)`; also, from
+  inside a function, `global test_x`, `globals()[...]` / `setattr` stores,
+  and `exec` / `eval` / `globals()` / `setattr` with a computed name at the
+  top of a module or class. A name is a test name when pytest's
+  `python_functions` or `python_classes` match it (`test` and `Test` by
+  default; the codemod also reads the patterns configured in `pytest.ini`,
+  `pyproject.toml`, `tox.ini` or `setup.cfg` under `--root`). A literal
+  (`test_cases = [...]`) and a plain `import m as test_m` (a module) are not
+  tests. When what such a name holds cannot be traced to a `def` of the file
+  (`x = test_a`, then `test_b = x`), nothing in the file is changed;
+  otherwise nothing that reaches it is. Migrate the file by hand, or rename
+  the name if it does not hold a test.
 - another file imports or subclasses a class or test whose declarations would
   change. pytest collects an imported test class or function again in the
   importing module, and a subclass inherits its base's tests and markers, so
@@ -244,7 +269,21 @@ A file is **refused** and left unchanged, never half-migrated, when:
   The codemod indexes every Python file under `--root` for this, also those
   outside `--only`: `from m import C` (with or without `as`), `import m` with
   `m.C`, relative imports and star imports, and a base class it cannot trace
-  to an import by its name.
+  to an import by its name. Files are read in their own encoding (a PEP 263
+  coding cookie or a BOM, as Python reads them) and written back in it.
+- a file under `--root` cannot be read or parsed, while some declaration
+  would change: it may import or subclass anything. That file is refused by
+  name, together with every file that would change.
+- a class has a base the codemod cannot resolve statically: a name bound by
+  an assignment or a `def` (`B = importlib.import_module("m").C`,
+  `B = __import__(...)`, `try: from m import B` / `except: B = object`) or an
+  expression (`getattr(m, "C")`). It may be any class, so when the
+  declarations of any class in the tree would change, its file and every
+  file whose classes would change are refused, and its own decided tests are
+  refused. This counts for classes pytest may collect (named like a test
+  class, or in a test module: `python_files`, `test_*.py` and `*_test.py` by
+  default), classes another class subclasses, and classes a test module
+  imports.
 - a multi-line declaration it would rewrite has comments inside it (they
   would be lost).
 
@@ -256,8 +295,9 @@ The command also lists, without changing anything:
   `rr::verifies!`, `JUnitWriter` harnesses, records, and whole-target `[target]`
   results). Edit those by hand so that each case names one id. With `--only`,
   cases outside the given paths are only counted.
-- decided cases whose test declares no id in its source. Their owner is set by
-  `verified_by` in the model.
+- decided cases whose test declares no id in its source, every decorator and
+  `pytestmark` element around it being one the codemod reads. Their owner is
+  set by `verified_by` in the model.
 - the `verified_by` edits the decisions imply: `remove` (no case of the target
   is left for that requirement) or `split` (the requirement keeps some of the
   target's cases while others went elsewhere). A whole-target reference cannot
@@ -268,9 +308,15 @@ codemod; check them by hand.
 
 It is all or nothing: when a file is refused or a decided case's test was
 not found in its module, nothing is written, and the files it would have
-rewritten are listed as held back. Fix the refusals, or pass `--partial` to
-write the rewritten files that neither import from nor are imported by a
-refused file (or one holding a decided case it could not find).
+rewritten are listed as held back, each with the cause. Fix those, or pass
+`--partial` to write each rewritten file that holds no such case and is not
+linked to a refused file or to one holding such a case. Two files are linked
+when one star-imports the other or passes it around as a module object, or
+imports, references (`m.name`) or subclasses a class of it, a test-named
+name, or a name not defined at its top level. Importing a plain helper
+function or constant does not link files: changing a file never changes what
+such a name holds. A file that cannot be read, and a class whose base cannot
+be resolved, are linked to the files refused with them.
 
 It exits 0 when every file it had to change was rewritten, 1 when a file was
 refused or a decided case's test was not found in its module (with or without
@@ -278,7 +324,8 @@ refused or a decided case's test was not found in its module (with or without
 worksheet is unreadable or an owner is not one of the ids its case counts
 toward (or, with a model, not a requirement, user need or mitigation of it).
 Without `--model` it checks the owners against the model named in the
-worksheet's `inputs`, when that is still there. Files keep their line endings.
+worksheet's `inputs`, when that is still there. Files keep their line endings
+and their encoding.
 
 `--only PATH` (repeatable) limits the rewrite to files below a path, so several
 pull requests can migrate disjoint directories in parallel from one worksheet.

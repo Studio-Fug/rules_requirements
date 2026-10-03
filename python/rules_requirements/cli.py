@@ -404,7 +404,7 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         migrate.decisions(doc), root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
     )
     writes = {f.path for f in res.to_write(partial=args.partial)}
-    held = [f for f in res.changed if f.path not in writes]
+    held = res.held_back(partial=args.partial)
     for f in res.changed:
         if args.dry_run:
             sys.stdout.writelines(
@@ -416,12 +416,15 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
                 )
             )
         elif f.path in writes:
-            with open(os.path.join(root, f.path), "w", encoding="utf-8", newline="") as fh:
+            with open(os.path.join(root, f.path), "w", encoding=f.encoding, newline="") as fh:
                 fh.write(f.new_text)
         if f.path in writes:
             print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)
         else:
-            print(f"{'would hold back' if args.dry_run else 'held back'} {f.path} (left unchanged):", file=sys.stderr)
+            print(
+                f"{'would hold back' if args.dry_run else 'held back'} {f.path} (left unchanged: {held[f.path]}):",
+                file=sys.stderr,
+            )
         for change in f.changes:
             print(f"  {change}", file=sys.stderr)
     for f in res.refused:
@@ -466,13 +469,19 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
             print(f"  {key}: {why}", file=sys.stderr)
     elif held and args.partial:
         print(
-            f"{len(held)} rewritten file(s) import from or are imported by a refused file, and are held back",
+            f"{len(held)} rewritten file(s) held back: each holds a decided case not found in it, or is linked to "
+            "a file that was refused or holds one (see above)",
             file=sys.stderr,
         )
     elif held:
+        causes = []
+        if res.refused:
+            causes.append(f"{len(res.refused)} file(s) were refused")
+        if res.unmatched:
+            causes.append(f"{len(res.unmatched)} decided case(s) were not found in their module")
         print(
-            f"nothing written: {len(held)} rewritten file(s) are held back because of the refusals above; fix "
-            "those, or pass --partial to write the files that do not depend on them",
+            f"nothing written: {len(held)} rewritten file(s) held back because {' and '.join(causes)}; fix "
+            "those, or pass --partial to write the files not linked to them",
             file=sys.stderr,
         )
     print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
@@ -664,8 +673,12 @@ def build_parser() -> argparse.ArgumentParser:
     ma.add_argument(
         "--partial",
         action="store_true",
-        help="when files are refused, still write the rewritten files that neither import from nor are imported "
-        "by a refused file (default: write nothing)",
+        help="when files are refused or decided cases not found, still write each rewritten file that holds no "
+        "such case and is not linked to a refused file or one holding such a case (default: write nothing). Two "
+        "files are linked when one star-imports the other or passes it around as a module, or imports, "
+        "references or subclasses a class, a test-named name or a name not defined at its top level; importing "
+        "a plain helper function or constant does not link them. A file that cannot be read, and a class whose "
+        "base cannot be resolved, are linked to the files refused with them",
     )
     ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
     ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")

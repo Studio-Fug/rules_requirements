@@ -984,6 +984,76 @@ _HIDDEN = {
     ),
 }
 
+# Every other way of binding a test name in a scope (round 3): the scope's
+# narrowed marker would reach each of these tests unseen.
+_MODULE = """
+import contextlib  # noqa: F401
+
+import pytest
+
+from pkg.helpers import helper  # noqa: F401
+
+pytestmark = pytest.mark.rr("A", "B")
+
+
+def test_a():
+    pass
+
+
+{post}
+"""
+_CLASS = """
+import pytest
+
+
+class TestK:
+    pytestmark = [pytest.mark.rr("A", "B")]
+
+    def test_a(self):
+        pass
+
+    def helper(self):
+        pass
+
+{body}
+"""
+for _shape, _post, _hidden, _message in [
+    ("for", "for test_q in [test_a]:\n    pass\n", "test_q", "test_q is bound by a for loop"),
+    ("with", "with contextlib.nullcontext(test_a) as test_w:\n    pass\n", "test_w", "test_w is bound by a with"),
+    ("walrus", "if test_w := test_a:\n    pass\n", "test_w", "test_w is bound by an assignment expression"),
+    ("globals", 'globals()["test_g"] = test_a\n', "test_g", "test_g is bound by an item assignment"),
+    ("tuple", "test_b, test_c = test_a, test_a\n", "test_b", "test_b is bound by an assignment"),
+    ("starred", "test_b, *rest = test_a, test_a\n", "test_b", "test_b is bound by an assignment"),
+    ("annotated", "test_b: object = test_a\n", "test_b", "test_b is bound by an assignment"),
+    ("import-as", "from pkg.helpers import helper as test_h  # noqa: E402\n", "test_h", "test_h is bound by an import"),
+    ("star", "from pkg.helpers import *  # noqa: E402,F403\n", "test_shared", "a star import"),
+    ("global", "def _make():\n    global test_g\n    test_g = test_a\n\n\n_make()\n", "test_g", "test_g is bound by"),
+    ("exec", 'exec("def test_e():\\n    pass")\n', "test_e", "exec(), which may bind tests"),
+    ("indirect", "x = test_a\ntest_b = x\n", "test_b", "test_b is bound by an assignment"),
+]:
+    _HIDDEN[_shape] = (_MODULE.format(post=_post), _hidden, _message)
+# test_b aliases test_a through a variable the codemod cannot trace: test_a's own
+# decorator is as unsafe to change as the scope's.
+_HIDDEN["indirect-decorated"] = (
+    'import pytest\n\n\n@pytest.mark.rr("A", "B")\ndef test_a():\n    pass\n\n\nx = test_a\ntest_b = x\n',
+    "test_b",
+    "test_b is bound by an assignment",
+)
+for _shape, _body, _hidden, _message in [
+    ("class-for", "    for test_q in [helper]:\n        pass\n", "TestK::test_q", "test_q is bound by a for loop"),
+    ("class-tuple", "    test_b, test_c = helper, helper\n", "TestK::test_b", "test_b is bound by an assignment"),
+    ("class-import", "    from pkg.helpers import test_shared  # noqa\n", "TestK::test_shared", "bound by an import"),
+    (
+        "class-setattr",
+        '\nsetattr(TestK, "test_s", TestK.helper)\n',
+        "TestK::test_s",
+        "test_s is bound by setattr()",
+    ),
+    ("class-attribute", "\nTestK.test_s = TestK.helper\n", "TestK::test_s", "bound by an attribute assignment"),
+    ("class-alias", "\nTestAlias = TestK\n", "TestAlias::test_a", "TestAlias is bound by an assignment"),
+]:
+    _HIDDEN[_shape] = (_CLASS.format(body=_body), _hidden, _message)
+
 
 @pytest.mark.parametrize("shape", sorted(_HIDDEN))
 def test_tests_bound_by_assignment_or_import_are_refused(tmp_path, shape):
@@ -991,11 +1061,11 @@ def test_tests_bound_by_assignment_or_import_are_refused(tmp_path, shape):
     scope's ids at runtime: narrowing the scope would change it unseen."""
     text, hidden, message = _HIDDEN[shape]
     _repo(tmp_path, "pkg/__init__.py", "")
-    _repo(tmp_path, "pkg/helpers.py", "def test_shared():\n    pass\n")
+    _repo(tmp_path, "pkg/helpers.py", "def test_shared():\n    pass\n\n\ndef helper(*args):\n    pass\n")
     path = _repo(tmp_path, "pkg/test_h.py", text)
     before = path.read_bytes()
     assert _runtime_traces(tmp_path, "pkg/test_h.py")[hidden] == ("A", "B")
-    qual = "pkg.test_h.TestK::test_a" if "TestK" in hidden else "pkg.test_h::test_a"
+    qual = "pkg.test_h.TestK::test_a" if "TestK" in text else "pkg.test_h::test_a"
     res = tag_codemod.apply_tags({CaseKey("//pkg:t", qual): "A"}, str(tmp_path))
     (f,) = res.refused
     assert f.path == "pkg/test_h.py" and message in f.reasons[0], f.reasons
@@ -1075,3 +1145,416 @@ def test_rewrite_refuses_to_add_a_declaration_to_a_blind_test():
     tf.scope_blind[id(tf.find([], "test_a").node)] = "test_a is reached unseen"
     with pytest.raises(Unsupported, match="reached unseen"):
         rewrite(tf, {"test_a": "A-1", "test_b": "B-2"})
+
+
+# --------------------------------------------------------------------------- #
+# Fail closed: whatever the codemod cannot resolve is a refusal               #
+# --------------------------------------------------------------------------- #
+
+_PLAIN = 'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n\n\n'
+
+# Bindings of a test name that need no run to check (or cannot run).
+_STATIC_SHAPES = {
+    "except-as": "try:\n    raise ValueError\nexcept ValueError as test_e:\n    pass\n",
+    "del": "test_x = 1\ndel test_x\n",
+    "augmented": "test_b = []\ntest_b += [test_a]\n",
+    "walrus-in-a-literal": "x = [(test_w := test_a)]\n",
+    "walrus-in-a-default": "def helper(f=(test_w := test_a)):\n    pass\n",
+    "computed-setattr": "import sys\n\nfor name in ['x']:\n    setattr(sys.modules[__name__], name, test_a)\n",
+    "vars": 'vars()["test_v"] = test_a\n',
+    "module-dict": 'import sys\n\nsys.modules[__name__].__dict__["test_d"] = test_a\n',
+    "match": "match test_a:\n    case test_m:\n        pass\n",
+    "class-walrus": "class TestK:\n    if (test_w := test_a):\n        pass\n",
+    "class-decorator-walrus": "@(test_w := pytest.mark.slow)\nclass TestK:\n    pass\n",
+    "class-keyword-walrus": "class TestK(metaclass=(test_m := type)):\n    pass\n",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_STATIC_SHAPES))
+def test_every_other_binding_of_a_test_name_is_refused(shape):
+    if shape == "match" and sys.version_info < (3, 10):
+        pytest.skip("match needs Python 3.10")
+    with pytest.raises(Unsupported, match="migrate this file by hand"):
+        rewrite(TestFile(_PLAIN + _STATIC_SHAPES[shape]), {"test_a": "A"})
+
+
+@pytest.mark.parametrize(
+    "post",
+    [
+        "test_cases = [1, 2]\n",  # a literal is never a test
+        "import pkg.helpers as test_mod  # noqa: E402\n",  # nor is a module
+        "def check(x):\n    test_local = x\n    return test_local\n",  # a function's own variable
+        'CONFIG = {}\nCONFIG["test_mode"] = True\n',  # a dict key
+    ],
+)
+def test_bindings_that_cannot_hold_a_test_do_not_refuse(post):
+    assert rewrite(TestFile(_PLAIN + post), {"test_a": "A"})[1] == ["test_a: A, B -> A"]
+
+
+_OPAQUE = {
+    "variable": ('AB = pytest.mark.rr("A", "B")\n\n\n@AB\ndef test_x():\n    pass\n', "the decorator @AB"),
+    "attribute-alias": ('m = pytest.mark\n\n\n@m.rr("A", "B")\ndef test_x():\n    pass\n', "the decorator @m.rr"),
+    "helper": (
+        'def tagged(*ids):\n    return pytest.mark.rr(*ids)\n\n\n@tagged("A", "B")\ndef test_x():\n    pass\n',
+        "the decorator @tagged",
+    ),
+    "pytestmark-element": (
+        'AB = pytest.mark.rr("A", "B")\npytestmark = [pytest.mark.slow, AB]\n\n\ndef test_x():\n    pass\n',
+        "the pytestmark element AB",
+    ),
+    "class": (
+        'AB = pytest.mark.rr("A", "B")\n\n\n@AB\nclass TestK:\n    def test_x(self):\n        pass\n',
+        "the decorator @AB",
+    ),
+    "param-marks": (
+        'AB = pytest.mark.rr("A", "B")\n\n\n@pytest.mark.parametrize("n", [pytest.param(1, marks=AB)])\n'
+        "def test_x(n):\n    pass\n",
+        "the decorator @pytest.mark.parametrize",
+    ),
+    "augmented-pytestmark": (
+        'AB = pytest.mark.rr("A", "B")\npytestmark = []\npytestmark += [AB]\n\n\ndef test_x():\n    pass\n',
+        "pytestmark bound by an assignment",
+    ),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OPAQUE))
+def test_a_marker_the_codemod_cannot_read_is_refused_not_untagged(tmp_path, capsys, shape):
+    """A decided test under a decorator or pytestmark element the codemod
+    cannot read may carry ids at runtime it does not see: refuse (exit 1),
+    never report it as 'declares no id' (exit 0)."""
+    from rules_requirements import cli
+
+    body, message = _OPAQUE[shape]
+    path = _repo(tmp_path, "pkg/test_o.py", "import pytest\n\n" + body)
+    before = path.read_bytes()
+    runtime = _runtime_traces(tmp_path, "pkg/test_o.py")
+    ((nodeid, ids),) = runtime.items()
+    assert ids == ("A", "B")
+    *classes, name = nodeid.split("::")
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: o\n"
+        f"  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: {'.'.join(['pkg.test_o', *classes])}::{name}\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)])
+    err = capsys.readouterr().err
+    assert rc == 1 and "refused pkg/test_o.py" in err and message in err, err
+    assert "declare no id" not in err and path.read_bytes() == before
+
+
+def test_rewrite_itself_refuses_under_a_marker_it_cannot_read():
+    """rewrite() refuses a decided test under an unreadable decorator even
+    when apply_tags' own screening is bypassed."""
+    text = 'import pytest\nfrom helpers import tagged\n\n\n@tagged("C")\n@pytest.mark.rr("A", "B")\ndef test_x():\n    pass\n'
+    with pytest.raises(Unsupported, match="the decorator @tagged"):
+        rewrite(TestFile(text), {"test_x": "A"})
+    assert rewrite(TestFile(text.replace('@tagged("C")\n', "")), {"test_x": "A"})[1] == ["test_x: A, B -> A"]
+
+
+def test_markers_the_codemod_can_read_do_not_refuse():
+    text = src(
+        """
+        from unittest import mock
+
+        import pytest
+
+
+        class TestK:
+            @pytest.mark.parametrize("n", [1, pytest.param(2, marks=[pytest.mark.slow])])
+            @mock.patch("os.getcwd")
+            @pytest.mark.rr("A", "B")
+            def test_x(self, getcwd, n):
+                pass
+
+            @staticmethod
+            @pytest.fixture
+            def thing():
+                return 1
+        """
+    )
+    tf = TestFile(text)
+    assert tf.opaque == {}
+    assert rewrite(tf, {"TestK.test_x": "A"})[1] == ["TestK.test_x: A, B -> A"]
+
+
+def _latin(tmp_path, rel, body):
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(("# -*- coding: latin-1 -*-\n# été\n" + body).encode("latin-1"))
+    return path
+
+
+def test_a_file_with_a_coding_cookie_is_indexed(tmp_path, capsys):
+    """The verifier's repro: test_other.py is latin-1 (a PEP 263 cookie) and
+    subclasses TestBase. It must be indexed like any other file: narrowing
+    TestBase's marker would change its inherited tests."""
+    from rules_requirements import cli
+
+    _xmod(tmp_path)
+    _latin(
+        tmp_path, "pkg/test_other.py", "from pkg.test_base import TestBase\n\n\nclass TestSub(TestBase):\n    pass\n"
+    )
+    before = {rel: (tmp_path / rel).read_bytes() for rel in ("pkg/test_base.py", "pkg/test_other.py")}
+    assert _runtime_traces(tmp_path, "pkg/test_other.py")["TestSub::test_x"] == ("A", "B")
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: base\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_base.TestBase::test_x\n",
+        encoding="utf-8",
+    )
+    rc = cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path), "--partial"])
+    err = capsys.readouterr().err
+    assert rc == 1 and "refused pkg/test_base.py" in err and "refused pkg/test_other.py" in err, err
+    assert {rel: (tmp_path / rel).read_bytes() for rel in before} == before
+
+
+def test_a_rewritten_file_keeps_its_encoding(tmp_path):
+    from rules_requirements import cli
+
+    path = _latin(
+        tmp_path,
+        "pkg/test_lat.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n',
+    )
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: lat\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_lat::test_a\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)]) == 0
+    data = path.read_bytes()
+    assert data.startswith(b"# -*- coding: latin-1 -*-\n# \xe9t\xe9\n") and b'pytestmark = pytest.mark.rr("A")' in data
+
+
+def test_a_rewrite_its_encoding_cannot_hold_is_refused(tmp_path):
+    """An id spelled with an escape (\\u0141) in a latin-1 file would be
+    written as the character itself, which latin-1 cannot hold."""
+    path = _latin(
+        tmp_path,
+        "pkg/test_lat.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("\\u0141-1", "B")\n\n\ndef test_a():\n    pass\n\n\n'
+        "def test_b():\n    pass\n",
+    )
+    decided = {CaseKey("//pkg:t", "pkg.test_lat::test_a"): "\u0141-1", CaseKey("//pkg:t", "pkg.test_lat::test_b"): "B"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    (f,) = res.refused
+    assert "cannot be written in iso-8859-1" in f.reasons[0], f.reasons
+    assert res.to_write(partial=True) == [] and b"\\u0141-1" in path.read_bytes()
+
+
+@pytest.mark.parametrize("bad", [b"def broken(:\n    pass\n", b"x = '\xff'\n"])
+def test_an_unreadable_file_anywhere_refuses_every_change(tmp_path, bad):
+    """A file the codemod cannot read or parse (even outside --only) may
+    import or subclass anything: when a declaration would change, it is
+    refused by name, with the changed file."""
+    path = _repo(tmp_path, "pkg/test_a.py", _PLAIN)
+    (tmp_path / "pkg" / "other.py").write_bytes(bad)
+    decided = {CaseKey("//pkg:t", "pkg.test_a::test_a"): "A"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path), only=["pkg/test_a.py"])
+    refused = {f.path: f.reasons for f in res.refused}
+    assert set(refused) == {"pkg/other.py", "pkg/test_a.py"}, res.files
+    assert "the codemod cannot index this file" in refused["pkg/other.py"][0]
+    assert "pkg/other.py cannot be read" in refused["pkg/test_a.py"][0]
+    assert res.to_write() == [] and res.to_write(partial=True) == [] and res.changed == []
+    assert path.read_text(encoding="utf-8") == _PLAIN
+    # Nothing would change: nothing is refused.
+    path.write_text(_PLAIN.replace('"A", "B"', '"A"'), encoding="utf-8")
+    assert not tag_codemod.apply_tags(decided, str(tmp_path)).blocked
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "import importlib\n\nB = importlib.import_module('pkg.test_base').TestBase\n\n\nclass TestSub(B):\n",
+        "B = __import__('pkg.test_base', fromlist=['x']).TestBase\n\n\nclass TestSub(B):\n",
+        "import pkg.test_base as m\n\n\nclass TestSub(getattr(m, 'TestBase')):\n",
+    ],
+)
+def test_a_base_class_the_index_cannot_resolve_may_be_any_class(tmp_path, capsys, other):
+    """TestSub's base is reached dynamically: it may be TestBase (it is). Its
+    file and every file whose classes would change are refused, and its
+    decided test is refused rather than reported as declaring no id."""
+    from rules_requirements import cli
+
+    before = _xmod(tmp_path, other)
+    runtime = _runtime_traces(tmp_path, "pkg/test_other.py")
+    assert runtime == {"TestSub::test_x": ("A", "B"), "TestSub::test_y": ("A", "B")}
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(_XMOD_SHEET.replace("  - path: pkg.test_other.TestSub::test_x\n", ""), encoding="utf-8")
+    argv = ["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)]
+    for extra in ([], ["--partial"]):
+        rc = cli.main(argv + extra)
+        err = capsys.readouterr().err
+        assert rc == 1 and "refused pkg/test_base.py" in err and "refused pkg/test_other.py" in err, err
+        assert "declare no id" not in err
+        assert {rel: (tmp_path / rel).read_bytes() for rel in before} == before
+
+
+def test_an_unresolved_base_out_of_reach_of_any_test_does_not_refuse(tmp_path):
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/models.py", "Base = object\n\n\nclass User(Base):\n    pass\n")
+    _repo(tmp_path, "pkg/test_a.py", _BASE)
+    decided = {CaseKey("//pkg:t", "pkg.test_a.TestBase::test_x"): "A"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert [f.path for f in res.to_write()] == ["pkg/test_a.py"] and not res.blocked
+    # Once a test module imports it, it may be a TestCase collected there.
+    _repo(tmp_path, "pkg/test_b.py", "from pkg.models import User  # noqa: F401\n")
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert sorted(f.path for f in res.refused) == ["pkg/models.py", "pkg/test_a.py"], res.files
+    assert "class User derives from Base" in res.refused[0].reasons[0]
+
+
+def test_partial_holds_back_a_file_linked_to_a_refused_one(tmp_path, capsys):
+    """test_g.py imports a class of test_r.py, which is refused (an undecided
+    test). Nothing of test_r.py changes, so nothing refuses test_g.py, but
+    --partial writes no file linked to a refused one, and says so."""
+    from rules_requirements import cli
+
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(
+        tmp_path,
+        "pkg/test_r.py",
+        'import pytest\n\n\nclass Helper:\n    pass\n\n\n@pytest.mark.rr("A", "B")\ndef test_r():\n    pass\n',
+    )
+    g = _repo(
+        tmp_path,
+        "pkg/test_g.py",
+        'import pytest\n\nfrom pkg.test_r import Helper\n\npytestmark = pytest.mark.rr("A", "B")\n\n\n'
+        "def test_g():\n    assert Helper\n",
+    )
+    before = g.read_bytes()
+    decided = {CaseKey("//pkg:t", "pkg.test_g::test_g"): "A"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path))
+    assert [f.path for f in res.refused] == ["pkg/test_r.py"] and [f.path for f in res.changed] == ["pkg/test_g.py"]
+    assert res.depends["pkg/test_g.py"] == {"pkg/test_r.py"}
+    assert res.to_write(partial=True) == []
+    assert res.held_back(partial=True) == {"pkg/test_g.py": "it is linked to pkg/test_r.py (refused)"}
+    sheet = tmp_path / "ws.rrplan"
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n- target: //pkg:t\n  group: g\n"
+        "  counts_toward: [A, B]\n  owner: A\n  cases:\n  - path: pkg.test_g::test_g\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path), "--partial"]) == 1
+    err = capsys.readouterr().err
+    assert "held back pkg/test_g.py (left unchanged: it is linked to pkg/test_r.py (refused))" in err, err
+    assert g.read_bytes() == before
+
+
+def test_a_plain_helper_import_does_not_link_files(tmp_path):
+    """The verifier's p3: a refused file importing a plain helper function
+    from a rewritten one does not hold the rewritten one back."""
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_h.py", _PLAIN + "def helper():\n    return 1\n")
+    _repo(
+        tmp_path,
+        "pkg/test_r.py",
+        'import pytest\n\nfrom pkg.test_h import helper\n\n\n@pytest.mark.rr("A", "B")\ndef test_r():\n'
+        "    assert helper()\n",
+    )
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_h::test_a"): "A"}, str(tmp_path))
+    assert [f.path for f in res.refused] == ["pkg/test_r.py"] and "pkg/test_h.py" not in res.depends
+    assert [f.path for f in res.to_write(partial=True)] == ["pkg/test_h.py"]
+
+
+def test_held_back_files_name_their_cause(tmp_path, capsys):
+    """The verifier's p2: no file is refused, a decided case is not found.
+    The messages say so; --partial holds back only the file holding it."""
+    from rules_requirements import cli
+
+    multi = '@pytest.mark.rr("A", "B")\ndef {}():\n    pass\n'
+    u = _repo(tmp_path, "pkg/test_u.py", "import pytest\n\n\n" + multi.format("test_u"))
+    _repo(tmp_path, "pkg/test_v.py", "import pytest\n\n\n" + multi.format("test_v"))
+    before = u.read_bytes()
+    sheet = tmp_path / "ws.rrplan"
+    rows = [("pkg.test_u::test_u", "B"), ("pkg.test_v::test_v", "A"), ("pkg.test_u::test_ghost", "A")]
+    sheet.write_text(
+        "schema: rules_requirements/attribution-worksheet/v1\ngroups:\n"
+        + "".join(
+            f"- target: //pkg:t\n  group: g{i}\n  counts_toward: [A, B]\n  owner: {o}\n  cases:\n  - path: {p}\n"
+            for i, (p, o) in enumerate(rows)
+        ),
+        encoding="utf-8",
+    )
+    argv = ["migrate", "apply", str(sheet), "--stage", "tags", "--root", str(tmp_path)]
+    assert cli.main(argv) == 1
+    err = capsys.readouterr().err
+    assert "held back pkg/test_v.py (left unchanged: all or nothing: 1 decided case(s) were not found" in err
+    assert "nothing written: 2 rewritten file(s) held back because 1 decided case(s) were not found" in err
+    assert "refusals" not in err and "refused file" not in err
+    assert cli.main([*argv, "--partial"]) == 1
+    err = capsys.readouterr().err
+    assert "rewrote pkg/test_v.py" in err
+    assert "held back pkg/test_u.py (left unchanged: it holds a decided case the codemod did not find in it)" in err
+    assert u.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "import pkg.test_base as tb\n\npytestmark = tb.pytestmark\n",
+        "import pkg.test_base\n\npytestmark = pkg.test_base.pytestmark\n",
+        "from pkg import test_base\n\npytestmark = test_base.pytestmark\n",
+    ],
+)
+def test_a_module_attribute_reference_links_the_files(tmp_path, other):
+    """test_other.py reuses test_base.py's module pytestmark through the
+    module object: narrowing it would change test_y unseen."""
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _PLAIN)
+    _repo(tmp_path, "pkg/test_other.py", other + "\n\ndef test_y():\n    pass\n")
+    assert _runtime_traces(tmp_path, "pkg/test_other.py")["test_y"] == ("A", "B")
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_base::test_a"): "A"}, str(tmp_path))
+    assert sorted(f.path for f in res.refused) == ["pkg/test_base.py", "pkg/test_other.py"], res.files
+    assert res.to_write(partial=True) == []
+
+
+def test_a_re_exported_class_refuses_its_subclasses_too(tmp_path):
+    """helpers.py re-exports TestBase as Base; test_other.py subclasses Base.
+    The refusal propagates through the re-export to test_other.py."""
+    _xmod(tmp_path, "from pkg.helpers import Base\n\n\nclass TestSub(Base):\n")
+    _repo(tmp_path, "pkg/helpers.py", "from pkg.test_base import TestBase as Base  # noqa: F401\n")
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_base.TestBase::test_x"): "A"}, str(tmp_path))
+    refused = {f.path: f.reasons for f in res.refused}
+    assert sorted(refused) == ["pkg/helpers.py", "pkg/test_base.py", "pkg/test_other.py"], res.files
+    assert any("imports or subclasses Base from pkg/helpers.py" in r for r in refused["pkg/test_other.py"])
+
+
+def test_configured_test_names(tmp_path, monkeypatch):
+    (tmp_path / "pytest.ini").write_text("[pytest]\npython_functions = check_*\npython_classes = Suite\n")
+    names = tag_codemod.test_names(str(tmp_path))
+    assert names.function("check_x") and names.function("test_x") and names.cls("SuiteA") and names.cls("TestA")
+    assert not names.any("helper") and names.test_module("pkg/test_a.py")
+    (tmp_path / "pytest.ini").unlink()
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.pytest.ini_options]\npython_functions = [\n  "verify_*",\n]\npython_files = "check_*.py"\n'
+    )
+    real = tag_codemod.importlib.import_module
+
+    def no_tomllib(name, *args):
+        if name == "tomllib":
+            raise ImportError(name)
+        return real(name, *args)
+
+    for _ in range(2):  # with tomllib, then with the Python 3.9/3.10 fallback
+        names = tag_codemod.test_names(str(tmp_path))
+        assert names.function("verify_x") and names.test_module("pkg/check_x.py") and not names.function("check_x")
+        monkeypatch.setattr(tag_codemod.importlib, "import_module", no_tomllib)
+
+
+def test_configured_test_names_count_as_tests(tmp_path):
+    """With python_functions = check_*, check_a is a test (its case is found)
+    and check_b = check_a binds another one: the file is refused."""
+    (tmp_path / "setup.cfg").write_text("[tool:pytest]\npython_functions = check_*\n")
+    _repo(
+        tmp_path,
+        "pkg/test_c.py",
+        'import pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef check_a():\n    pass\n\n\ncheck_b = check_a\n',
+    )
+    res = tag_codemod.apply_tags({CaseKey("//pkg:t", "pkg.test_c::check_a"): "A"}, str(tmp_path))
+    assert res.unmatched == []
+    (f,) = res.refused
+    assert "check_b is bound by an assignment" in f.reasons[0], f.reasons
