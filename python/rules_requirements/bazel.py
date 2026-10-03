@@ -45,11 +45,17 @@ _KILL_GRACE = 2.0
 _DRAIN = 1.0
 
 
-def _drain(fd: int, chunks: list[bytes]) -> None:
+def _drain(fd: int, chunks: list[bytes], done: threading.Event) -> None:
+    """Reads ``fd`` into ``chunks`` until EOF or until ``done`` is set.
+
+    Once the caller has its output (``done``), the next read ends the thread
+    and closes the pipe instead of buffering what a process the test left
+    behind keeps writing: that writer then gets EPIPE.
+    """
     try:
-        while True:
+        while not done.is_set():
             data = os.read(fd, 65536)
-            if not data:
+            if not data or done.is_set():
                 return
             chunks.append(data)
     except OSError:
@@ -68,7 +74,9 @@ def _run_one(exe: str, cwd: str, env: dict[str, str], timeout: float) -> tuple[i
     SIGKILL if it is still there after a short grace. Only the test itself is
     waited for: output is read on a thread, so a process the test left behind
     that still holds the output pipe (a daemon, ``setsid``) never blocks the
-    action, and what was read by then is kept.
+    action, and what was read by then is kept; the pipe is then closed at
+    the next thing such a process writes, so it is not buffered for the rest
+    of the action.
     """
     read_fd, write_fd = os.pipe()
     try:
@@ -79,7 +87,8 @@ def _run_one(exe: str, cwd: str, env: dict[str, str], timeout: float) -> tuple[i
     finally:
         os.close(write_fd)
     chunks: list[bytes] = []
-    reader = threading.Thread(target=_drain, args=(read_fd, chunks), daemon=True)
+    done = threading.Event()
+    reader = threading.Thread(target=_drain, args=(read_fd, chunks, done), daemon=True)
     reader.start()
     timed_out = False
     try:
@@ -93,6 +102,7 @@ def _run_one(exe: str, cwd: str, env: dict[str, str], timeout: float) -> tuple[i
             proc.kill()
             proc.wait()
     reader.join(_DRAIN)
+    done.set()
     out = b"".join(list(chunks)).decode("utf-8", "replace")
     if timed_out:
         return -1, out + f"\nTIMEOUT after {timeout}s"

@@ -86,6 +86,46 @@ def test_a_timeout_never_waits_for_what_the_test_left_holding_its_output(tmp_pat
     assert 1 <= elapsed < 1 + bazel._KILL_GRACE + 1, elapsed
 
 
+@pytest.mark.skipif(not shutil.which("setsid"), reason="needs setsid")
+def test_output_of_an_escaped_process_is_not_buffered_after_the_test_ends(tmp_path):
+    # A chatty process the test left behind, out of its group and holding its
+    # stdout: once _run_one has returned, the pipe is closed on that
+    # process's next write (it dies of SIGPIPE) instead of being read into
+    # memory for the rest of the action.
+    pidfile = tmp_path / "pid"
+    script = _exe(tmp_path / "chatty", "")
+    script.write_text(
+        f"#!/bin/sh\necho hello\nsetsid sh -c 'echo $$ > {pidfile}; while :; do echo more; sleep 0.01; done' &\nsleep 0.5\n"
+    )
+    pid = None
+    try:
+        code, log = bazel._run_one(str(script), str(tmp_path), {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, 30)
+        assert code == 0 and log.startswith("hello\n")
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _running(pid):
+            time.sleep(0.05)
+        assert not _running(pid), "the escaped writer's output is still being read"
+    finally:
+        if pid is not None and _running(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _running(pid):
+    """True while ``pid`` exists and is not a zombie."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        if os.path.isdir("/proc/self"):
+            return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
 def test_a_timeout_kills_a_test_that_ignores_sigterm(tmp_path):
     exe = _exe(
         tmp_path / "stubborn",
