@@ -15,7 +15,10 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
 - `rr_node_test`: node:test files with one JUnit case per test
   (`verifies(t, id)`), Node 20+; one synthetic result on older Node.
 - `rr_case.h` / `@rules_requirements//cc:case`: one JUnit case per test
-  function for plain-assert C/C++ tests, each case in a forked child.
+  function for plain-assert C/C++ tests, each case in a forked child. Under
+  `bazel coverage` on Linux it links libgcov's dump/reset hooks;
+  `--@rules_requirements//cc:coverage_hooks=false` turns that off for a
+  toolchain without a gcov runtime.
 - `CheckPlan`: hardware runs as steps and single-requirement checks, with
   device, rig and harness stops recorded apart.
 - `JUnitWriter`: `requirement=` (one id), `not_reached()`, `rr.file`,

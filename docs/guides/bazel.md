@@ -26,6 +26,7 @@ the module provides these targets:
 | `@rules_requirements//python:rr` | The `rr` CLI; also `@rules_requirements//:rr` and simply `@rules_requirements` (`bazel run @rules_requirements -- validate requirements/`). |
 | `@rules_requirements//cc:gtest` | The googletest hook (`#include "rr_gtest.h"`). |
 | `@rules_requirements//cc:case` | Per-case JUnit for plain-assert C++ tests (`#include "rr_case.h"`). |
+| `@rules_requirements//cc:coverage_hooks` | Flag, default `true`: under `bazel coverage` on Linux, `//cc:case` links libgcov's dump/reset hooks. `--@rules_requirements//cc:coverage_hooks=false` for a toolchain without a gcov runtime ({ref}`rr-case-h`). |
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
 | `@rules_requirements//js:verifies.cjs` | The node:test `verifies(t, id)` helper (dependency-free CommonJS). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |

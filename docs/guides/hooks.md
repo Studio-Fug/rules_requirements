@@ -249,8 +249,12 @@ goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
   libraries). That takes libgcov's `__gcov_reset` and `__gcov_dump`, which
   gcc links only on request: `@rules_requirements//cc:case` adds
   `-Wl,-u,__gcov_dump -Wl,-u,__gcov_reset` to the link under `bazel coverage`
-  on Linux. A `--coverage` build of your own outside `bazel coverage` needs
-  the same two link options; without them, code in a shared library that
+  on Linux. A toolchain without a gcov runtime (no libgcov) cannot link those:
+  pass `--@rules_requirements//cc:coverage_hooks=false` (default `true`) to
+  `bazel coverage` and `//cc:case` adds no link options; the cases' coverage
+  is then counted as described next for a build without them. A `--coverage`
+  build of your own outside `bazel coverage` needs the same two link options;
+  without them, code in a shared library that
   only cases run is not counted at all, and unless the test's own source is
   instrumented (`--instrument_test_targets`), code run before the cases is
   counted once more per case. Verified with gcc 13: shared and static links,

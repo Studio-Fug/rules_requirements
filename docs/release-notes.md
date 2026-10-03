@@ -43,8 +43,10 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   in-process for a debugger; `--test_filter` and sharding are honoured. A run
   killed mid-case still reports the cases that finished and names the one that
   did not. Under `bazel coverage` on Linux, `//cc:case` links libgcov's
-  `__gcov_dump` and `__gcov_reset` so each child's counts are kept.
-  LeakSanitizer leaks fail the case that leaked.
+  `__gcov_dump` and `__gcov_reset` so each child's counts are kept; a
+  toolchain without a gcov runtime turns that off with
+  `--@rules_requirements//cc:coverage_hooks=false`. LeakSanitizer leaks fail
+  the case that leaked.
 - **`rr scan`** recognises `RR_CASE(name, "REQ-1")`, written on one line, as a
   verifies annotation bound to the case.
 

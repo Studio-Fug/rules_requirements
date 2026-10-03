@@ -1,4 +1,5 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//cc/private:bool_flag.bzl", "bool_flag")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -38,6 +39,9 @@ cc_library(
 # runtime is linked even into a test that turns the `coverage` feature off.
 # Not tested: clang, whose compiler-rt profile runtime (--coverage and
 # -fprofile-instr-generate) defines both as well.
+# A toolchain without a gcov runtime cannot link them: such a consumer passes
+# --@rules_requirements//cc:coverage_hooks=false; the cases are then counted
+# as without the two options (docs/guides/hooks.md).
 cc_library(
     name = "gcov_dump_under_coverage",
     linkopts = select({
@@ -51,8 +55,16 @@ cc_library(
     visibility = ["//visibility:private"],
 )
 
+# `--@rules_requirements//cc:coverage_hooks=false` keeps //cc:case from adding
+# the gcov link options above under `bazel coverage`.
+bool_flag(
+    name = "coverage_hooks",
+    build_setting_default = True,
+)
+
 config_setting(
     name = "coverage",
+    flag_values = {":coverage_hooks": "true"},
     values = {"collect_code_coverage": "true"},
     visibility = ["//visibility:private"],
 )
