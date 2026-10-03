@@ -4,6 +4,7 @@ import json
 import pytest
 from conftest import MODEL, junit, write
 
+import rules_requirements
 from rules_requirements import cli
 
 
@@ -266,3 +267,10 @@ def test_case_bad_artifact_exits_2(capsys, tmp_path):
     rc, _, err = run(capsys, "case", "--out", out, "--name", "x", "--artifact", "nokv")
     assert rc == 2 and "KEY=VALUE" in err
     assert not (tmp_path / "r.xml").exists()
+
+
+def test_version(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"rr {rules_requirements.__version__}\n"

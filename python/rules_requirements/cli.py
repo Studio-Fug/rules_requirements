@@ -22,8 +22,8 @@ import os
 import sys
 from typing import Any
 
+from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
-from rules_requirements import graph, ingest, report
 from rules_requirements.model import Model, read_model
 from rules_requirements.trace import FAILED, UNVERIFIED, build_matrix
 from rules_requirements.util import natural_key
@@ -388,6 +388,7 @@ def cmd_case(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="rr", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = p.add_subparsers(dest="command", required=True)
 
     def model_arg(sp: argparse.ArgumentParser) -> None:
