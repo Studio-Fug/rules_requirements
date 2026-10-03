@@ -70,7 +70,9 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   (by default `sys.argv[0]`, relative to the workspace; `file=""` writes none);
   `write(path, append=True)`, which adds the cases to the file already there
   and replaces it atomically. On POSIX, concurrent appends are serialised by a
-  lock on the file.
+  lock on the file, or on a sidecar `.<name>.lock` where the file cannot be
+  locked (a read-only file on NFS, a dangling symlink); on Windows they are
+  not.
 - **`rr case`**: append one test case to a JUnit file (`$XML_OUTPUT_FILE` by
   default) from a shell script, with one `--requirement` at most. It exits 0
   whatever the case's status and 2 when it cannot record the case. Appends are

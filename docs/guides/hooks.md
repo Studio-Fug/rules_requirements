@@ -507,7 +507,10 @@ finally:
 - `write(path, append=False)` writes the JUnit; with `append=True` the cases
   are added to the file already at `path` (to the suite of the same name, else
   as a new suite), replacing it atomically; on POSIX systems concurrent
-  appends are serialised by a lock on the file.
+  appends are serialised by a lock on the file — or, where the file itself
+  cannot be locked (a read-only file on NFS, a dangling symlink), on a sidecar
+  `.<name>.lock` next to it, removed again. A symlink to a file is followed
+  for the lock, then replaced by the new file like the file itself.
 
 (checkplan)=
 ## Hardware runs: `CheckPlan`
@@ -626,8 +629,9 @@ rr case --name "boot banner" --status failed --message "no banner after 30 s" \
 still decides whether the test passed — and 2 when it cannot record the case
 (no output file, more than one id, a malformed id or `--artifact`, an
 unreadable existing file). The file is replaced atomically, and on POSIX
-systems concurrent appends (`rr case ... &`) are serialised by a lock on it,
-so none is lost; on Windows they are not.
+systems concurrent appends (`rr case ... &`) are serialised by a lock on it
+(or on a sidecar `.<name>.lock`, as for `JUnitWriter`), so none is lost; on
+Windows they are not.
 
 ## `rr wrap`
 

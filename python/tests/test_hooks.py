@@ -756,9 +756,16 @@ def test_junit_writer_legacy_form_accepts_any_iterable(tmp_path):
 
 
 _APPENDER = r"""
-import os, sys, time
+import errno, fcntl, os, sys, time
 from rules_requirements.hooks.junit_writer import JUnitWriter
-path, go, i = sys.argv[1], sys.argv[2], sys.argv[3]
+path, go, i, nfs = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == "nfs"
+if nfs:  # flock as an NFS client does it: an exclusive lock needs a writable fd
+    real = fcntl.flock
+    def flock(fd, op):
+        if op & fcntl.LOCK_EX and fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE == os.O_RDONLY:
+            raise OSError(errno.EBADF, os.strerror(errno.EBADF))
+        return real(fd, op)
+    fcntl.flock = flock
 while not os.path.exists(go):
     time.sleep(0.001)
 w = JUnitWriter("shell", file="")
@@ -767,31 +774,51 @@ w.write(path, append=True)
 """
 
 
-@pytest.mark.parametrize("existing", [None, 0o444], ids=["missing", "read-only"])
+@pytest.mark.parametrize(
+    "existing",
+    ["missing", "read-only", "read-only-nfs", "live-symlink", "dangling-symlink"],
+)
 def test_junit_writer_concurrent_appends_keep_every_case(tmp_path, existing):
+    # Every shape the append must serialise: a file it creates, a read-only
+    # file (locked read-only; on NFS, where that is refused, by a sidecar), a
+    # symlink to a file (the lock follows it, then the append replaces the
+    # link) and a dangling symlink (nothing to lock: a sidecar).
     path, go = tmp_path / "shared.xml", tmp_path / "go"
     script = tmp_path / "append.py"
     script.write_text(_APPENDER)
-    first = []
-    if existing is not None:  # a read-only file: the directory is writable, the file is not
+    first, left = [], ["append.py", "go", "shared.xml"]
+    if existing in ("read-only", "read-only-nfs", "live-symlink"):
+        seeded = tmp_path / ("real.xml" if existing == "live-symlink" else "shared.xml")
         seed = junit_writer.JUnitWriter("shell", file="")
         seed.add("seed")
-        seed.write(str(path), append=True)
-        path.chmod(existing)
+        seed.write(str(seeded), append=True)
         first = ["seed"]
+        if existing == "live-symlink":
+            path.symlink_to("real.xml")
+            left.append("real.xml")
+        else:  # the directory is writable, the file is not
+            seeded.chmod(0o444)
+    elif existing == "dangling-symlink":
+        path.symlink_to("nowhere.xml")
+    nfs = "nfs" if existing == "read-only-nfs" else "local"
     procs = [
-        subprocess.Popen([sys.executable, str(script), str(path), str(go), str(i)], env=_env(), stderr=subprocess.PIPE)
+        subprocess.Popen(
+            [sys.executable, str(script), str(path), str(go), str(i), nfs], env=_env(), stderr=subprocess.PIPE
+        )
         for i in range(16)
     ]
     time.sleep(0.5)  # let every process reach the start line
     go.write_text("")
     errors = [p.communicate(timeout=60)[1].decode() for p in procs]
     assert all(p.returncode == 0 for p in procs), errors
+    assert not path.is_symlink()
     names = sorted(c.name for c in ingest.collect([str(path)]).cases)
     assert names == sorted(first + [f"case{i}" for i in range(16)])
-    assert sorted(os.listdir(tmp_path)) == ["append.py", "go", "shared.xml"]  # no temp files left
-    if existing is not None:
-        assert stat.S_IMODE(path.stat().st_mode) == existing
+    assert sorted(os.listdir(tmp_path)) == sorted(left)  # no temp or lock files left
+    if existing.startswith("read-only"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
+    if existing == "live-symlink":  # the link's old target is left as it was
+        assert [c.name for c in ingest.collect([str(tmp_path / "real.xml")]).cases] == ["seed"]
 
 
 def test_junit_writer_append_keeps_the_files_mode_and_needs_no_write_access_to_it(tmp_path):
@@ -864,8 +891,9 @@ def test_junit_writer_append_locks_on_nfs(tmp_path, monkeypatch):
     w.write(str(path), append=True)  # missing: created, then locked
     w.write(str(path), append=True)  # writable: opened for writing, so locked
     assert calls == [fcntl.LOCK_EX, fcntl.LOCK_EX]
-    path.chmod(0o444)  # read-only: no exclusive lock there, but the append still lands, as before the lock
+    path.chmod(0o444)  # read-only: no exclusive lock on the file there, so a sidecar is locked
     w.write(str(path), append=True)
+    assert calls == [fcntl.LOCK_EX] * 3
     assert [c.name for c in ingest.collect([str(path)]).cases] == ["flash"] * 3
     assert stat.S_IMODE(path.stat().st_mode) == 0o444 and os.listdir(tmp_path) == ["a.xml"]
 

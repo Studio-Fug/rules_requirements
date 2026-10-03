@@ -322,7 +322,9 @@ class JUnitWriter:
         needs a writable directory, but not a writable file. Where ``fcntl``
         exists (not on Windows) appends from concurrent processes
         (``rr case ... &``) are serialised by a lock on the file, so none is
-        lost.
+        lost; a read-only file on NFS and a dangling symlink, which cannot be
+        locked themselves, are serialised by a sidecar lock file
+        (``.<name>.lock``) next to them, removed again.
         """
         if not append:
             tree = ET.ElementTree(self.to_element())
@@ -350,20 +352,22 @@ class JUnitWriter:
 
 @contextmanager
 def _locked(path: str) -> Iterator[Optional[int]]:
-    """Hold an exclusive lock on the file at ``path`` (created empty if
-    missing); yields its permission bits for the replacement file, or
+    """Hold an exclusive lock for appending to the file at ``path`` (created
+    empty if missing); yields its permission bits for the replacement file, or
     ``None`` when there is no file to keep the bits of.
 
     The file is replaced (``os.replace``), not rewritten, so appending needs
     only a writable directory, as it did before the lock: the file is opened
     for writing where allowed (an NFS client's ``flock`` needs that for an
     exclusive lock), and read-only otherwise (a local ``flock`` needs no
-    write access). A read-only file stays appendable and keeps its mode; on
-    NFS it is appended to unlocked, as before the lock. A dangling symlink
-    is not followed (that would leave its target behind, empty): the append
-    goes unlocked and replaces the link, as before the lock. Because the
-    file is replaced, a waiter may end up holding the lock on an unlinked
-    inode: it then retries on the current file.
+    write access). Where the file itself cannot be locked, a sidecar lock
+    file next to it (``.<name>.lock``, removed again) is locked instead: for
+    a read-only file on NFS, and for a dangling symlink, which is not
+    followed (that would leave its target behind, empty) and is replaced by
+    the append. A symlink to an existing file is followed for the lock and
+    then replaced like any file. Because the file is replaced, a waiter may
+    end up holding the lock on an unlinked inode: it then retries on the
+    current file.
     """
     try:
         import fcntl
@@ -372,23 +376,61 @@ def _locked(path: str) -> Iterator[Optional[int]]:
         return
     while True:
         fd = _open_to_lock(path)
-        if fd is None:
-            yield None
-            return
+        if fd is None:  # a dangling symlink: nothing to lock but a sidecar
+            with _sidecar_locked(path):
+                if _dangling(path):
+                    yield None
+                    return
+            continue  # an append replaced the link meanwhile: lock that file
         try:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             except OSError as exc:  # NFS: no exclusive lock on a read-only fd
                 if exc.errno != errno.EBADF or fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE != os.O_RDONLY:
                     raise
+                with _sidecar_locked(path):
+                    if _same_file(fd, path):
+                        yield stat.S_IMODE(os.fstat(fd).st_mode)
+                        return
+                continue
+            if _same_file(fd, path):
                 yield stat.S_IMODE(os.fstat(fd).st_mode)
-                return
-            held, current = os.fstat(fd), _stat(path)
-            if current is not None and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
-                yield stat.S_IMODE(held.st_mode)
                 return
         finally:
             os.close(fd)  # also releases the lock
+
+
+@contextmanager
+def _sidecar_locked(path: str) -> Iterator[None]:
+    """Hold an exclusive lock on ``.<name>.lock`` next to ``path``, for
+    appends that cannot lock the file itself. The sidecar is opened for
+    writing (NFS needs that) and removed before the lock is released;
+    a waiter left holding the removed one retries on the current sidecar."""
+    import fcntl
+
+    lock = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.lock")
+    while True:
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o666)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if _same_file(fd, lock):
+                try:
+                    yield
+                finally:
+                    os.remove(lock)
+                return
+        finally:
+            os.close(fd)
+
+
+def _same_file(fd: int, path: str) -> bool:
+    """Whether ``path`` (followed if a symlink) is still the file open as ``fd``."""
+    held, current = os.fstat(fd), _stat(path)
+    return current is not None and (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _dangling(path: str) -> bool:
+    return os.path.islink(path) and not os.path.exists(path)
 
 
 def _create_temp(path: str) -> tuple[int, str]:
@@ -408,7 +450,7 @@ def _open_to_lock(path: str) -> Optional[int]:
     """An fd on the file at ``path``, created if missing; ``None`` for a
     dangling symlink. No O_EXCL: it refuses every symlink, so a first writer
     that met a dangling one would retry forever."""
-    if os.path.islink(path) and not os.path.exists(path):
+    if _dangling(path):
         return None
     try:
         return os.open(path, os.O_RDWR | os.O_CREAT, 0o666)
