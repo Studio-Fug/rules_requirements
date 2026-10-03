@@ -2,7 +2,7 @@
 
 module(
     name = "rules_requirements",
-    version = "0.1.0",
+    version = "0.2.0",
 )
 
 # Versions are floors (bzlmod picks the max across the graph). They are kept at
