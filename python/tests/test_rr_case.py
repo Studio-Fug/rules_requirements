@@ -513,6 +513,75 @@ def test_gcc_coverage_counts_each_line_once_per_run_of_it(tmp_path):
     assert count('{ std::printf("ATEXIT\\n"); }') == "1", report
 
 
+_LIB = """int lib_before(int x) { return x + 1; }
+int lib_case_only(int x) { return x * 3; }
+"""
+
+_USES_LIB = """#include "rr_case.h"
+int lib_before(int);
+int lib_case_only(int);
+RR_CASE(calls_it) { RR_CHECK(lib_case_only(2) == 6); }
+RR_CASE(other) {}
+RR_CASE(third) {}
+int main(int argc, char** argv) {
+  RR_CHECK(lib_before(1) == 2);
+  return rr::RunCases(argc, argv, "covlib");
+}
+"""
+
+
+def _coverage_linkopts():
+    """The link options //cc:case adds under `bazel coverage`."""
+    with open(os.path.join(_INCLUDE, "BUILD.bazel"), encoding="utf-8") as fh:
+        found = re.search(r'":coverage": \[([^]]*)\]', fh.read())
+    assert found, "cc/BUILD.bazel has no link options for :coverage"
+    return re.findall(r'"([^"]+)"', found.group(1))
+
+
+@pytest.mark.parametrize("instrumented", [False, True], ids=["test-uninstrumented", "test-instrumented"])
+@pytest.mark.parametrize("link", ["shared", "static"])
+def test_gcc_coverage_of_a_library_counts_each_line_once_per_run_of_it(tmp_path, link, instrumented):
+    # `bazel coverage`'s usual shape: the code under test is an instrumented
+    # cc_library, linked as a shared library by default, and the test's own
+    # source is not instrumented. Linked with //cc:case's coverage link
+    # options, a child's counts reach the library's .gcda, and code run
+    # before the cases is not counted again by each child.
+    gcov = _gcc_with_gcov()
+    cxx = _compiler()
+    (tmp_path / "lib.cc").write_text(_LIB, encoding="utf-8")
+    (tmp_path / "case_test.cc").write_text(_USES_LIB, encoding="utf-8")
+
+    def run(*argv):
+        proc = subprocess.run([cxx, *argv], capture_output=True, text=True, cwd=str(tmp_path))
+        assert proc.returncode == 0, proc.stderr
+        return proc
+
+    run("--coverage", "-fPIC", "-c", "lib.cc", "-o", "lib.o")
+    if link == "shared":
+        run("--coverage", "-shared", "lib.o", "-o", "libcovlib.so")
+        lib = ["-L.", "-lcovlib", "-Wl,-rpath," + str(tmp_path)]
+    else:
+        lib = ["lib.o"]
+    run("-std=c++11", *_WARNINGS, *(["--coverage"] if instrumented else []), "-I", _INCLUDE, "-c", "case_test.cc")
+    linkopts = _coverage_linkopts()
+    assert linkopts == ["--coverage", "-Wl,-u,__gcov_dump", "-Wl,-u,__gcov_reset"]
+    # Only //cc:case's options: a test with the `coverage` feature off gets
+    # no other coverage link flag from Bazel.
+    run(*linkopts, "case_test.o", *lib, "-o", "case_test")
+    tests = subprocess.run([str(tmp_path / "case_test")], capture_output=True, text=True, cwd=str(tmp_path), env={})
+    assert tests.returncode == 0, tests.stdout
+    report = subprocess.run(
+        [gcov, "-t", "-o", str(tmp_path), str(tmp_path / "lib.cc")], capture_output=True, text=True, cwd=str(tmp_path)
+    ).stdout
+
+    def count(suffix):
+        line = next(ln for ln in report.splitlines() if ln.rstrip().endswith(suffix))
+        return line.split(":", 1)[0].strip().rstrip("*")
+
+    assert count("{ return x * 3; }") == "1", report
+    assert count("{ return x + 1; }") == "1", report
+
+
 def _wait_for_pid(pidfile, proc):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -557,6 +626,46 @@ def test_a_signal_to_the_runner_kills_its_running_case(binary, tmp_path, sig):
         runner.wait()
         if child is not None and _alive(child):
             os.kill(child, signal.SIGKILL)
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self"), reason="reads /proc")
+def test_a_signal_goes_on_to_the_programs_own_handler_after_killing_the_case(binary, tmp_path):
+    # The program's SIGTERM handler (it does _exit(42)) still runs, as it
+    # would without rr_case.h, once the running case's child is killed.
+    pidfile = tmp_path / "child.pid"
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("TEST", "XML_OUTPUT_FILE", "RR_FIXTURE"))}
+    env.update(
+        RR_FIXTURE_FORM="hang",
+        RR_FIXTURE_PIDFILE=str(pidfile),
+        RR_FIXTURE_NO_PDEATHSIG="1",
+        RR_FIXTURE_USER_TERM="1",
+        XML_OUTPUT_FILE=str(tmp_path / "out.xml"),
+    )
+    runner = subprocess.Popen([binary], env=env, cwd=str(tmp_path), stdout=subprocess.DEVNULL)
+    child = None
+    try:
+        child = _wait_for_pid(pidfile, runner)
+        runner.send_signal(signal.SIGTERM)
+        assert runner.wait(timeout=10) == 42
+        assert _gone(child), "the case's child outlived its signalled runner"
+    finally:
+        runner.kill()
+        runner.wait()
+        if child is not None and _alive(child):
+            os.kill(child, signal.SIGKILL)
+
+
+def test_a_case_starts_with_the_runners_signal_mask_and_dispositions(binary, tmp_path):
+    # The runner blocks SIGTERM, SIGINT and SIGHUP and installs its own
+    # handler for them around each fork; the case must see neither.
+    run, xml = _run(binary, tmp_path, RR_FIXTURE_FORM="signals")
+    cases = _cases(xml)
+    assert cases["mask_is_the_runners"][:2] == ("passed", ""), run.stdout
+    assert cases["dispositions_are_the_runners"][:2] == ("passed", ""), run.stdout
+    assert cases["raises_sigterm"][:2] == ("failure", "terminated by SIGTERM"), run.stdout
+    assert "survived SIGTERM" not in run.stdout
+    assert cases["own_sighup_handler"][:2] == ("passed", ""), run.stdout
+    assert run.returncode == 1
 
 
 def _bazel_main(*argv):

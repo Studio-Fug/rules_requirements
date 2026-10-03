@@ -4,9 +4,11 @@
 // rr_case.h. RR_FIXTURE_FORM=registry runs the RR_CASE cases, =ids the
 // requirement-id and flag edge cases, =hang one case that never ends
 // (RR_FIXTURE_PIDFILE gets its pid; RR_FIXTURE_NO_PDEATHSIG clears its
-// PR_SET_PDEATHSIG), and
-// =locale the list under the LC_NUMERIC in RR_FIXTURE_LOCALE; otherwise the
-// explicit list runs (and the registry is ignored).
+// PR_SET_PDEATHSIG; RR_FIXTURE_USER_TERM installs a SIGTERM handler of the
+// program's own that does _exit(42)), =signals the cases that check a case's
+// signal mask and dispositions (the runner has a SIGINT handler of its own),
+// and =locale the list under the LC_NUMERIC in RR_FIXTURE_LOCALE; otherwise
+// the explicit list runs (and the registry is ignored).
 
 #undef NDEBUG  // the assert() case must abort in optimized builds too
 #include <cassert>
@@ -14,6 +16,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -85,9 +88,72 @@ static void Hangs() {
 #endif
 }
 
+#if !defined(_WIN32)
+extern "C" void UserTermHandler(int) { _exit(42); }
+extern "C" void UserIntHandler(int) {}
+
+static volatile sig_atomic_t g_hup_seen = 0;
+extern "C" void CaseHupHandler(int) { g_hup_seen = 1; }
+
+static void Install(int sig, void (*handler)(int)) {
+  struct sigaction sa;
+  std::memset(&sa, 0, sizeof sa);
+  sa.sa_handler = handler;
+  sigemptyset(&sa.sa_mask);
+  sigaction(sig, &sa, nullptr);
+}
+
+static void HandlerOf(int sig, struct sigaction* sa) { sigaction(sig, nullptr, sa); }
+
+// Inside a case none of the signals the runner blocks around fork is blocked.
+static void MaskIsTheRunners() {
+  sigset_t now;
+  sigemptyset(&now);
+  RR_CHECK(sigprocmask(SIG_SETMASK, nullptr, &now) == 0);
+  RR_CHECK(!sigismember(&now, SIGTERM));
+  RR_CHECK(!sigismember(&now, SIGINT));
+  RR_CHECK(!sigismember(&now, SIGHUP));
+}
+
+// ... and each of them has what the runner had before rr::RunCases.
+static void DispositionsAreTheRunners() {
+  struct sigaction sa;
+  HandlerOf(SIGTERM, &sa);
+  RR_CHECK(sa.sa_handler == SIG_DFL);
+  HandlerOf(SIGHUP, &sa);
+  RR_CHECK(sa.sa_handler == SIG_DFL);
+  HandlerOf(SIGINT, &sa);
+  RR_CHECK(sa.sa_handler == &UserIntHandler);
+}
+
+static void RaisesSigterm() {
+  raise(SIGTERM);
+  std::printf("survived SIGTERM\n");
+}
+
+static void OwnSighupHandler() {
+  Install(SIGHUP, &CaseHupHandler);
+  raise(SIGHUP);
+  RR_CHECK(g_hup_seen == 1);
+}
+#endif
+
 int main(int argc, char** argv) {
   const std::string form = std::getenv("RR_FIXTURE_FORM") != nullptr ? std::getenv("RR_FIXTURE_FORM") : "";
   if (form == "registry") return rr::RunCases(argc, argv, "fixture_registry");
+#if !defined(_WIN32)
+  if (form == "hang" && std::getenv("RR_FIXTURE_USER_TERM") != nullptr) Install(SIGTERM, &UserTermHandler);
+  if (form == "signals") {
+    Install(SIGINT, &UserIntHandler);
+    return rr::RunCases(argc, argv, "fixture_signals",
+                        {
+                            {"mask_is_the_runners", MaskIsTheRunners},
+                            {"dispositions_are_the_runners", DispositionsAreTheRunners},
+                            {"raises_sigterm", RaisesSigterm},
+                            {"own_sighup_handler", OwnSighupHandler},
+                        });
+  }
+#endif
   if (form == "hang") return rr::RunCases(argc, argv, "fixture_hang", {{"hangs", Hangs}});
   if (form == "ids") {
     return rr::RunCases(argc, argv, "fixture_ids",

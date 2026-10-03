@@ -209,21 +209,33 @@ goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
   does not outlive its runner: a `SIGTERM`, `SIGINT` or `SIGHUP` to the
   runner (an `rr_evidence` timeout sends `SIGTERM`, then `SIGKILL` after 2 s)
   kills the running case's child first, and on Linux the child also dies with
-  a runner killed by `SIGKILL`. Tests run by `rr_evidence` stay in the
-  action's process group, so a cancelled build reaches them too.
+  a runner killed by `SIGKILL`. The signal then goes to what the program had
+  for it: by default it ends the runner as the signal would have; a handler
+  the program installed before `rr::RunCases` runs as it would have (if it
+  returns, the runner goes on and reports the killed case as failed); a
+  signal the program ignores stays ignored. A case starts with the runner's
+  own signal mask and signal dispositions, as they were before
+  `rr::RunCases`. Tests run by `rr_evidence` stay in the action's process
+  group, so a cancelled build reaches them too.
 - **Coverage** (Linux and other ELF targets). A child starts its case's
   counts from zero and writes them before it ends, so a line run in a case
-  is counted once per run of it, and a line run before the cases once.
-  Verified only with gcc `--coverage` (gcc 13), and only for code linked into
-  the test executable itself (`linkstatic = True` on the `cc_test`, or
-  `--dynamic_mode=off`): the children's counts for code in a shared library
-  are lost. The test's own source must be instrumented too
-  (`--instrument_test_targets`), or code run before the cases is counted once
-  more per case. clang `--coverage` (compiler-rt's `__gcov_dump`) and clang
+  is counted once per run of it, and a line run before the cases once, in the
+  test executable and in every instrumented shared library it loads (by
+  default `bazel coverage` links a `cc_test`'s `cc_library` deps as shared
+  libraries). That takes libgcov's `__gcov_reset` and `__gcov_dump`, which
+  gcc links only on request: `@rules_requirements//cc:case` adds
+  `-Wl,-u,__gcov_dump -Wl,-u,__gcov_reset` to the link under `bazel coverage`
+  on Linux. A `--coverage` build of your own outside `bazel coverage` needs
+  the same two link options; without them, code in a shared library that
+  only cases run is not counted at all, and unless the test's own source is
+  instrumented (`--instrument_test_targets`), code run before the cases is
+  counted once more per case. Verified with gcc 13: shared and static links,
+  the test's own source instrumented or not, and `bazel coverage` with Bazel
+  7.7.1 and 8.8.1. Not tested: clang, with `--coverage` (compiler-rt defines
+  `__gcov_dump` and `__gcov_reset` itself) or with
   `-fprofile-instr-generate` (`__llvm_profile_reset_counters`,
   `__llvm_profile_write_file`; `LLVM_PROFILE_FILE` needs `%p` or `%m`, as
-  Bazel sets it) are handled but not verified. On macOS the children's
-  coverage is lost.
+  Bazel sets it). On macOS the children's coverage is lost.
 - **Leaks.** Under LeakSanitizer (ELF targets) a case that leaks memory fails
   (`exited with status 1: rr_case: LeakSanitizer found memory leaked by this
   case`). The runner checks once before the first case: memory leaked before
@@ -239,8 +251,9 @@ goes to `$XML_OUTPUT_FILE`; elsewhere pass `--rr_junit=results.xml`.
   `requirement` property. `RR_CASE(name, "REQ-1", "REQ-2")` does not compile
   (`RR-E101`; with 16 or more ids the error is an unrelated one), nor does
   `RR_CASE(name, ("REQ-1", "REQ-2"))`. In the list form that comma
-  expression compiles with only a `-Wunused-value` warning and records just
-  `REQ-2`, so build such tests with `-Werror=unused-value`. An id that is
+  expression compiles, with no warning at all unless `-Wall` or
+  `-Wunused-value` is on, and records just `REQ-2`, so build such tests with
+  `-Werror=unused-value`. An id that is
   empty or holds anything but ASCII letters, digits, `_`, `-` and `.` makes
   the case an error without running it (`RR-E104`). `rr_case.h` accepts ids
   matching `[A-Za-z0-9_.-]+` only: a project whose `config.id_pattern` allows

@@ -46,21 +46,34 @@
 // runner, never per case.
 //
 // A hung case does not outlive its runner: a SIGTERM, SIGINT or SIGHUP to
-// the runner kills the case's child first, and on Linux the child also dies
-// with a runner killed by SIGKILL (PR_SET_PDEATHSIG).
+// the runner kills the case's child first and then goes to what the program
+// had for that signal: by default it ends the runner as the signal would
+// have, and a handler the program installed before rr::RunCases runs as it
+// would have (if that handler returns, the runner goes on and reports the
+// killed case as failed). A signal the program ignores stays ignored. On
+// Linux the child also dies with a runner killed by SIGKILL
+// (PR_SET_PDEATHSIG). A case starts with the runner's own signal mask and
+// signal dispositions, as they were before rr::RunCases.
 //
-// Coverage (ELF targets): a child resets its counts after fork and writes
-// them before _exit, so code run in a case is counted once per run of it and
-// code run before the cases once. Verified only with gcc 13 --coverage, and
-// only for code linked into the test executable itself: the children's counts
-// for code in a shared library are lost, and unless this header's own
-// translation unit is instrumented too (Bazel: --instrument_test_targets),
-// code run before the cases is counted once more per case. Handled but NOT
-// verified: clang --coverage (compiler-rt's __gcov_dump) and clang
-// -fprofile-instr-generate (__llvm_profile_reset_counters and
-// __llvm_profile_write_file; LLVM_PROFILE_FILE needs %p or %m, as Bazel sets
-// it, or each child overwrites the last one's profile). On macOS the
-// children's coverage is lost.
+// Coverage (ELF targets): a child starts its counts from zero after fork and
+// writes them before _exit, so code run in a case is counted once per run of
+// it and code run before the cases once, in the test executable and in every
+// instrumented shared library it loads. That takes __gcov_reset and
+// __gcov_dump, which gcc's libgcov.a links only on request:
+// @rules_requirements//cc:case requests them (`-Wl,-u,__gcov_dump
+// -Wl,-u,__gcov_reset`) under `bazel coverage` on Linux, and a --coverage
+// build of your own needs the same two link options. Without them, code in a
+// shared library that only cases run is not counted at all, and unless this
+// header's own translation unit is instrumented (Bazel:
+// --instrument_test_targets), code run before the cases is counted once more
+// per case. Verified with gcc 13: shared and static links, with the test's
+// own source instrumented or not, and `bazel coverage` with Bazel 7.7.1 and
+// 8.8.1. NOT tested: clang, either with --coverage (compiler-rt defines
+// __gcov_dump and __gcov_reset itself) or with -fprofile-instr-generate
+// (__llvm_profile_reset_counters and __llvm_profile_write_file;
+// LLVM_PROFILE_FILE needs %p or %m, as Bazel sets it, or each child
+// overwrites the last one's profile). On macOS the children's coverage is
+// lost.
 //
 // LeakSanitizer (ELF targets): a case whose child leaks memory fails. The
 // runner checks once before the first case: memory leaked before any case
@@ -72,12 +85,12 @@
 // ids does not compile [RR-E101] (16 or more fail too, with an unrelated
 // error), nor does a parenthesised list of ids (a comma expression that would
 // keep only its last id). The list form cannot catch that comma expression:
-// `{"x", f, ("REQ-1", "REQ-2")}` compiles, with only -Wunused-value, and
-// records "REQ-2"; build with -Werror=unused-value. An id that is empty or
-// holds anything but ASCII letters, digits, '_', '-' and '.' (the grammar
-// [A-Za-z0-9_.-]+, whatever config.id_pattern allows) is reported as an error
-// case without running it [RR-E104], and nothing inside a case can add
-// another. Only `RR_CASE(name, "ID")` written on one line is also an
+// `{"x", f, ("REQ-1", "REQ-2")}` compiles, with no warning at all unless
+// -Wall or -Wunused-value is on, and records "REQ-2"; build with
+// -Werror=unused-value. An id that is empty or holds anything but ASCII
+// letters, digits, '_', '-' and '.' (the grammar [A-Za-z0-9_.-]+, whatever
+// config.id_pattern allows) is reported as an error case without running it
+// [RR-E104], and nothing inside a case can add another. Only `RR_CASE(name, "ID")` written on one line is also an
 // annotation for `rr scan`; the list form's ids are evidence only.
 //
 // Flags (others are ignored, so the binary still accepts its own):
@@ -121,13 +134,19 @@ extern "C" int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
 extern "C" int __llvm_profile_write_file(void) __attribute__((weak));
 extern "C" void __llvm_profile_reset_counters(void) __attribute__((weak));
 // gcov format. A weak reference never pulls an archive member in, so each
-// is present only when something else links it: __gcov_dump is in clang
-// --coverage's runtime (compiler-rt's GCDAProfiling, which the
-// instrumentation always links), but in its own member of gcc's libgcov.a;
-// gcc's __gcov_exit is in the member that holds __gcov_init, which gcc's
-// instrumentation calls, so it is linked whenever gcc --coverage is.
+// is present only when something else links it: __gcov_dump and
+// __gcov_reset are in clang --coverage's runtime (compiler-rt's
+// GCDAProfiling, which the instrumentation always links), but each in its
+// own member of gcc's libgcov.a, which only an explicit `-Wl,-u,SYMBOL` link
+// option pulls in (@rules_requirements//cc:case adds both under
+// `bazel coverage` on Linux); gcc's __gcov_exit is in the member that holds
+// __gcov_init, which gcc's instrumentation calls, so it is linked whenever
+// gcc --coverage is. Unlike __gcov_exit, which writes the executable's own
+// counts only, __gcov_dump and __gcov_reset cover every instrumented shared
+// library too.
 extern "C" void __gcov_dump(void) __attribute__((weak));
 extern "C" void __gcov_exit(void) __attribute__((weak));
+extern "C" void __gcov_reset(void) __attribute__((weak));
 #define RR_INTERNAL_WEAK_HOOKS 1
 #endif
 #endif
@@ -413,10 +432,14 @@ inline pid_t Fork() {
 #endif
 }
 
-// In the child right after fork: clang -fprofile-instr-generate's counts
-// start from zero, as __gcov_fork does for gcov.
+// In the child right after fork: its counts start from zero, as __gcov_fork
+// starts them for code where this header is compiled with gcc --coverage;
+// __gcov_reset does it for every instrumented shared library and for an
+// uninstrumented test source too, and clang -fprofile-instr-generate has its
+// own reset.
 inline void ChildResetCoverage() {
 #if defined(RR_INTERNAL_WEAK_HOOKS)
+  if (&__gcov_reset != nullptr) __gcov_reset();
   if (&__llvm_profile_reset_counters != nullptr) __llvm_profile_reset_counters();
 #endif
 }
@@ -442,18 +465,28 @@ inline volatile pid_t& RunningChild() {
   return pid;
 }
 
+// The runner's own disposition of each of these signals before the case,
+// for the handler below to hand the signal on to.
+const int kChildSignalCount = 3;
+inline int ChildSignal(int i) { return i == 0 ? SIGTERM : i == 1 ? SIGINT : SIGHUP; }
+inline struct sigaction* SavedActions() {
+  static struct sigaction saved[kChildSignalCount];
+  return saved;
+}
+
 // A SIGTERM, SIGINT or SIGHUP to the runner while a case runs (a timeout or
 // a cancel that signals only the runner) kills the case's child too, then
-// ends the runner as the signal would have.
+// hands the signal to what the runner had before the case: the default
+// action ends the runner as the signal would have, and a handler of the
+// program's own runs as it would have (if it returns, the runner goes on and
+// reports the killed case as failed).
 inline void KillChildAndReraise(int sig) {
   const pid_t child = RunningChild();
   if (child > 0) kill(child, SIGKILL);
-  struct sigaction dfl;
-  std::memset(&dfl, 0, sizeof dfl);
-  dfl.sa_handler = SIG_DFL;
-  sigemptyset(&dfl.sa_mask);
-  sigaction(sig, &dfl, nullptr);
-  raise(sig);  // delivered when the handler returns
+  for (int i = 0; i < kChildSignalCount; ++i) {
+    if (ChildSignal(i) == sig) sigaction(sig, &SavedActions()[i], nullptr);
+  }
+  raise(sig);  // delivered when this handler returns
 }
 
 // Installs KillChildAndReraise for the life of one case (where the signal is
@@ -464,15 +497,16 @@ class ChildSignalGuard {
   ChildSignalGuard() {
     sigset_t block;
     sigemptyset(&block);
-    for (int i = 0; i < kCount; ++i) sigaddset(&block, kSignals[i]);
+    for (int i = 0; i < kChildSignalCount; ++i) sigaddset(&block, ChildSignal(i));
     sigprocmask(SIG_BLOCK, &block, &mask_);
     struct sigaction kill_child;
     std::memset(&kill_child, 0, sizeof kill_child);
     kill_child.sa_handler = &KillChildAndReraise;
     sigemptyset(&kill_child.sa_mask);
-    for (int i = 0; i < kCount; ++i) {
-      installed_[i] = sigaction(kSignals[i], nullptr, &old_[i]) == 0 && old_[i].sa_handler != SIG_IGN &&
-                      sigaction(kSignals[i], &kill_child, nullptr) == 0;
+    struct sigaction* old = SavedActions();
+    for (int i = 0; i < kChildSignalCount; ++i) {
+      installed_[i] = sigaction(ChildSignal(i), nullptr, &old[i]) == 0 && old[i].sa_handler != SIG_IGN &&
+                      sigaction(ChildSignal(i), &kill_child, nullptr) == 0;
     }
   }
   ChildSignalGuard(const ChildSignalGuard&) = delete;
@@ -497,14 +531,11 @@ class ChildSignalGuard {
 
  private:
   void Restore() {
-    for (int i = 0; i < kCount; ++i) {
-      if (installed_[i]) sigaction(kSignals[i], &old_[i], nullptr);
+    for (int i = 0; i < kChildSignalCount; ++i) {
+      if (installed_[i]) sigaction(ChildSignal(i), &SavedActions()[i], nullptr);
     }
   }
-  static const int kCount = 3;
-  const int kSignals[kCount] = {SIGTERM, SIGINT, SIGHUP};
-  struct sigaction old_[kCount];
-  bool installed_[kCount];
+  bool installed_[kChildSignalCount];
   sigset_t mask_;
 };
 
