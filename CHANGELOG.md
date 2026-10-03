@@ -35,6 +35,10 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
 - `rr_evidence` keeps tests in the action's process group; its timeout sends
   `SIGTERM`, then `SIGKILL`, and never waits on a pipe an escaped process holds.
 
+### Fixed
+
+- `rr_wrapped_test` accepts a `py_binary` as `test` under Bazel 7.
+
 ### Deprecated
 
 - Several requirement ids for one test case (pytest markers, `@rr.verifies`,

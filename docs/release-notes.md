@@ -132,6 +132,12 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   2 s grace; the test's output is read on a thread, so a process the test left
   behind holding the output pipe never blocks the action. No verdict changes.
 
+### Fixed
+
+- `rr_wrapped_test` with a `py_binary` (or any target building more than its
+  executable) as `test` failed analysis under Bazel 7 ("expands to more than
+  one file"); the wrapper now runs the target's executable.
+
 ### Deprecated
 
 Declaring several requirement ids for one test case. Every id is still

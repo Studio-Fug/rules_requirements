@@ -31,6 +31,7 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("//rr/private:node.bzl", _rr_node_test = "rr_node_test")
 load(
     "//rr/private:rules.bzl",
+    _EXECUTABLE_ARG = "EXECUTABLE_ARG",
     _RrEvidenceInfo = "RrEvidenceInfo",
     _RrModelInfo = "RrModelInfo",
     _rr_evidence = "rr_evidence",
@@ -47,14 +48,19 @@ rr_node_test = _rr_node_test
 
 _LIB = Label("//python")
 
-def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], **kwargs):
-    """A py_test/py_binary whose generated main bakes in `baked_args`."""
+def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], executable = None, **kwargs):
+    """A py_test/py_binary whose generated main bakes in `baked_args`.
+
+    `executable`: a target whose executable `$(rr_executable)` in
+    `baked_args` stands for (add it to `data` for its runfiles).
+    """
     main = name + ".rr_main.py"
     _rr_main(
         name = name + ".rr_main",
         entry = entry,
         baked_args = baked_args,
         data = data,
+        executable = executable,
         out = main,
         testonly = kwargs.get("testonly", kind == "test"),
         tags = ["manual"],
@@ -208,8 +214,9 @@ def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], junit
         "test",
         name,
         "wrap",
-        baked_args = wrap_args + ["--", "$(rootpath %s)" % test] + args,
+        baked_args = wrap_args + ["--", _EXECUTABLE_ARG] + args,
         data = [test],
+        executable = test,
         **kwargs
     )
 

@@ -69,7 +69,7 @@ rr_wrapped_test(
 py_test(
     name = "junit_wrapped_check_test",
     srcs = ["junit_wrapped_check.py"],
-    args = ["$(rootpath :junit_runner)"],
+    args = ["$(rootpaths :junit_runner)"],
     data = [":junit_runner"],
     main = "junit_wrapped_check.py",
     deps = ["//python"],

@@ -21,6 +21,9 @@ def check(ok: bool, what: str) -> None:
 
 def main() -> int:
     out = os.path.join(os.environ["TEST_TMPDIR"], "wrapped.xml")
+    # $(rootpaths :junit_runner): the launcher alone under Bazel 8; under
+    # Bazel 7 the py_binary's .py source too, which is not the runner.
+    runner = next(p for p in sys.argv[1:] if not p.endswith(".py"))
     rc = wrap.main(
         [
             "--format",
@@ -32,7 +35,7 @@ def main() -> int:
             "--target",
             "//tests/integration:junit_wrapped_test",
             "--",
-            sys.argv[1],
+            runner,
         ]
     )
     check(rc == 0, f"wrapper exited {rc}")

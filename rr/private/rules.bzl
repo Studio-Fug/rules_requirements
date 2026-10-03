@@ -25,9 +25,19 @@ rr_model_rule = rule(
     },
 )
 
+# A baked argument standing for the runfiles path of `executable`. Not
+# `$(rootpath <target>)`: that expands a target's files to build, which for a
+# py_binary under Bazel 7 are its launcher and its .py source (an error).
+EXECUTABLE_ARG = "$(rr_executable)"
+
 def _rr_main_impl(ctx):
     args = []
     for a in ctx.attr.baked_args:
+        if a == EXECUTABLE_ARG:
+            if not ctx.attr.executable:
+                fail("%s in baked_args needs `executable`" % EXECUTABLE_ARG)
+            args.append(ctx.executable.executable.short_path)
+            continue
         expanded = ctx.expand_location(a, ctx.attr.data)
         if "$(rootpaths " in a or "$(locations " in a:
             args.extend([p for p in expanded.split(" ") if p])
@@ -52,6 +62,7 @@ rr_main = rule(
         "entry": attr.string(mandatory = True, values = ["cli", "pytest", "wrap", "bazel"]),
         "baked_args": attr.string_list(),
         "data": attr.label_list(allow_files = True),
+        "executable": attr.label(executable = True, cfg = "target"),
         "out": attr.output(mandatory = True),
     },
 )
