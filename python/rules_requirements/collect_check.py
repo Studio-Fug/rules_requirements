@@ -13,9 +13,14 @@ checks it dynamically:
   :mod:`~rules_requirements.hooks.collect_dump` plugin in both the original
   tree ("before") and the copy ("after"), recording every item's ``nodeid``
   and the ids :func:`~rules_requirements.hooks.pytest_plugin.trace_of` gives it;
-* compare: each decided case must end with exactly its owner (no id for
-  ``none``), every other item must keep exactly the ids it had, and the set of
-  collected nodeids must not change.
+* compare: each decided case the written files settle must end with exactly
+  its owner (no id for ``none``), every other item must keep exactly the ids
+  it had, and the set of collected nodeids must not change.
+
+The check vouches for what collects in the environment it runs in (the
+``--python`` interpreter, ``os.environ``): a test that only exists under
+another environment, or a module skipped at collection time, is not seen.
+Collection-time skips are reported (:attr:`CollectCheck.skipped`).
 
 Any difference, or a collection that fails in either tree, makes apply refuse
 and write nothing. ``rules_requirements`` stays stdlib-only: pytest runs as a
@@ -37,8 +42,11 @@ import rules_requirements
 from rules_requirements.case_keys import CaseKey, nodeid_to_case_path
 from rules_requirements.migrate import NONE, OPEN
 
-# Directories never copied into the scratch tree: version control, Bazel's
-# convenience symlinks, build and tool caches, vendored trees.
+# Directories never copied into the scratch tree: version control, build and
+# tool caches, vendored trees. Bazel's convenience symlinks (and every other
+# symlink) and virtualenvs (a directory holding ``pyvenv.cfg``) are skipped
+# too. Whatever is skipped is also ``--ignore``d in BOTH collections, so the
+# two trees are collected over the same files.
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -79,50 +87,84 @@ class CollectCheck:
     offenders: list[Offender] = field(default_factory=list)
     error: str = ""  # a collection that could not run; ``output`` has the detail
     output: str = ""
+    # Collectors pytest skipped at collection time (``importorskip``, a
+    # module-level ``pytest.skip``), nodeid -> reason: their tests were not
+    # collected in the check's environment, so the check could not see them.
+    skipped: dict[str, str] = field(default_factory=dict)
 
     @property
     def failed_to_run(self) -> bool:
         return bool(self.error)
 
 
-def _should_skip_dir(name: str) -> bool:
-    return name in _SKIP_DIRS or name.startswith("bazel-") or "venv" in name
+def _skipped_dir(path: str, name: str) -> bool:
+    return name in _SKIP_DIRS or os.path.isfile(os.path.join(path, "pyvenv.cfg"))
 
 
-def _copy_tree(src: str, dst: str) -> None:
-    """Copy ``src`` to ``dst``, skipping VCS/cache dirs, ``bazel-*`` symlinks
-    and every symlink (so ``bazel-out`` and the like are not followed)."""
+def _copy_tree(src: str, dst: str) -> list[str]:
+    """Copy ``src`` to ``dst``, skipping VCS/cache dirs, virtualenvs and every
+    symlink (so ``bazel-out`` and the like are not followed). Returns the
+    skipped paths (relative, ``/``-separated) pytest could otherwise collect:
+    the caller ignores them in both collections."""
+    ignored: list[str] = []
     for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
-        dirnames[:] = [d for d in dirnames if not _should_skip_dir(d) and not os.path.islink(os.path.join(dirpath, d))]
         rel = os.path.relpath(dirpath, src)
+        keep = []
+        for d in dirnames:
+            full = os.path.join(dirpath, d)
+            if os.path.islink(full) or _skipped_dir(full, d):
+                if d != "__pycache__":
+                    ignored.append(os.path.normpath(os.path.join(rel, d)).replace(os.sep, "/"))
+            else:
+                keep.append(d)
+        dirnames[:] = keep
         target_dir = dst if rel == "." else os.path.join(dst, rel)
         os.makedirs(target_dir, exist_ok=True)
         for name in filenames:
             source = os.path.join(dirpath, name)
             if os.path.islink(source):
+                ignored.append(os.path.normpath(os.path.join(rel, name)).replace(os.sep, "/"))
                 continue
             try:
                 shutil.copy2(source, os.path.join(target_dir, name))
             except OSError:
                 pass  # a socket, a vanished file: nothing pytest would import
+    return sorted(ignored)
 
 
-def _rr_pythonpath() -> str:
-    """The directory that makes ``rules_requirements`` importable (``python/``)."""
-    return os.path.dirname(os.path.dirname(os.path.abspath(rules_requirements.__file__)))
+def _rr_pythonpath(tmp: str) -> str:
+    """A directory holding ONLY ``rules_requirements`` (a symlink to this
+    package, or a copy), for the collection subprocess's ``PYTHONPATH``.
+
+    Never the directory this package was imported from: for a pip/pipx
+    install that is rr's whole ``site-packages``, which would put rr's own
+    pytest, pluggy and pytest11 plugins ahead of the project interpreter's."""
+    path = os.path.join(tmp, "rrpath")
+    os.makedirs(path, exist_ok=True)
+    package = os.path.dirname(os.path.abspath(rules_requirements.__file__))
+    link = os.path.join(path, "rules_requirements")
+    try:
+        os.symlink(package, link, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        shutil.copytree(package, link, ignore=shutil.ignore_patterns("__pycache__"))
+    return path
 
 
 def _collect(
-    tree: str, python: str, pytest_args: list[str], dump_path: str
-) -> tuple[Optional[dict[str, list[str]]], str, int]:
-    """Collect ``tree`` with the dump plugin; return (items or None, output, rc)."""
+    tree: str, python: str, pytest_args: list[str], dump_path: str, rr_path: str
+) -> tuple[Optional[dict[str, list[str]]], dict[str, str], str, int]:
+    """Collect ``tree`` with the dump plugin: (items or None, skipped, output, rc).
+
+    No path argument is passed, so pytest picks what to collect exactly as a
+    plain ``pytest`` run from ``tree`` would (``testpaths`` included)."""
     if os.path.exists(dump_path):
         os.remove(dump_path)
     env = dict(os.environ)
-    parts = [tree, _rr_pythonpath()]
+    parts = [tree, rr_path]
     if env.get("PYTHONPATH"):
         parts.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(parts)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"  # leave no __pycache__ in the user's tree
     env["RR_COLLECT_DUMP"] = dump_path
     cmd = [
         python,
@@ -135,11 +177,11 @@ def _collect(
         "-p",
         "rules_requirements.hooks.collect_dump",
         *pytest_args,
-        ".",
     ]
     proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
     output = proc.stdout + proc.stderr
     items: Optional[dict[str, list[str]]] = None
+    skipped: dict[str, str] = {}
     if os.path.exists(dump_path):
         try:
             with open(dump_path, encoding="utf-8") as fh:
@@ -147,9 +189,27 @@ def _collect(
             got = loaded.get("items")
             if isinstance(got, dict):
                 items = {str(k): list(v) for k, v in got.items()}
+            sk = loaded.get("skipped")
+            if isinstance(sk, dict):
+                skipped = {str(k): str(v) for k, v in sk.items()}
         except (OSError, ValueError):
             items = None
-    return items, output, proc.returncode
+    return items, skipped, output, proc.returncode
+
+
+def _relocate(items: Mapping[str, list[str]], copy: str, root: str) -> dict[str, list[str]]:
+    """Map the copy's absolute path back to the original's inside nodeids
+    (a parametrization id built from ``__file__``, say), so a path the test
+    itself computes does not read as a changed nodeid."""
+    pairs = sorted(
+        {(copy, root), (os.path.realpath(copy), os.path.realpath(root))}, key=lambda p: len(p[0]), reverse=True
+    )
+    out: dict[str, list[str]] = {}
+    for nid, ids in items.items():
+        for old, new in pairs:
+            nid = nid.replace(old, new)
+        out[nid] = ids
+    return out
 
 
 def _decided_paths(decided: Mapping[CaseKey, str]) -> dict[str, list[str]]:
@@ -217,27 +277,40 @@ def check(
     """Run the dynamic collection check for a rewrite.
 
     ``rewrites`` maps each relative path to ``(new_text, encoding)`` for the
-    files apply would write; ``decided`` is the worksheet's ``CaseKey -> id |
-    "none" | "?"``. ``python`` (default :data:`sys.executable`) is the
-    interpreter whose pytest and project dependencies collect the tests.
+    files apply would write; ``decided`` holds the decided cases those files
+    settle (``CaseKey -> id | "none"``, see
+    :meth:`~rules_requirements.tag_codemod.ApplyResult.settled`). Every other
+    item -- undecided, left to ``verified_by``, in a file held back, refused
+    or outside ``--only`` -- must keep exactly its before-ids. ``python``
+    (default :data:`sys.executable`) is the interpreter whose pytest and
+    project dependencies collect the tests.
     """
     python = python or sys.executable
     extra = list(pytest_args)
+    root = os.path.abspath(root)
     tmp = tempfile.mkdtemp(prefix="rr-collect-", dir=scratch or None)
     try:
         copy = os.path.join(tmp, "after")
-        _copy_tree(root, copy)
+        ignored = _copy_tree(root, copy)
         for rel, (new_text, encoding) in rewrites.items():
             dest = os.path.join(copy, rel)
             os.makedirs(os.path.dirname(dest) or copy, exist_ok=True)
             with open(dest, "w", encoding=encoding, newline="") as fh:
                 fh.write(new_text)
-
-        before, before_out, before_rc = _collect(root, python, extra, os.path.join(tmp, "before.json"))
-        after, after_out, after_rc = _collect(copy, python, extra, os.path.join(tmp, "after.json"))
+        rr_path = _rr_pythonpath(tmp)
+        extra = [*(f"--ignore={p}" for p in ignored), *extra]
+        before, before_skipped, before_out, before_rc = _collect(
+            root, python, extra, os.path.join(tmp, "before.json"), rr_path
+        )
+        after, after_skipped, after_out, after_rc = _collect(
+            copy, python, extra, os.path.join(tmp, "after.json"), rr_path
+        )
+        if after is not None:
+            after = _relocate(after, copy, root)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    skipped = {**after_skipped, **before_skipped}
     has_decided = any(owner != OPEN for owner in decided.values())
     for label, items, out, rc in (
         ("original", before, before_out, before_rc),
@@ -259,4 +332,4 @@ def check(
 
     assert before is not None and after is not None  # guarded above
     offenders = compare(before, after, decided)
-    return CollectCheck(not offenders, offenders=offenders)
+    return CollectCheck(not offenders, offenders=offenders, skipped=skipped)

@@ -22,7 +22,7 @@ import json
 import os
 import shlex
 import sys
-from typing import Any
+from typing import Any, Mapping
 
 from rules_requirements import annotations as rr_annotations
 from rules_requirements import graph, ingest, report
@@ -408,8 +408,10 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     writes = {f.path for f in res.to_write(partial=args.partial)}
     held = res.held_back(partial=args.partial)
     # Before writing anything, prove the rewrite against pytest itself: the
-    # static guards cannot see tests pytest collects dynamically.
-    if writes and not args.dry_run and not res.blocked:
+    # static guards cannot see tests pytest collects dynamically. Whenever
+    # anything would be written -- --partial and --dry-run included.
+    check_refused = False
+    if writes:
         if args.no_collect_check:
             print(
                 "rr migrate: WARNING: --no-collect-check: only the static guards ran. They are best-effort and "
@@ -417,33 +419,12 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
                 "rewrite was NOT verified against pytest --collect-only.",
                 file=sys.stderr,
             )
-        else:
-            from rules_requirements import collect_check
-
-            rewrites = {f.path: (f.new_text, f.encoding) for f in res.changed if f.path in writes}
-            cc = collect_check.check(
-                root,
-                rewrites,
-                decided,
-                python=args.python,
-                pytest_args=shlex.split(args.pytest_args),
-            )
-            if cc.failed_to_run:
-                print(f"rr migrate: {cc.error}; nothing written.", file=sys.stderr)
-                print(
-                    "Pass --no-collect-check to write on the static guards alone. Collection output:", file=sys.stderr
-                )
-                print(cc.output.rstrip("\n"), file=sys.stderr)
+        elif not _collect_check(args, root, res, writes, decided):
+            if not args.dry_run:
                 return 1
-            if not cc.ok:
-                print(
-                    "rr migrate: the collection check refused the rewrite: it would change what pytest collects; "
-                    "nothing written. Offending items (before / after / expected ids):",
-                    file=sys.stderr,
-                )
-                for off in cc.offenders:
-                    print(f"  {off.describe()}", file=sys.stderr)
-                return 1
+            check_refused = True
+            held = {**held, **{p: "the collection check refused the rewrite (see above)" for p in writes}}
+            writes = set()
     for f in res.changed:
         if args.dry_run:
             sys.stdout.writelines(
@@ -506,6 +487,8 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         )
         for key, why in res.mismatched:
             print(f"  {key}: {why}", file=sys.stderr)
+    elif check_refused:
+        print("apply would write nothing: the collection check refused the rewrite (see above)", file=sys.stderr)
     elif held and args.partial:
         print(
             f"{len(held)} rewritten file(s) held back: each holds a decided case not found in it, or is linked to "
@@ -524,7 +507,52 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
-    return 1 if res.blocked else 0
+    return 1 if res.blocked or check_refused else 0
+
+
+def _collect_check(args: argparse.Namespace, root: str, res: Any, writes: set[str], decided: Mapping[Any, str]) -> bool:
+    """Run the dynamic collection check on the files apply would write;
+    print why it refuses (or what it could not see) and return whether the
+    write may go ahead.
+
+    Only the decided cases the written files settle are held to their owner;
+    every other item (undecided, left to ``verified_by``, in a file held
+    back, refused or outside ``--only``) must keep its before-ids."""
+    from rules_requirements import collect_check
+
+    tail = "apply would write nothing" if args.dry_run else "nothing written"
+    settled = res.settled(writes)
+    rewrites = {f.path: (f.new_text, f.encoding) for f in res.changed if f.path in writes}
+    cc = collect_check.check(
+        root,
+        rewrites,
+        {k: decided[k] for k in settled},
+        python=args.python,
+        pytest_args=shlex.split(args.pytest_args),
+    )
+    if cc.failed_to_run:
+        print(f"rr migrate: {cc.error}; {tail}.", file=sys.stderr)
+        print("Pass --no-collect-check to write on the static guards alone. Collection output:", file=sys.stderr)
+        print(cc.output.rstrip("\n"), file=sys.stderr)
+        return False
+    if cc.skipped:
+        print(
+            f"rr migrate: warning: {len(cc.skipped)} collector(s) were skipped at collection time in the check's "
+            "environment; tests in them were not seen by the collection check:",
+            file=sys.stderr,
+        )
+        for nodeid, reason in sorted(cc.skipped.items()):
+            print(f"  {nodeid}: {reason}", file=sys.stderr)
+    if not cc.ok:
+        print(
+            "rr migrate: the collection check refused the rewrite: it would change what pytest collects; "
+            f"{tail}. Offending items (before / after / expected ids):",
+            file=sys.stderr,
+        )
+        for off in cc.offenders:
+            print(f"  {off.describe()}", file=sys.stderr)
+        return False
+    return True
 
 
 def cmd_diff(args: argparse.Namespace) -> int:
@@ -720,14 +748,19 @@ def build_parser() -> argparse.ArgumentParser:
         "cannot be resolved, and an import call whose module cannot be named are linked to the files refused "
         "with them",
     )
-    ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
+    ma.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print a diff instead of writing; the collection check still runs (exit 1 when apply would refuse)",
+    )
     ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
     ma.add_argument(
         "--no-collect-check",
         action="store_true",
         help="skip the dynamic collection check (run pytest --collect-only before and after, and refuse unless "
-        "every test keeps exactly the ids it should): write on the static guards alone, which are best-effort and "
-        "cannot see tests pytest collects dynamically",
+        "every test keeps exactly the ids it should; it runs whenever anything would be written, with --partial "
+        "and --dry-run too): write on the static guards alone, which are best-effort and cannot see tests pytest "
+        "collects dynamically",
     )
     ma.add_argument(
         "--python",
@@ -738,7 +771,11 @@ def build_parser() -> argparse.ArgumentParser:
     ma.add_argument(
         "--pytest-args",
         default="",
-        help='extra arguments for the collection check\'s pytest (e.g. "-c pytest.ini --rootdir . -p myplugin")',
+        help="extra arguments for the collection check's pytest, one shell-quoted string (e.g. "
+        '"-c pytest.ini --rootdir . -p myplugin", "--ignore=scripts"). Both collections run from --root with no '
+        "path argument, so the project's ini (testpaths included) picks what is collected; name paths here to "
+        "collect others. With --strict-markers, pass '-p rules_requirements.hooks.pytest_plugin' if the project "
+        "loads rr's plugin that way",
     )
     ma.set_defaults(func=cmd_migrate_apply)
 
@@ -773,8 +810,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+# Options whose value is a command line of its own: a value starting with
+# "-" (--pytest-args "--ignore=x") would read to argparse as an option.
+_ARGLINE_OPTIONS = ("--pytest-args",)
+
+
+def _join_argline_values(argv: list[str]) -> list[str]:
+    """``["--pytest-args", "-x"]`` -> ``["--pytest-args=-x"]``, so argparse
+    takes a dash-leading value as the option's value."""
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--":
+            out.extend(argv[i:])
+            break
+        if a in _ARGLINE_OPTIONS and i + 1 < len(argv):
+            out.append(f"{a}={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(_join_argline_values(list(sys.argv[1:] if argv is None else argv)))
     return int(args.func(args))
 
 

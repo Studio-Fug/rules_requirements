@@ -216,23 +216,34 @@ sees in the source — installed by a factory, a metaclass, `__init_subclass__`,
 `setattr`, `exec`, or an import call. So, by default, `rr migrate apply`
 proves the rewrite against pytest itself.
 
-After the rewrite passes the static guards (below) in memory, apply:
+After the rewrite passes the static guards (below) in memory, and whenever it
+would write anything (with `--partial` and `--dry-run` too), apply:
 
-1. copies the tree under `--root` to a temporary directory (skipping `.git`,
-   `bazel-*` symlinks and caches) and writes the rewritten files **there**,
-   never in place;
+1. copies the tree under `--root` to a temporary directory and writes the
+   rewritten files **there**, never in place. It skips version control and
+   cache directories, virtualenvs (a directory holding `pyvenv.cfg`) and every
+   symlink — Bazel's `bazel-*` convenience symlinks included — and passes an
+   `--ignore` for each skipped path to *both* collections, so the two trees are
+   collected over the same files;
 2. runs `python -m pytest --collect-only` in the original tree and in the copy,
-   with a tiny plugin that records, for every collected item, its nodeid and
-   the ids the JUnit hook would give it;
-3. compares: each decided case must end with exactly its owner (no id for
-   `none`), every other collected test must keep exactly the ids it had, and
-   the set of collected nodeids must not change.
+   from `--root` with no path argument (so the project's ini, `testpaths`
+   included, decides what is collected, exactly as a plain `pytest` run there
+   would), with a tiny plugin that records, for every collected item, its
+   nodeid and the ids the JUnit hook would give it. Neither run leaves
+   `__pycache__` in your tree;
+3. compares: each decided case **the written files settle** must end with
+   exactly its owner (no id for `none`), every other collected test must keep
+   exactly the ids it had, and the set of collected nodeids must not change.
+   Decided cases the write does not settle — cases left to `verified_by`
+   (their test declares no id), cases in files held back or refused, cases
+   outside `--only` — are held to their before-ids like undecided ones.
 
-Any difference — including a decided case that no collected test matches —
-makes apply **refuse, write nothing, and name each offending item** with its
-before, after and expected ids. This is what catches the dynamic shapes the
-static guards cannot: a `setattr`-installed method that would silently lose a
-shared marker, a factory-built subclass, an aliased test.
+Any difference — including a settled decided case that no collected test
+matches — makes apply **refuse, write nothing, and name each offending item**
+with its before, after and expected ids (`--dry-run` exits 1 and reports the
+files as held back). This is what catches the dynamic shapes the static guards
+cannot: a `setattr`-installed method that would silently lose a shared marker,
+a factory-built subclass, an aliased test.
 
 Run apply where `python -m pytest --collect-only` works for the project — the
 same interpreter and dependencies the tests need. For a plain project that is
@@ -242,12 +253,29 @@ source tree. If collection fails in either tree (an import error, a non-zero
 exit, no tests found while the worksheet has decided cases), apply refuses and
 prints the collection output, so a broken environment never passes silently.
 
+**The guarantee covers what collects in the check's environment** — the
+`--python` interpreter, its installed packages and the current environment
+variables. A test that only exists elsewhere (a class built only when `HW=1` is
+set, a module that imports a hardware library only the bench has) is not
+collected by the check, so it cannot be verified. Collectors pytest skips at
+collection time (`pytest.importorskip`, a module-level `pytest.skip`) are listed
+in a warning for that reason. Run apply in the environment your tests really
+run in (set the same variables, install the same packages), or check those
+tests by hand.
+
 - `--python PATH` picks the interpreter whose pytest and project dependencies
   collect the tests (default: the interpreter running `rr`). Point it at the
-  project's venv when `rr` runs from another.
-- `--pytest-args "..."` passes extra arguments to the check's pytest, for a
-  project that needs them to collect: `-c pytest.ini`, `--rootdir .`, or
-  `-p my_project.plugin` for a plugin the tests rely on.
+  project's venv when `rr` runs from another; only `rules_requirements` itself
+  is added to its `PYTHONPATH`, never the rest of `rr`'s own environment.
+- `--pytest-args "..."` passes extra arguments to the check's pytest, one
+  shell-quoted string, for a project that needs them to collect: `-c
+  pytest.ini`, `--rootdir .`, `-p my_project.plugin` for a plugin the tests
+  rely on, `--ignore=scripts` for a directory that does not import here, or a
+  path to collect beyond `testpaths`. A value that starts with a dash works
+  either way: `--pytest-args "--ignore=x"` or `--pytest-args=--ignore=x`. The
+  check's plugin registers rr's `rr` markers itself, so `--strict-markers`
+  collects even when rr's pytest plugin is loaded with `-p` only in the real
+  run (as the Bazel runner does).
 - `--no-collect-check` skips the check and writes on the static guards alone.
   It prints a loud warning: the guards are **best-effort** and cannot see what
   pytest collects dynamically, so a rewrite they accept can still move a
@@ -265,7 +293,10 @@ because that is what decides collection. They no longer refuse code in the
 bodies of tests, fixtures (`@pytest.fixture`), `setUp` / `tearDown` /
 `setUpClass` / `setup_method`-style hooks: that code runs *after* collection
 and cannot change it, and the collection check vouches for the result either
-way. A file is **refused** and left unchanged, never half-migrated, when:
+way. A function only counts as such a hook while nothing that may run at
+import time refers to it: a `setUp` or `setup_module` the module calls itself
+(directly, through a helper, `getattr`, or as a decorator) is judged like any
+other import-time code. A file is **refused** and left unchanged, never half-migrated, when:
 
 - a test in it names several ids and has no decision (`?`, or a test the
   evidence never ran). With `--unassigned drop` such tests lose their tags

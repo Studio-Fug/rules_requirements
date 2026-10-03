@@ -337,6 +337,8 @@ class ApplyResult:
     # Files linked both ways (see _Index.depends; also an unreadable file or a
     # class with an unresolved base, and the files they were refused with).
     depends: dict[str, set[str]] = field(default_factory=dict)
+    # Each file -> the decided cases the codemod found defined in it.
+    located: dict[str, list[CaseKey]] = field(default_factory=dict)
 
     @property
     def refused(self) -> list[FileResult]:
@@ -367,6 +369,16 @@ class ApplyResult:
             return []
         bad = {f.path for f in self.refused} | self.unmatched_files
         return [f for f in self.changed if f.path not in bad and not self.depends.get(f.path, set()) & bad]
+
+    def settled(self, paths: Iterable[str]) -> list[CaseKey]:
+        """The decided cases that writing ``paths`` settles: those the
+        codemod found defined in one of them and whose owner their tags
+        carry. Cases left to ``verified_by`` (``untagged``), cases in
+        files not written (held back, refused, outside ``only``) and cases
+        not found are not settled by the write: the collection check holds
+        them to their before-ids instead."""
+        untagged = set(self.untagged)
+        return sorted({k for p in paths for k in self.located.get(p, []) if k not in untagged})
 
     def held_back(self, partial: bool = False) -> dict[str, str]:
         """Why each changed file that :meth:`to_write` leaves out is held back."""
@@ -731,14 +743,64 @@ class TestFile:
             return True
         return name in self.fixture_names
 
-    def _post_collection(self, node: _FuncDef) -> bool:
-        """``node`` is a function pytest runs after collection — a test, a
-        fixture, or a setup/teardown hook — so bindings in its body cannot
-        change what is collected (its decorators and defaults, evaluated at
-        definition time, are judged by the enclosing scope, not here)."""
+    def _post_collection_shape(self, node: _FuncDef) -> bool:
+        """``node`` looks like a function pytest runs after collection: a
+        test, a fixture, or a setup/teardown hook (by its name or decorator)."""
         if self.names.function(node.name) or node.name in _POST_COLLECTION_HOOKS:
             return True
         return any(self._is_fixture(d) for d in node.decorator_list)
+
+    def _post_collection_functions(self) -> tuple[set[int], set[str]]:
+        """The functions whose bodies run only after collection: shaped like
+        a test, a fixture or a setup/teardown hook (see
+        :meth:`_post_collection_shape`) AND never referenced from code that
+        may run at import time. A hook-named function called (or decorated
+        with, aliased, ``getattr``-ed) at module or class scope, or from the
+        body of a function that is not itself post-collection, runs at
+        import time like any other: its body is judged. References from a
+        post-collection body (``super().setUp()``) do not count, and its
+        decorators, defaults and annotations, evaluated when the def is
+        reached, count against it.
+
+        Also returns the names referenced from code that may run at import
+        time."""
+        refs: set[str] = set()
+        cands: dict[int, _FuncDef] = {
+            id(n): n
+            for n in ast.walk(self.tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and self._post_collection_shape(n)
+        }
+        while True:
+            refs = set()
+            todo: list[ast.AST] = [self.tree]
+            while todo:
+                node = todo.pop()
+                if id(node) in cands:
+                    fn = cands[id(node)]
+                    # Only the parts evaluated when the def is reached.
+                    todo.extend(fn.decorator_list)
+                    todo.append(fn.args)
+                    if fn.returns is not None:
+                        todo.append(fn.returns)
+                    continue
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    refs.add(node.id)
+                elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
+                    refs.add(node.attr)
+                elif isinstance(node, ast.Call) and (_dotted(node.func) or "").split(".")[-1] == "getattr":
+                    refs.update(a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str))
+                elif (
+                    isinstance(node, ast.Subscript)
+                    and isinstance(node.slice, ast.Constant)
+                    and isinstance(node.slice.value, str)
+                ):
+                    refs.add(node.slice.value)  # vars(cls)["setUp"], globals()["setup_module"]
+                todo.extend(ast.iter_child_nodes(node))
+            drop = [k for k, fn in cands.items() if fn.name in refs]
+            if not drop:
+                return set(cands), refs
+            for k in drop:
+                del cands[k]
 
     def _file_bindings(self) -> None:
         """Bindings from inside function bodies that run at import time (a
@@ -750,10 +812,12 @@ class TestFile:
         of them may bind any test, so nothing in the file may change.
 
         Bindings inside a test, a fixture or a setup/teardown hook
-        (:meth:`_post_collection`) are left alone: they run after collection
-        and the dynamic collection check vouches for the result."""
+        that nothing at import time calls (:meth:`_post_collection_functions`)
+        are left alone: they run after collection and the dynamic collection
+        check vouches for the result."""
         # (node, the method's own-instance names here, inside a function, after collection)
         todo: list[tuple[ast.AST, frozenset[str], bool, bool]] = [(self.tree, frozenset(), False, False)]
+        post_fns, import_refs = self._post_collection_functions()
         methods: set[int] = set()  # functions whose first parameter is the instance
         judged: set[int] = set()  # callees already judged with their call
         while todo:
@@ -770,13 +834,17 @@ class TestFile:
                         skip.add(id(child))
                 if id(node) in methods and names:
                     own = own | {names[0]}
-                if not isinstance(node, ast.Lambda) and self._post_collection(node):
+                if id(node) in post_fns:
                     post = True
                 in_fn = True
             elif isinstance(node, ast.ClassDef):
                 for stmt in node.body:
-                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and not any(
-                        _dotted(d) in ("staticmethod", "classmethod") for d in stmt.decorator_list
+                    # A method called at import time (TestK.setup_class() at module
+                    # scope) binds on the class itself: its own instance is not exempt.
+                    if (
+                        isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and stmt.name not in import_refs
+                        and not any(_dotted(d) in ("staticmethod", "classmethod") for d in stmt.decorator_list)
                     ):
                         methods.add(id(stmt))
             hit = self._run_time_binding(node, own, judged) if in_fn and not post and id(node) not in judged else None
@@ -2355,6 +2423,8 @@ def apply_tags(
             old_text, new_text = old_text.replace("\n", "\r\n"), new_text.replace("\n", "\r\n")
         result.files.append(FileResult(rel, status, [], changes, old_text, new_text, encoding))
     result.untagged = sorted(set(result.untagged))
+    for (rel, _), ks in keys.items():
+        result.located.setdefault(rel, []).extend(ks)
     changed = {rel: _changed_names(files[rel].text, text) for rel, text in rewritten.items()}
     _involve(result, index, changed)
     _unreadable(result, unreadable, rewritten)
