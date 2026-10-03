@@ -106,6 +106,23 @@ def case_path(classname: str, name: str) -> str:
     return (f"{cls}::{leaf}" if cls else leaf) or UNNAMED_PATH
 
 
+def nodeid_to_case_path(nodeid: str) -> str:
+    """The :func:`case_path` of a pytest ``nodeid``.
+
+    Mirrors pytest's own ``mangle_test_address`` (the JUnit ``classname`` /
+    ``name`` split), so ``pkg/test_m.py::TestK::test_s`` and
+    ``pkg/test_m.py::test_a[x]`` map to the same paths a ``--junitxml`` report
+    would file them under — ``pkg.test_m.TestK::test_s`` and
+    ``pkg.test_m::test_a[x]`` — including the parametrization id.
+    """
+    path, open_bracket, params = nodeid.partition("[")
+    names = path.split("::")
+    names[0] = re.sub(r"\.py$", "", names[0].replace("/", "."))
+    names[-1] += open_bracket + params
+    classname = ".".join(names[:-1])
+    return case_path(classname, names[-1])
+
+
 def is_synthetic(case: TestCase) -> bool:
     """The target's single generated result (Bazel's fingerprint or ``rr.synthetic``)."""
     return case.properties.get(SYNTHETIC_PROPERTY, "").lower() == "true"

@@ -83,6 +83,26 @@ _SAFE_BUILTINS = {"staticmethod", "classmethod", "property"}
 _SAFE_MODULES = {"unittest", "unittest.mock", "mock"}
 # Calls that bind names at run time, which the codemod cannot follow.
 _DYNAMIC_CALLS = {"setattr", "delattr", "exec", "eval", "globals", "locals", "vars"}
+# Functions pytest runs *after* collection: a test, or a unittest/pytest setup
+# or teardown hook. Bindings in their bodies cannot change what is collected.
+_POST_COLLECTION_HOOKS = frozenset(
+    {
+        "setUp",
+        "tearDown",
+        "setUpClass",
+        "tearDownClass",
+        "setUpModule",
+        "tearDownModule",
+        "setup_method",
+        "teardown_method",
+        "setup_function",
+        "teardown_function",
+        "setup_class",
+        "teardown_class",
+        "setup_module",
+        "teardown_module",
+    }
+)
 # Calls that import a module by a path or name the index may not see.
 _IMPORT_CALLS = {
     "import_module",
@@ -447,6 +467,7 @@ class TestFile:
         self.rr_names: set[str] = {"rules_requirements.rr"}
         self.verifies_names: set[str] = set()
         self.safe_names: set[str] = set(_SAFE_BUILTINS)  # see _known_mark
+        self.fixture_names: set[str] = set()  # from pytest import fixture [as ...]
         for node in ast.walk(self.tree):
             if isinstance(node, ast.Import):
                 for a in node.names:
@@ -460,6 +481,8 @@ class TestFile:
                 for a in node.names:
                     if node.module == "pytest" and a.name == "mark":
                         self.mark_names.add(a.asname or "mark")
+                    elif node.module == "pytest" and a.name == "fixture":
+                        self.fixture_names.add(a.asname or "fixture")
                     elif node.module == "rules_requirements" and a.name == "rr":
                         self.rr_names.add(a.asname or "rr")
                     elif node.module == "rules_requirements.rr" and a.name == "verifies":
@@ -698,20 +721,43 @@ class TestFile:
                 for node in self._defs.get(n, []):
                     self._blind_later.append((node, why))
 
+    def _is_fixture(self, deco: ast.AST) -> bool:
+        """``@pytest.fixture`` / ``@pytest.fixture(...)`` / imported ``fixture``."""
+        name = _dotted(deco.func if isinstance(deco, ast.Call) else deco)
+        if not name:
+            return False
+        parts = name.split(".")
+        if parts[0] in self.pytest_names and parts[1:] == ["fixture"]:
+            return True
+        return name in self.fixture_names
+
+    def _post_collection(self, node: _FuncDef) -> bool:
+        """``node`` is a function pytest runs after collection — a test, a
+        fixture, or a setup/teardown hook — so bindings in its body cannot
+        change what is collected (its decorators and defaults, evaluated at
+        definition time, are judged by the enclosing scope, not here)."""
+        if self.names.function(node.name) or node.name in _POST_COLLECTION_HOOKS:
+            return True
+        return any(self._is_fixture(d) for d in node.decorator_list)
+
     def _file_bindings(self) -> None:
-        """Bindings from inside function bodies, which may reach the module or
-        a class when the function runs (at import time, say): ``global
-        test_x``; an attribute store, ``setattr`` / ``delattr`` or
-        ``__setattr__`` naming a test (or with a computed name) on anything
-        but a method's own ``self``; a namespace dictionary (``globals()``,
-        ``vars(x)``, ``x.__dict__``); ``exec`` / ``eval``. Any of them may
-        bind any test, so nothing in the file may change."""
-        # (node, the names holding a method's own instance there, inside a function)
-        todo: list[tuple[ast.AST, frozenset[str], bool]] = [(self.tree, frozenset(), False)]
+        """Bindings from inside function bodies that run at import time (a
+        module- or class-scope call, a metaclass or ``__init_subclass__``
+        hook): ``global test_x``; an attribute store, ``setattr`` /
+        ``delattr`` or ``__setattr__`` naming a test (or with a computed name)
+        on anything but a method's own ``self``; a namespace dictionary
+        (``globals()``, ``vars(x)``, ``x.__dict__``); ``exec`` / ``eval``. Any
+        of them may bind any test, so nothing in the file may change.
+
+        Bindings inside a test, a fixture or a setup/teardown hook
+        (:meth:`_post_collection`) are left alone: they run after collection
+        and the dynamic collection check vouches for the result."""
+        # (node, the method's own-instance names here, inside a function, after collection)
+        todo: list[tuple[ast.AST, frozenset[str], bool, bool]] = [(self.tree, frozenset(), False, False)]
         methods: set[int] = set()  # functions whose first parameter is the instance
         judged: set[int] = set()  # callees already judged with their call
         while todo:
-            node, own, in_fn = todo.pop()
+            node, own, in_fn, post = todo.pop()
             skip: set[int] = set()  # children already queued here
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 params = node.args
@@ -719,10 +765,13 @@ class TestFile:
                 own = own - set(names)
                 for child in [*getattr(node, "decorator_list", []), *params.defaults, *params.kw_defaults]:
                     if child is not None:
-                        todo.append((child, own, in_fn))
+                        # Decorators and defaults run when the def is reached, in the enclosing scope.
+                        todo.append((child, own, in_fn, post))
                         skip.add(id(child))
                 if id(node) in methods and names:
                     own = own | {names[0]}
+                if not isinstance(node, ast.Lambda) and self._post_collection(node):
+                    post = True
                 in_fn = True
             elif isinstance(node, ast.ClassDef):
                 for stmt in node.body:
@@ -730,7 +779,7 @@ class TestFile:
                         _dotted(d) in ("staticmethod", "classmethod") for d in stmt.decorator_list
                     ):
                         methods.add(id(stmt))
-            hit = self._run_time_binding(node, own, judged) if in_fn and id(node) not in judged else None
+            hit = self._run_time_binding(node, own, judged) if in_fn and not post and id(node) not in judged else None
             if hit is not None:
                 name, how = hit
                 what = f"{name} is bound by {how}" if name else f"{how} may bind tests the codemod cannot name"
@@ -741,7 +790,7 @@ class TestFile:
                         "may collect it as a test the codemod cannot see; migrate this file by hand",
                     )
                 )
-            todo.extend((c, own, in_fn) for c in ast.iter_child_nodes(node) if id(c) not in skip)
+            todo.extend((c, own, in_fn, post) for c in ast.iter_child_nodes(node) if id(c) not in skip)
 
     def _run_time_binding(self, node: ast.AST, own: frozenset[str], judged: set[int]) -> Optional[tuple[str, str]]:
         """``(name, how)`` when ``node``, inside a function, may bind a test

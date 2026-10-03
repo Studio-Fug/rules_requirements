@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from typing import Any
 
@@ -400,11 +401,49 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     if problems:
         return 2
     root = _path(args.root) if args.root else _root()
+    decided = migrate.decisions(doc)
     res = tag_codemod.apply_tags(
-        migrate.decisions(doc), root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
+        decided, root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
     )
     writes = {f.path for f in res.to_write(partial=args.partial)}
     held = res.held_back(partial=args.partial)
+    # Before writing anything, prove the rewrite against pytest itself: the
+    # static guards cannot see tests pytest collects dynamically.
+    if writes and not args.dry_run and not res.blocked:
+        if args.no_collect_check:
+            print(
+                "rr migrate: WARNING: --no-collect-check: only the static guards ran. They are best-effort and "
+                "cannot see tests pytest collects dynamically (factories, metaclasses, setattr/exec, ...); the "
+                "rewrite was NOT verified against pytest --collect-only.",
+                file=sys.stderr,
+            )
+        else:
+            from rules_requirements import collect_check
+
+            rewrites = {f.path: (f.new_text, f.encoding) for f in res.changed if f.path in writes}
+            cc = collect_check.check(
+                root,
+                rewrites,
+                decided,
+                python=args.python,
+                pytest_args=shlex.split(args.pytest_args),
+            )
+            if cc.failed_to_run:
+                print(f"rr migrate: {cc.error}; nothing written.", file=sys.stderr)
+                print(
+                    "Pass --no-collect-check to write on the static guards alone. Collection output:", file=sys.stderr
+                )
+                print(cc.output.rstrip("\n"), file=sys.stderr)
+                return 1
+            if not cc.ok:
+                print(
+                    "rr migrate: the collection check refused the rewrite: it would change what pytest collects; "
+                    "nothing written. Offending items (before / after / expected ids):",
+                    file=sys.stderr,
+                )
+                for off in cc.offenders:
+                    print(f"  {off.describe()}", file=sys.stderr)
+                return 1
     for f in res.changed:
         if args.dry_run:
             sys.stdout.writelines(
@@ -683,6 +722,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ma.add_argument("--dry-run", action="store_true", help="print a diff instead of writing")
     ma.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
+    ma.add_argument(
+        "--no-collect-check",
+        action="store_true",
+        help="skip the dynamic collection check (run pytest --collect-only before and after, and refuse unless "
+        "every test keeps exactly the ids it should): write on the static guards alone, which are best-effort and "
+        "cannot see tests pytest collects dynamically",
+    )
+    ma.add_argument(
+        "--python",
+        default="",
+        help="the interpreter whose pytest and project dependencies collect the tests for the collection check "
+        "(default: the interpreter running rr)",
+    )
+    ma.add_argument(
+        "--pytest-args",
+        default="",
+        help='extra arguments for the collection check\'s pytest (e.g. "-c pytest.ini --rootdir . -p myplugin")',
+    )
     ma.set_defaults(func=cmd_migrate_apply)
 
     d = sub.add_parser("diff", help="semantic diff of the model between two git refs")

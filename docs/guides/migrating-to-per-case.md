@@ -207,7 +207,65 @@ are exactly the intended ones. Once every file is rewritten in memory, it
 derives each decided case's ids again from the rewritten sources and compares
 them with the worksheet; if any differs, nothing is written.
 
-A file is **refused** and left unchanged, never half-migrated, when:
+## The collection check: the guarantee
+
+A rewrite's promise is that *each test keeps collecting exactly the ids it
+should* — every decided case ends with its owner, and nothing else moves. No
+reading of the syntax tree can prove that: Python collects tests pytest never
+sees in the source — installed by a factory, a metaclass, `__init_subclass__`,
+`setattr`, `exec`, or an import call. So, by default, `rr migrate apply`
+proves the rewrite against pytest itself.
+
+After the rewrite passes the static guards (below) in memory, apply:
+
+1. copies the tree under `--root` to a temporary directory (skipping `.git`,
+   `bazel-*` symlinks and caches) and writes the rewritten files **there**,
+   never in place;
+2. runs `python -m pytest --collect-only` in the original tree and in the copy,
+   with a tiny plugin that records, for every collected item, its nodeid and
+   the ids the JUnit hook would give it;
+3. compares: each decided case must end with exactly its owner (no id for
+   `none`), every other collected test must keep exactly the ids it had, and
+   the set of collected nodeids must not change.
+
+Any difference — including a decided case that no collected test matches —
+makes apply **refuse, write nothing, and name each offending item** with its
+before, after and expected ids. This is what catches the dynamic shapes the
+static guards cannot: a `setattr`-installed method that would silently lose a
+shared marker, a factory-built subclass, an aliased test.
+
+Run apply where `python -m pytest --collect-only` works for the project — the
+same interpreter and dependencies the tests need. For a plain project that is
+its virtualenv; for a Bazel project, make a virtualenv with the test
+dependencies (the same ones the `py_test` targets use) and run apply from the
+source tree. If collection fails in either tree (an import error, a non-zero
+exit, no tests found while the worksheet has decided cases), apply refuses and
+prints the collection output, so a broken environment never passes silently.
+
+- `--python PATH` picks the interpreter whose pytest and project dependencies
+  collect the tests (default: the interpreter running `rr`). Point it at the
+  project's venv when `rr` runs from another.
+- `--pytest-args "..."` passes extra arguments to the check's pytest, for a
+  project that needs them to collect: `-c pytest.ini`, `--rootdir .`, or
+  `-p my_project.plugin` for a plugin the tests rely on.
+- `--no-collect-check` skips the check and writes on the static guards alone.
+  It prints a loud warning: the guards are **best-effort** and cannot see what
+  pytest collects dynamically, so a rewrite they accept can still move a
+  shared marker off a test you did not mean to touch. Use it only where pytest
+  cannot collect the project at all, and re-run the tests and `rr migrate plan`
+  afterwards to check the result.
+
+## The static guards: a first, conservative line
+
+The guards below run first, entirely in memory. They are deliberately
+conservative — they refuse anything they cannot read or follow at **import or
+class-creation time** (module and class bodies, decorators, metaclasses,
+`__init_subclass__`, `__new__`, and anything called at module or class scope),
+because that is what decides collection. They no longer refuse code in the
+bodies of tests, fixtures (`@pytest.fixture`), `setUp` / `tearDown` /
+`setUpClass` / `setup_method`-style hooks: that code runs *after* collection
+and cannot change it, and the collection check vouches for the result either
+way. A file is **refused** and left unchanged, never half-migrated, when:
 
 - a test in it names several ids and has no decision (`?`, or a test the
   evidence never ran). With `--unassigned drop` such tests lose their tags
