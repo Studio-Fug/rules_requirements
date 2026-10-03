@@ -21,7 +21,7 @@ records:
 | `duration` | Seconds. |
 | `target` | The build label the evidence belongs to, when known. |
 | `source` | The file it was read from. |
-| `properties` | Any other properties, verbatim. |
+| `properties` | Any other properties, verbatim — among them `rr.file`, the source file of the test code, which `JUnitWriter`, `CheckPlan` and `rr case --file` write ({ref}`junit-properties`). |
 
 {py:func}`rules_requirements.ingest.collect` reads a list of files,
 directories (walked recursively, following symlinks) and globs (`**` allowed).
@@ -35,7 +35,12 @@ may be exactly the hardware its `verified_by` level claims (an absent DUT). A
 binary that exits non-zero although every case in its report passed (a
 sanitizer, a crash after writing the report) gets an extra `exit-status` error
 case carrying every requirement id the run traced, so those requirements read
-FAILED — from `rr_evidence` and from the libtest wrapper.
+FAILED — from `rr_evidence` and from `rr wrap`, for libtest output and for a
+runner's own JUnit (`--format junit`) alike.
+
+A test case should name one requirement; evidence naming several per case is
+still read in 0.2, as several ids, but the hooks that write it warn
+({ref}`multi-id-deprecation`).
 
 ## Built-in ingestors
 

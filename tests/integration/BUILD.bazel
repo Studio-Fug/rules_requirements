@@ -9,9 +9,10 @@
 
 load("@rr_dev_pip//:requirements.bzl", "requirement")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_test")
-load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test", "rr_wrapped_test")
 
 rr_model(
     name = "model",
@@ -45,6 +46,33 @@ rr_rust_test(
     srcs = ["rust_hook_test.rs"],
     rule = rust_test,
     deps = ["//rust:rr"],
+)
+
+# A harness writing its own JUnit (a CheckPlan) to a fixed path, passed on by
+# the wrapper. Not part of the evidence below: it smoke-tests the macro.
+py_binary(
+    name = "junit_runner",
+    srcs = ["junit_runner.py"],
+    tags = ["manual"],
+    deps = ["//python"],
+)
+
+rr_wrapped_test(
+    name = "junit_wrapped_test",
+    format = "junit",
+    junit_in = "${TEST_TMPDIR}/runner/junit.xml",
+    test = ":junit_runner",
+)
+
+# junit_wrapped_test passes on the wrapper's exit status alone; this asserts on
+# what the wrapper writes for the same runner (cases, level, rr.file).
+py_test(
+    name = "junit_wrapped_check_test",
+    srcs = ["junit_wrapped_check.py"],
+    args = ["$(rootpath :junit_runner)"],
+    data = [":junit_runner"],
+    main = "junit_wrapped_check.py",
+    deps = ["//python"],
 )
 
 rr_annotations_test(

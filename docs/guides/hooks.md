@@ -5,6 +5,16 @@ hook produces the same thing: **JUnit XML** in which each `<testcase>` carries
 its traces as properties. That keeps the report independent of the test
 framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 
+```{admonition} One test case, one requirement
+:class: important
+
+A test case verifies **at most one** requirement; a set of test cases may
+verify one requirement. Declare one id per test case. The older multi-id forms
+(`@pytest.mark.rr("REQ-1", "REQ-2")`, `@rr.verifies("REQ-1", "REQ-2")`, a list
+passed to `JUnitWriter`) still record every id in 0.2, but are deprecated and
+warn with `MultipleRequirementsWarning` — see [Deprecated: several ids per test case](#multi-id-deprecation).
+```
+
 | Framework | Declare | Bazel | Without Bazel |
 | --------- | ------- | ----- | ------------- |
 | pytest | `@pytest.mark.rr("REQ-1", level="sil")` | `rr_py_test` | pip-installed plugin, `pytest --junitxml=...` |
@@ -13,15 +23,19 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 | plain-assert C++ | `RR_CASE(name, "REQ-1") { ... }` | `cc_test` + `@rules_requirements//cc:case` | `--rr_junit=...` |
 | Rust | `rr::verifies!("REQ-1");` | `rr_rust_test` | `rr wrap -- <test binary>` |
 | node:test | `verifies(t, "REQ-1")` or `t.diagnostic("rr.requirement=REQ-1")` | `rr_node_test` | — |
-| anything else | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
+| hardware runs (steps + checks) | `CheckPlan` | `py_test` / `py_binary` | same |
+| anything else (Python) | `JUnitWriter` | `py_test` / `py_binary` | write the XML yourself |
+| shell scripts | `rr case --requirement REQ-1 ...` | `sh_test` with `@rules_requirements//python:rr` in `data` | `rr case` |
+| runners writing their own JUnit | (their own) | `rr_wrapped_test(format = "junit")` | `rr wrap --format junit` |
 
 (junit-properties)=
 ## The JUnit conventions
 
 | Property | Meaning |
 | -------- | ------- |
-| `requirement` | An id the test case verifies. Repeat the property for several ids; a comma-separated value also works. |
+| `requirement` | The id the test case verifies — one per case. (Repeated properties and comma-separated values are still read, as several ids; that form is deprecated.) |
 | `requirements` | Comma-separated ids (the form googletest's single-valued `RecordProperty` needs). |
+| `rr.file` | The source file of the test code that produced the case, relative to the workspace (written by `JUnitWriter`, `CheckPlan` and `rr case --file`). Identifies the same test code run by several targets. |
 | `level` | The verification level the case provides. Default: the model's `default_provided_level`. |
 | `artifact.<key>` | One key of the identity of the artifact exercised (firmware build id, board revision, git SHA...), for staleness checks. |
 
@@ -49,7 +63,7 @@ import pytest
 pytestmark = pytest.mark.rr("REQ-10")  # every test in the module
 
 
-@pytest.mark.rr("REQ-1", "REQ-2")  # several ids
+@pytest.mark.rr("REQ-1")
 def test_heats_below_band(): ...
 
 
@@ -57,12 +71,18 @@ def test_heats_below_band(): ...
 def test_cutoff_on_the_bench(): ...
 
 
-@pytest.mark.requirements("REQ-3, REQ-4")  # alias; comma lists work too
+@pytest.mark.requirements("REQ-3")  # alias
 def test_parses_units(): ...
 ```
 
-- Positional arguments are ids: several arguments, a comma-separated string,
-  or a list.
+- The positional argument is the id. Several ids — several arguments, a
+  comma-separated string, a list, or several markers at one scope naming
+  different ids — are deprecated: every id is still recorded, and the plugin
+  warns once per declaring test (all its parameters), class or module
+  ([details](#multi-id-deprecation)). A string is split on its commas only:
+  whitespace does not separate ids, so `"REQ-1 REQ-2"` is, as before 0.2,
+  recorded as written — one malformed id, which matches no requirement and
+  which the report lists as an undefined id. It does not warn as several ids.
 - `level=` names the level the test provides; `artifact=` a mapping of artifact
   identity keys.
 - Markers accumulate: a test gets the ids of every `rr`/`requirements` marker on
@@ -111,8 +131,10 @@ if __name__ == "__main__":
     rr.unittest_main()
 ```
 
-`rr.verifies(*ids, level="", artifact=None)` records the trace on the function
-or class; decorators stack, and a method's own level wins over its class's.
+`rr.verifies(id, level="", artifact=None)` records the trace on the function
+or class, and a method's own level wins over its class's. Extra ids, or stacked
+decorators naming different ids, are deprecated: every id is still recorded,
+with a warning at the decorated definition ([details](#multi-id-deprecation)).
 `rr.unittest_main()` replaces `unittest.main()`: it runs the module's tests and
 writes JUnit to `$XML_OUTPUT_FILE`, so a plain Bazel `py_test` with
 `@rules_requirements//python` in its `deps` needs nothing else. Outside Bazel, pass `--junit-xml`:
@@ -149,7 +171,8 @@ googletest writes JUnit to `$XML_OUTPUT_FILE` under
 `bazel test`, so a plain `cc_test` needs no wrapper; elsewhere run the binary
 with `--gtest_output=xml:results.xml`.
 
-`RecordProperty` keeps one value per key, so the ids of a test are accumulated
+`RecordProperty` keeps one value per key, so the ids of a test (call it once,
+with one id) are accumulated
 and recorded as one comma-separated `requirements` property. The helpers are
 also available as functions — `rules_requirements::Verifies({...})`,
 `Level(...)`, `Artifact(key, value)`.
@@ -447,23 +470,160 @@ report = JUnitWriter(
     artifact={"firmware_build_id": build_id, "dut_git_sha": sha},
 )
 try:
-    with report.case("flash_and_boot", ["REQ-13", "REQ-21"]):
+    with report.case("flash_and_boot", requirement="REQ-13"):
         flash(dut)  # raises -> recorded as failed, then re-raised
-    with report.case("provision", ["REQ-29"], level="hil"):
+    with report.case("provision", requirement="REQ-29", level="hil"):
         provision(dut)
-    report.add("ota_update", ["REQ-30"], status="skipped", message="no OTA server on this rig")
+    report.add("ota_update", requirement="REQ-30", status="skipped", message="no OTA server on this rig")
 finally:
     report.write(os.environ.get("XML_OUTPUT_FILE", "bench_e2e.xml"))
 ```
 
-- `case(name, requirements, level="", artifact=None)` is a context manager that
-  records the phase as passed, or as failed with the exception's text if the
-  block raises (the exception propagates, so control flow is unchanged).
-- `add(name, requirements, status, message, duration, level, artifact,
-  classname)` records a result directly; `status` is `passed`, `failed`,
-  `error` or `skipped`.
+- `case(name, requirement=None, level="", artifact=None, *, classname="",
+  file=None)` is a context manager that records the case as passed, or as
+  failed with the exception's text if the block raises (the exception
+  propagates, so control flow is unchanged).
+- `add(name, requirement=None, status, message, duration, level, artifact,
+  classname, *, file=None)` records a result directly; `status` is `passed`,
+  `failed`, `error` or `skipped`.
+- `requirement` is **one** id, or `None`. A string that is not one id — a comma
+  or whitespace inside it, or empty — raises `ValueError` (RR-E104). The
+  pre-0.2 list form (`report.case("x", ["REQ-13", "REQ-21"])`, or the
+  `requirements=` keyword) still records every id it holds, verbatim, and warns
+  when it names more than one.
+- `not_reached(names, reason, classname="", *, tags=None)` records planned cases
+  a device failure kept from running, each as its own failed case
+  `not reached: <reason>`; `tags` maps a name to the one id it verifies.
 - The writer's `artifact` identity is stamped on every case (merged with any
   per-case `artifact`), which is what makes stale bench results detectable.
+- The writer's `file` — by default the running script, `sys.argv[0]`, relative
+  to the workspace (the `*.runfiles/<repo>/` or `bazel-out/<cfg>/bin/` prefix
+  stripped) — is written as each case's `rr.file` property; pass `file=""` to
+  write none, or `file=` per case to override it.
+- `write(path, append=False)` writes the JUnit; with `append=True` the cases
+  are added to the file already at `path` (to the suite of the same name, else
+  as a new suite), replacing it atomically; on POSIX systems concurrent
+  appends are serialised by a lock on the file.
+
+(checkplan)=
+## Hardware runs: `CheckPlan`
+
+An on-hardware run is a sequence of *steps* — flash, boot, provision, connect —
+each followed by assertions. A step is an action: it verifies nothing by
+itself. A *check* is one assertion, recorded as one JUnit case that verifies at
+most one requirement. {py:class}`~rules_requirements.hooks.checkplan.CheckPlan`
+records a run in those terms, including how it stopped:
+
+```python
+from rules_requirements.hooks.checkplan import CheckPlan
+from rules_requirements.hooks.junit_writer import JUnitWriter
+
+STEPS = {
+    "flash_boot": ("ble_advertising",),
+    "improv_provision": ("provisioned",),
+    "websocket_checks": ("ws_connect", "build_info", "rename"),
+    "run": ("completed",),
+}
+TAGS = {  # "<step>.<check>" -> ONE id
+    "flash_boot.ble_advertising": "REQ-13",
+    "improv_provision.provisioned": "REQ-13",
+    "websocket_checks.ws_connect": "REQ-13",
+    "websocket_checks.build_info": "REQ-35",
+    "websocket_checks.rename": "REQ-13",
+    "run.completed": "REQ-23",
+}
+
+report = JUnitWriter("hitl_e2e", default_level="hitl")
+plan = CheckPlan(report, STEPS, tags=TAGS, is_infrastructure=is_rig_trouble)
+try:
+    with plan.run():
+        reserve_rig()  # setup: any failure here is rig or setup trouble
+        plan.setup_done()
+        with plan.step("flash_boot"):
+            flash(dut)  # the action: a failure here is the device's
+            with plan.check("ble_advertising"):
+                assert BLE_MARKER in serial_log()
+        with plan.step("improv_provision"):
+            provision(dut)
+            plan.passed("provisioned")
+        with plan.step("websocket_checks"):
+            ...
+        with plan.step("run"):
+            plan.passed("completed")
+finally:
+    report.write(os.environ["XML_OUTPUT_FILE"])
+```
+
+Each check becomes the case `<suite>.<step>::<check>` —
+`hitl_e2e.websocket_checks::rename` — carrying its tag, if any. `check(name)`
+records a pass, or a failure with the exception's text (and re-raises);
+`passed`, `failed` and `skipped` record a result directly, by the check's name
+in the current step or as `"<step>.<check>"`. Inside the check's own
+`with plan.check(name):` block, such a result is the check's only case — the
+block's end adds no pass, and a later exception no failure:
+
+```python
+with plan.check("board_caps"):
+    if descriptor is None:
+        plan.skipped("board_caps", "no capability descriptor on this board")
+    else:
+        assert descriptor.ok
+```
+
+Step names cannot contain `.`, which separates the step from the check.
+
+How a run is recorded when it stops:
+
+| The run | Recorded |
+| ------- | -------- |
+| ends normally | Every check as it went. A planned check never recorded is an `error`, "planned check never executed (harness bug)". |
+| stops on a **device failure**: any exception after `setup_done()` (entering a step implies it) that `is_infrastructure` does not claim | The check that raised, as failed; every check not run yet — the rest of the step and all later steps — as failed, `not reached: <step> failed: <exception>`. Each requirement fails through its own checks. |
+| stops on **rig or setup trouble**: an exception before `setup_done()`, or one `is_infrastructure` claims | One untagged `<suite>::rig` error case; every check not run yet as skipped, `not run: rig trouble: <exception>`. Nothing is failed; checks that already passed stay passed. |
+| is **interrupted or exits cleanly**: `KeyboardInterrupt`, or `SystemExit` with code 0 or `None` | As rig trouble, whatever `is_infrastructure` says. A clean exit after every check was recorded adds nothing. (`SystemExit` with another code is classified like any exception.) |
+| hits a **harness bug**: an unknown step or check name, a check outside a step, a check recorded twice | An untagged `<suite>::harness` error case, `HarnessError` raised, and every check not run yet as `error`. |
+
+The exception is re-raised in every case, so the harness exits as it would
+without the plan. `is_infrastructure` defaults to claiming nothing else: pass
+the harness's own classifier (reservation errors, ssh's own exit 255...).
+
+```{note}
+**v0.2 behaviour on rig trouble.** In 0.2 a skipped case does not stop a
+requirement from reading VERIFIED, so on rig trouble the plan also withdraws
+the tag of every *passed* check whose requirement is also the tag of a check
+that never ran. A partial run therefore leaves such a requirement neither
+VERIFIED nor FAILED. From 0.3, where a requirement is verified only when every
+case in its verification set passed, the skipped checks do this by themselves
+and the withdrawal goes away; the verdict is the same.
+```
+
+## Shell harnesses: `rr case`
+
+`rr case` appends one test case to a JUnit file — `$XML_OUTPUT_FILE` by default
+— creating it if needed, so a shell script can record its own results:
+
+```bash
+rr case --name "flash ok" --status passed --requirement REQ-21 --level hitl
+rr case --name "boot banner" --status failed --message "no banner after 30 s" \
+        --requirement REQ-22 --artifact firmware_build_id="$BUILD_ID" --file "$0"
+```
+
+| Option | Meaning |
+| ------ | ------- |
+| `--name NAME` | The case's name (required). |
+| `--status` | `passed` (default), `failed`, `error` or `skipped`. |
+| `--requirement ID` | The **one** id the case verifies; given twice it is an error (RR-E101), as is a malformed id (RR-E104). |
+| `--classname`, `--suite` | Default: the suite, which defaults to the name part of `$TEST_TARGET`, else `rr`. |
+| `--level`, `--artifact KEY=VALUE` | As for the other hooks. |
+| `--message`, `--duration` | Failure or skip message; seconds. |
+| `--out PATH` | The JUnit file (default `$XML_OUTPUT_FILE`). |
+| `--file PATH` | The test code's source file, recorded as `rr.file`. |
+
+`rr case` exits 0 whatever the case's status — the script's own exit status
+still decides whether the test passed — and 2 when it cannot record the case
+(no output file, more than one id, a malformed id or `--artifact`, an
+unreadable existing file). The file is replaced atomically, and on POSIX
+systems concurrent appends (`rr case ... &`) are serialised by a lock on it,
+so none is lost; on Windows they are not.
 
 ## `rr wrap`
 
@@ -474,11 +634,13 @@ red:
 
 ```console
 $ rr wrap --junit-xml rust.xml -- ./target/debug/deps/setpoint-1a2b3c --test-threads=4
+$ rr wrap --format junit --junit-in out/junit.xml -- ./run_bench.sh
 ```
 
 | Option | Meaning |
 | ------ | ------- |
-| `--format libtest` | The command's output format (currently `libtest`). |
+| `--format` | The command's output: `libtest` (default) for Rust test binaries, or `junit` for a runner that writes JUnit itself to `--junit-in`. |
+| `--junit-in PATH` | With `--format junit`: where the runner writes its report. `$VARS` are expanded (`'${TEST_TMPDIR}/junit.xml'`); a relative path is relative to the working directory. A report left there by an earlier run is deleted before the command starts. |
 | `--junit-xml PATH` | Where to write JUnit (default `$XML_OUTPUT_FILE`). |
 | `--suite NAME` | Suite name (default: the name part of `--target`, else the binary's file name). |
 | `--target LABEL` | The test's label, used to name the suite. |
@@ -489,3 +651,45 @@ available) and without `$XML_OUTPUT_FILE`, so it cannot overwrite the JUnit the
 wrapper writes. If no test results can be parsed — the binary crashed before
 running tests, say — the wrapper records one synthetic case carrying the exit
 code and the tail of the output, so the failure is visible in the report.
+
+With `--format junit` the runner's report is copied to the output as it is.
+`--level` becomes the default level of its suites (a case's own `level` wins).
+If the runner exits non-zero although no case in its report failed, the same
+`exit-status` error case is added as for libtest; if it wrote no report at all,
+or a well-formed file that is not JUnit, one error case says so, whatever its
+exit code. A report without a single case from a run that exited 0 is
+replaced by one synthetic passed case, as for a libtest binary that printed
+nothing, so the run still leaves evidence.
+
+(multi-id-deprecation)=
+## Deprecated: several ids per test case
+
+A test case verifies at most one requirement. In 0.2 every hook still accepts
+the older multi-id forms and records every id, exactly as before, but warns
+with {py:class}`~rules_requirements.hooks.ids.MultipleRequirementsWarning` (a
+`DeprecationWarning`):
+
+| Hook | Deprecated form | Warns |
+| ---- | --------------- | ----- |
+| pytest | a marker with several ids, or several markers at one scope naming different ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
+| unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids | at the decorated definition |
+| `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
+
+Ids that accumulate across scopes — a module-level `pytestmark` plus a
+function's own marker, or a class decorator plus a method decorator — are not
+a multi-id declaration and do not warn in 0.2.
+
+From 0.3, a case whose evidence names several ids counts for no requirement
+(and every requirement it names reads INVALID); 0.4 rejects multi-id
+declarations outright. Split such a test into one test per requirement, or
+keep the one id it really verifies. To find every remaining use, turn the
+warning into an error: `pytest -W error::DeprecationWarning` (each declaration
+then errors the first test it applies to, at setup; the rest of the session
+runs), or `python -W error::DeprecationWarning` for a script.
+
+The hooks name the problem with a stable code:
+
+| Code | Meaning |
+| ---- | ------- |
+| RR-E101 | One case names more than one id. |
+| RR-E104 | Malformed id: a comma, whitespace, or empty. |

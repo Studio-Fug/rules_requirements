@@ -157,8 +157,8 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
             # the whole run is suspect, so the failure carries every id the
             # report traced — those requirements must not read VERIFIED.
             ids = [i for c in reported for i in c.requirements]
-            w = JUnitWriter(label, classname=label)
-            w.add(
+            w = JUnitWriter(label, classname=label, file="")
+            w._append(
                 "exit-status",
                 list(dict.fromkeys(ids)),
                 "error",
@@ -167,7 +167,7 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
             w.write(os.path.join(logdir, "test.exit.xml"))
         if not os.path.exists(xml) or os.path.getsize(xml) == 0:
             # Like Bazel: a test that writes no JUnit gets one synthetic case.
-            w = JUnitWriter(label, classname=label)
+            w = JUnitWriter(label, classname=label, file="")
             status = "passed" if code == 0 else "failed"
             w.add(
                 label.rsplit(":", 1)[-1],

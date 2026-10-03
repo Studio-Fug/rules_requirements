@@ -148,10 +148,25 @@ rr_wrapped_test(
 Runs a test executable through `rr wrap` ({doc}`hooks`), converting its output
 to traceability JUnit and preserving its exit code.
 
+A runner that writes JUnit itself, to a fixed path (a Go or JavaScript test
+runner, a hardware harness using `CheckPlan`), uses `format = "junit"`; the
+wrapper passes its report on to Bazel and adds the exit-status taint:
+
+```starlark
+rr_wrapped_test(
+    name = "bench_test",
+    test = ":bench_runner",
+    format = "junit",
+    junit_in = "${TEST_TMPDIR}/bench/junit.xml",   # where the runner writes
+    level = "hitl",
+)
+```
+
 | Attribute | Default | |
 | --------- | ------- | - |
 | `test` | required | The test executable. |
-| `format` | `"libtest"` | Its output format. |
+| `format` | `"libtest"` | Its output format: `libtest`, or `junit`. |
+| `junit_in` | `""` | With `format = "junit"` (and only then, required): the path the executable writes its JUnit to. `$VARS` are expanded at run time; relative paths are relative to the test's working directory. |
 | `level` | `""` | Level for cases that do not declare one. |
 | `args` | `[]` | Extra arguments for the executable. |
 | `**kwargs` | | Forwarded to the wrapper `py_test`. |

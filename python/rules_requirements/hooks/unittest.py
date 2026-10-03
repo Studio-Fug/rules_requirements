@@ -105,7 +105,7 @@ class JUnitResult(unittest.TextTestResult):
             classname = f"{_module_name(type(test).__module__)}.{type(test).__qualname__}"
         else:  # a class/module fixture error
             name, classname, tr = _holder_trace(getattr(test, "description", str(test)))
-        self.writer.add(
+        self.writer._append(
             name,
             tr["ids"],
             status=status,
@@ -153,7 +153,7 @@ class JUnitResult(unittest.TextTestResult):
 
 def run(suite: unittest.TestSuite, junit_xml: str = "", suite_name: str = "unittest", verbosity: int = 2) -> bool:
     """Run ``suite``; write JUnit to ``junit_xml`` (or ``$XML_OUTPUT_FILE``)."""
-    writer = JUnitWriter(suite_name, default_level="")
+    writer = JUnitWriter(suite_name, default_level="", file="")
     runner = unittest.TextTestRunner(
         stream=sys.stderr,
         verbosity=verbosity,
