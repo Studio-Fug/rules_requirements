@@ -209,17 +209,26 @@ def _own_class_marks(cls_obj: Any) -> dict[int, Any]:
     """Map ``id(Mark) -> owning class`` for the ``rr`` / ``requirements``
     markers each class in the MRO declares in its OWN ``pytestmark`` (not
     inherited). Lets a subclass tell its own markers from a base class's, which
-    pytest merges onto the subclass's Class node."""
+    pytest merges onto the subclass's Class node.
+
+    ``pytestmark`` holds ``Mark`` objects when set by a decorator, but
+    ``MarkDecorator`` objects when assigned in the class body, as a list or a
+    bare one. pytest unpacks a decorator to its ``.mark``, the very object
+    ``iter_markers_with_node`` yields, so key by that."""
     owner: dict[int, Any] = {}
     for klass in getattr(cls_obj, "__mro__", ()) or ():
         try:
             marks = vars(klass).get("pytestmark")
         except TypeError:  # pragma: no cover - a class always has __dict__
             continue
-        if isinstance(marks, (list, tuple)):
-            for m in marks:
-                if getattr(m, "name", None) in MARKERS:
-                    owner.setdefault(id(m), klass)
+        if marks is None:
+            continue
+        if not isinstance(marks, (list, tuple)):
+            marks = [marks]  # `pytestmark = pytest.mark.rr(...)`
+        for m in marks:
+            m = getattr(m, "mark", m)
+            if getattr(m, "name", None) in MARKERS:
+                owner.setdefault(id(m), klass)
     return owner
 
 

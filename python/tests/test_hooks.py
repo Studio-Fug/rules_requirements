@@ -178,19 +178,32 @@ def test_pytest_multi_id_module_marker_warns_once(tmp_path):
     assert {c.requirements for c in ingest.collect([str(tmp_path / "out.xml")]).cases} == {("REQ-1", "REQ-2")}
 
 
-def test_marked_subclass_of_marked_base_does_not_warn(tmp_path):
+_CLASS_MARK_FORMS = {
+    # The decorator stores Mark objects in the class's own pytestmark.
+    "decorator": ("@pytest.mark.rr('{req}')\nclass {cls}:\n", ""),
+    # The class-body forms store MarkDecorator objects (a list, or a bare one).
+    "body-list": ("class {cls}:\n", "    pytestmark = [pytest.mark.rr('{req}')]\n"),
+    "body-bare": ("class {cls}:\n", "    pytestmark = pytest.mark.rr('{req}')\n"),
+}
+
+
+def _marked_class(form, cls, req, body):
+    head, mark = _CLASS_MARK_FORMS[form]
+    return head.format(cls=cls, req=req) + mark.format(req=req) + body
+
+
+@pytest.mark.parametrize("form", sorted(_CLASS_MARK_FORMS))
+def test_marked_subclass_of_marked_base_does_not_warn(tmp_path, form):
     """pytest (>=7.2) merges a base class's pytestmark into the subclass's
     Class node. Two declaration sites (the base's marker and the subclass's)
     that the nearest-scope rule resolves must not look like one declaration
-    naming several ids: no MultipleRequirementsWarning."""
+    naming several ids: no MultipleRequirementsWarning, whichever documented
+    way marks the classes (decorator, or a class-body pytestmark list or bare
+    marker)."""
     (tmp_path / "test_inh.py").write_text(
         "import pytest\n\n\n"
-        "@pytest.mark.rr('REQ-1')\n"
-        "class TestBase:\n"
-        "    def test_base(self):\n        pass\n\n\n"
-        "@pytest.mark.rr('REQ-2')\n"
-        "class TestSub(TestBase):\n"
-        "    def test_sub(self):\n        pass\n"
+        + _marked_class(form, "TestBase", "REQ-1", "    def test_base(self):\n        pass\n\n\n")
+        + _marked_class(form, "TestSub(TestBase)", "REQ-2", "    def test_sub(self):\n        pass\n")
     )
     (tmp_path / "main.py").write_text(
         "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
@@ -210,18 +223,15 @@ def test_marked_subclass_of_marked_base_does_not_warn(tmp_path):
     assert sub["test_sub"] == {"REQ-1", "REQ-2"}
 
 
-def test_subclass_pytestmark_naming_several_ids_still_warns(tmp_path):
+@pytest.mark.parametrize("form", sorted(_CLASS_MARK_FORMS))
+def test_subclass_pytestmark_naming_several_ids_still_warns(tmp_path, form):
     """A single declaration site that names several ids still warns — even on a
     subclass whose base is also marked — and names that site's ids, not the
     base's id merged in."""
     (tmp_path / "test_inh2.py").write_text(
         "import pytest\n\n\n"
-        "@pytest.mark.rr('REQ-1')\n"
-        "class TestBase:\n"
-        "    def test_base(self):\n        pass\n\n\n"
-        "@pytest.mark.rr('REQ-2', 'REQ-3')\n"
-        "class TestSub(TestBase):\n"
-        "    def test_sub(self):\n        pass\n"
+        + _marked_class(form, "TestBase", "REQ-1", "    def test_base(self):\n        pass\n\n\n")
+        + _marked_class(form, "TestSub(TestBase)", "REQ-2', 'REQ-3", "    def test_sub(self):\n        pass\n")
     )
     (tmp_path / "main.py").write_text(
         "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
