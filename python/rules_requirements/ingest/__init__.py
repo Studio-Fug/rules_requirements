@@ -29,9 +29,9 @@ Traceability travels inside the evidence as test-case *properties*:
 
 ``requirement``
     The entity id the case declares it verifies — a *tag*, recorded in
-    :attr:`TestCase.declared`. Ingest never decides ownership: a tag is a
+    ``TestCase.declared``. Ingest never decides ownership: a tag is a
     cross-check (or, in hybrid mode, a claim for an unclaimed case) that only
-    :func:`rules_requirements.attribution.attribute` resolves. A case naming
+    ``rules_requirements.attribution.attribute()`` resolves. A case naming
     more than one distinct id (a repeated property, ``requirement="A,B"``,
     the plural ``requirements``, a list in a Rust trace line, two
     ``[rr:ID]`` name tags) keeps every id, and is quarantined there
@@ -42,7 +42,7 @@ Traceability travels inside the evidence as test-case *properties*:
     Identity of the thing under test (firmware build id, DUT git SHA, ...)
     used to detect stale evidence.
 ``rr.file``
-    The test source the case came from (:attr:`TestCase.file`).
+    The test source the case came from (``TestCase.file``).
 ``rr.scope`` / ``rr.synthetic``
     ``rr.scope=target`` marks a result about the whole target run (an exit
     status, a load error, an unreadable report), never a test case;
@@ -50,8 +50,8 @@ Traceability travels inside the evidence as test-case *properties*:
 
 Only ``level`` and ``artifact.*`` set on a ``<testsuite>`` (or an enclosing
 scope) reach its cases. A suite-level ``requirement`` is not inherited: it is
-kept in :attr:`TestCase.suite_declared` and reported as
-``suite-level-requirement`` (:attr:`Evidence.issues`).
+kept in ``TestCase.suite_declared`` and reported as
+``suite-level-requirement`` (``Evidence.issues``).
 """
 
 from __future__ import annotations
@@ -201,7 +201,7 @@ class TestCase:
 
     @property
     def requirements(self) -> tuple[str, ...]:
-        """Deprecated alias of :attr:`declared` (tags, not owners)."""
+        """Deprecated alias of ``declared`` (tags, not owners)."""
         warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
         return self.declared
 
@@ -235,7 +235,7 @@ def apply_properties(case: TestCase, props: Iterable[tuple[str, str]]) -> TestCa
 
     Every ``requirement``/``requirements`` value is split on commas and
     whitespace, and the distinct ids — together with the case name's
-    ``[rr:ID]`` tags — are recorded in :attr:`TestCase.declared`, in order.
+    ``[rr:ID]`` tags — are recorded in ``TestCase.declared``, in order.
     Nothing is decided about ownership: two ids stay two ids.
     """
     reqs = list(case.declared)

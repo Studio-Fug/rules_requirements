@@ -33,7 +33,7 @@ warn with `MultipleRequirementsWarning` — see [Deprecated: several ids per tes
 
 | Property | Meaning |
 | -------- | ------- |
-| `requirement` | The id the test case verifies — one per case. (Repeated properties and comma-separated values are still read, as several ids; that form is deprecated.) |
+| `requirement` | The id the test case verifies — one per case. (Repeated properties and values separated by commas or whitespace are still read, as several ids: since 0.3 such a case is quarantined as `multi-tag` and counts for no requirement.) |
 | `requirements` | Comma-separated ids (the form googletest's single-valued `RecordProperty` needs). |
 | `rr.file` | The source file of the test code that produced the case, relative to the workspace (written by `JUnitWriter`, `CheckPlan` and `rr case --file`). Identifies the same test code run by several targets. |
 | `level` | The verification level the case provides. Default: the model's `default_provided_level`. |

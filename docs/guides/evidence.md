@@ -14,7 +14,7 @@ records:
 | ----- | ------- |
 | `name`, `classname` | Identify the case; reports show `classname::name`. |
 | `status` | `passed`, `failed`, `error` or `skipped`. |
-| `requirements` | Ids the case verifies. |
+| `declared` | The requirement ids the evidence *names* for the case — tags, in order, without duplicates. Never an owner: which requirement a case verifies is decided only by attribution. (`requirements` is a deprecated read/write alias, also accepted by the constructor, with a `DeprecationWarning`.) |
 | `level` | Level the case provides (empty: the model's `default_provided_level`). |
 | `artifact` | Identity of the artifact exercised, for [staleness](../concepts.md#staleness). |
 | `message` | Failure or skip message. |
@@ -23,6 +23,13 @@ records:
 | `suite` | The enclosing JUnit `<testsuite>` name, when there is one. |
 | `source` | The file it was read from. |
 | `properties` | Any other properties, verbatim — among them `rr.file`, the source file of the test code, which `JUnitWriter`, `CheckPlan` and `rr case --file` write ({ref}`junit-properties`). |
+| `file`, `line` | The test source, workspace-relative (`rr.file`, else the testcase's `file` attribute, with any `*.runfiles/<workspace>/` or `bazel-out/<cfg>/bin/` prefix removed), and its `line` attribute (0 if unknown). |
+| `suite_declared` | Ids an enclosing suite (or parent case) named. They are *not* the case's: see below. |
+
+`TestCase.scope` is `target` for a result about the whole target run
+(`rr.scope=target`) and `case` otherwise; `TestCase.synthetic` is true for a
+target's single whole-run result (`rr.synthetic=true`, or Bazel's generated
+report).
 
 {py:func}`rules_requirements.ingest.collect` reads a list of files,
 directories (walked recursively, following symlinks) and globs (`**` allowed).
@@ -39,8 +46,14 @@ case carrying every requirement id the run traced, so those requirements read
 FAILED — from `rr_evidence` and from `rr wrap`, for libtest output and for a
 runner's own JUnit (`--format junit`) alike.
 
-A test case should name one requirement; evidence naming several per case is
-still read in 0.2, as several ids, but the hooks that write it warn
+**A test case verifies at most one requirement.** Ingest only records what the
+evidence declares; it never decides ownership. Every `requirement` /
+`requirements` value — a property, a testcase attribute, a record, a Rust
+trace line, a node diagnostic — is split on commas and whitespace, and an
+`[rr:ID]` tag in a case's name is one more declared id. A case that ends up
+declaring more than one distinct id keeps all of them: attribution then
+quarantines it (`multi-tag`), so it counts for no requirement and every id it
+names reads INVALID. The hooks that can write such evidence warn
 ({ref}`multi-id-deprecation`).
 
 ## Built-in ingestors
@@ -54,13 +67,25 @@ still read in 0.2, as several ids, but the hooks that write it warn
 ### JUnit
 
 The standard. The ingestor accepts a `<testsuites>` or bare `<testsuite>` root,
-nested suites, per-case `<properties>`, trace attributes on `<testcase>` and
-suite-level properties inherited by the cases below them (see
-{ref}`junit-properties`). A case's status is `error` if it has an `<error>`
+nested suites, per-case `<properties>` and trace attributes on `<testcase>`
+(see {ref}`junit-properties`). Of the properties of a `<testsuite>` or
+`<testsuites>`, only `level` and `artifact.*` reach the cases below. A
+suite-level `requirement` (googletest writes one for `RR_VERIFIES` in
+`SetUpTestSuite`, an `Environment` or `main`) is no longer inherited by the
+cases: it is kept as `suite_declared` and reported once per suite as a
+`suite-level-requirement` warning (`Evidence.issues`, printed by `rr ingest`,
+`rr cases` and the other commands reading `--evidence`).
+
+A `<testcase>` holding `<testcase>` children (subtests, as some runners nest
+them) is a scope, not a case: each child becomes a case whose classname is the
+parent's path joined with ` > ` — `pkg > TestParse::empty`, the same shape
+`rr_node_test` gives node:test subtests. The parent's `level`, `artifact.*`
+and source reach its children; its requirement ids do not. A failure of the
+parent itself that none of its children explains (a setup hook) becomes a
+target-scope `<hooks>` error. A case's status is `error` if it has an `<error>`
 child, `failed` for `<failure>`, `skipped` for `<skipped>` (or googletest's
 `status="notrun"` / `result="skipped"`/`"suppressed"`), and `passed`
-otherwise; the message comes from the element's `message` attribute or text. A
-file that is not well-formed XML contributes nothing.
+otherwise; the message comes from the element's `message` attribute or text.
 
 **Bazel test logs.** Bazel writes one `test.xml` per test target, and the
 target's label is recovered from the path:
@@ -99,8 +124,9 @@ or non-JUnit report, carry `rr.scope=target` instead: they are about the run,
 not a test case of it.
 
 An unreadable report (malformed XML) is not skipped: it becomes one `error`
-case for its target, so a crashed or corrupted run shows up as a failure rather
-than vanishing.
+result for its target, `<unreadable>`, with `rr.scope=target` — so a crashed or
+corrupted run taints everything claimed on that target rather than vanishing
+or reading as one more test case.
 
 ### Records
 
@@ -109,11 +135,12 @@ measurement recorded by hand — write a records file:
 
 ```yaml
 # evidence/panel_inspection.rr.yaml
+target: record:panel_inspection    # optional; entries may override it
 evidence:
   - name: panel-shows-setpoint-unit
     classname: inspection.TM-2
     status: passed                 # required: passed | failed | skipped | error
-    requirements: [REQ-7]          # a list or a single id
+    requirement: REQ-7             # the one id this record verifies (a tag)
     level: inspection
     artifact: {board_rev: C}       # optional identity, for staleness
     properties:                    # anything else worth keeping
@@ -122,8 +149,11 @@ evidence:
       record: "Photo QA-114 shows '21.5 °C' after entering 21.5C."
 ```
 
-Entries may also give `message`, `duration` and `target`; a missing `name`
-becomes `record-<n>`. A missing or unknown `status` becomes `error`: a planned
+Entries may also give `message`, `duration` and their own `target`; without
+any `target:`, a record's case key uses the pseudo-target `record:<file stem>`.
+The legacy `requirements: [REQ-7]` list is still read; a record naming more
+than one id keeps them all, which makes it a `multi-tag` case. A missing
+`name` becomes `record-<n>`. A missing or unknown `status` becomes `error`: a planned
 but unsigned record must never count as passed. The top level may
 be `{evidence: [...]}` or a bare list; JSON works the same way. Records are
 evidence like any other: in Bazel, list the file in `rr_report(evidence = ...)`.
@@ -133,7 +163,9 @@ evidence like any other: in Bazel, list the file in `rr_report(evidence = ...)`.
 Reads the default ("pretty") output of a Rust test binary — the
 `test path::name ... ok | FAILED | ignored` lines, plus each failure's captured
 output as its message — and merges traces from a sidecar
-`<stem>.rrtrace.jsonl` file next to it (the format `rr::verifies!` writes). It
+`<stem>.rrtrace.jsonl` file next to it (the format `rr::verifies!` writes:
+one JSON line per call, with a single `requirement` or the 0.2 `requirements`
+list; every id becomes a declared id of the test). It
 is mainly used inside `rr wrap` ({doc}`hooks`); the ingestor itself handles
 saved captures named `*.libtest.txt`.
 
@@ -162,7 +194,8 @@ its path within that target, written `<target>#<path>`:
   keys differ between the two.
 - **Path**: `<classname>::<name>` (just `<name>` without a classname), Unicode
   NFC, with surrounding whitespace stripped. An `[rr:ID]` tag inside a name is
-  removed, so re-tagging a test never renames its case. A target that only
+  removed (and read as a declared id), so re-tagging a test never renames its
+  case. A target that only
   produced Bazel's generated report, or a result our writers mark
   `rr.synthetic=true`, has one case, `[target]`.
 - **Not identity**: retries (`test_attempts/attempt_N.xml`), repetitions

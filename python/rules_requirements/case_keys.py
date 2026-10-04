@@ -156,7 +156,7 @@ def is_target_scope(case: TestCase) -> bool:
 
 def declared_of(case: TestCase) -> tuple[str, ...]:
     """The ids a raw case declares: its ``declared`` tags plus any ``[rr:ID]``
-    name tags (also for a hand-built :class:`TestCase`). Tags, never owners."""
+    name tags (also for a hand-built :class:`~rules_requirements.ingest.TestCase`). Tags, never owners."""
     return tuple(dedupe([*case.declared, *name_tags(case.name)]))
 
 
