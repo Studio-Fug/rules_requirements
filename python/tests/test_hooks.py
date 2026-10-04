@@ -1691,6 +1691,26 @@ def test_junit_writer_cases_are_read_only():
     assert "requirement" in w.to_string() and "REQ-2" not in w.to_string()
 
 
+def test_junit_writer_cases_copy_and_pickle_as_read_only_cases():
+    """A frozen case still deep-copies and pickles (0.2's did): harnesses pass
+    a writer across multiprocessing or deep-copy a report. The copy is as
+    read-only as the original."""
+    import copy
+    import pickle
+
+    w = junit_writer.JUnitWriter("bench", file="", artifact={"sha": "abc"})
+    w._append("a", ("REQ-1",), properties={"rr.scope": "target"})
+    (case,) = w.cases
+    for clone in (copy.deepcopy(case), pickle.loads(pickle.dumps(case)), copy.copy(case)):
+        assert clone == case and type(clone) is type(case)
+        assert clone.declared == ("REQ-1",) and dict(clone.artifact) == {"sha": "abc"}
+        assert dict(clone.properties) == {"rr.scope": "target"}
+        with pytest.raises(TypeError):
+            clone.artifact["k"] = "v"  # type: ignore[index]
+    w2 = pickle.loads(pickle.dumps(w))
+    assert w2.to_string() == w.to_string() and copy.deepcopy(w).to_string() == w.to_string()
+
+
 def test_rust_trace_lines_singular_and_list_forms(tmp_path, monkeypatch):
     """P7: the 0.3 singular form, the 0.2 list form, and two calls in one test."""
     fake = tmp_path / "traced"

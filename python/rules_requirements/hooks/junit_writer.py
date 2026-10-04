@@ -40,7 +40,7 @@ import time
 import warnings
 from collections.abc import Iterable as _Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from types import MappingProxyType
 from typing import Any, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
 from xml.etree import ElementTree as ET
@@ -79,6 +79,12 @@ class _Case:
         object.__setattr__(self, "declared", tuple(self.declared))
         object.__setattr__(self, "artifact", MappingProxyType(dict(self.artifact)))
         object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+
+    def __reduce__(self) -> Tuple[Any, Tuple[Any, ...]]:
+        # A mappingproxy neither pickles nor deep-copies: rebuild the case
+        # from plain dicts (``__post_init__`` makes them read-only again).
+        values = (getattr(self, f.name) for f in fields(self))
+        return (type(self), tuple(dict(v) if isinstance(v, MappingProxyType) else v for v in values))
 
     @property
     def requirement(self) -> str | None:
