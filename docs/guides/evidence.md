@@ -56,6 +56,15 @@ quarantines it (`multi-tag`), so it counts for no requirement and every id it
 names reads INVALID. The hooks that can write such evidence warn
 ({ref}`multi-id-deprecation`).
 
+<!-- rr:interim multi-tag quarantine pending -->
+```{warning}
+Interim development tree: ingest already records every declared id, but
+attribution and the verdicts that read only attribution are not in this tree
+yet, so the verdict engine here still counts a case once for each id it
+declares. Do not release or deploy it on its own; 0.3.0 ships all of them
+together.
+```
+
 ## Built-in ingestors
 
 | Name | Reads | Recognised by |
