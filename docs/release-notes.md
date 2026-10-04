@@ -3,6 +3,79 @@
 This page is the detailed record of each release. `CHANGELOG.md` at the
 repository root summarises each version in a few lines and links here.
 
+## 0.2.1 (2026-10-04)
+
+A patch release for projects migrating to one requirement per test case
+whose tests run under Bazel. Nothing else changes: verdicts, reports and the
+report goldens are byte-identical to 0.2.0.
+
+### New: `rr migrate verify`
+
+- **`rr migrate verify --worksheet W.rrplan --evidence NEW [--baseline OLD]
+  [--allow-missing] [--model DIR]`** ({ref}`migrate-verify`) checks the test
+  evidence of a run after `rr migrate apply` against the worksheet, case by
+  case key: every decided case must declare exactly its owner (no id for
+  `none`); with `--baseline`, every other case must declare the ids it had
+  before (in any order; a target-scope result's are not compared) and no
+  case of the baseline may be missing. A case with no result is an error;
+  `--allow-missing` (a HITL or manual target CI does not run) makes it a
+  warning when its target has no result file at all in the new evidence,
+  never when the target ran (a case renamed or lost by the rewrite). A
+  target with any result file ran: a `test.xml` that holds no testcase
+  (pytest collected nothing) or only Bazel's synthetic whole-run result
+  counts. A decided
+  case that declared no id before and declares none after counts only
+  through `verified_by` (a model edit apply does not make): it is listed in
+  a note, not an error; with a model (`--model`, or the worksheet's), the
+  note says whether `verified_by` gives its target exactly its owner or the
+  case is pending a model edit, and also lists decided cases whose target
+  `verified_by` still gives to other requirements. Without a model only
+  declared ids are checked. One line per offending case (expected and found
+  ids) and exit `1`; exit `0` with a summary; exit `2` for an unreadable or
+  invalid worksheet, evidence paths holding none, or evidence that names no
+  build target while the worksheet's cases belong to build targets (JUnit
+  files outside a `bazel-testlogs` / `testlogs` directory are keyed by
+  suite name). It reads every evidence
+  shape `rr` ingests (pytest, `rr_node_test`, `rr_case.h`, googletest, ...).
+  It is the verification path where the collection check cannot run — Bazel
+  `py_test` targets importing through their runfiles: apply with
+  `--no-collect-check` (and `--trust-main-guard` only if needed), push, then
+  verify against the CI evidence before merging.
+
+### New: `rr migrate apply --trust-main-guard`
+
+- **Opt-in, off by default.** By default `rr migrate apply` judges the code
+  only an `if __name__ == "__main__":` block runs like any other code, as
+  0.2.0 does. `--trust-main-guard` leaves out of the static guards the code
+  that never runs when pytest imports a test module — the body of an
+  `if __name__ == "__main__":` block (either operand order, either quote; not
+  its `else`) and the bodies of module-level functions reachable only from
+  it. A script-style test module whose `main()` loads a helper with
+  `importlib.util.spec_from_file_location` refuses every rewritten file in
+  the tree without it, because an import call the codemod cannot name may
+  import any of them. The exclusion is **best-effort**: static analysis
+  cannot prove what Python runs at import (a name computed at run time, a
+  `builtins` alias, `__getattribute__`, `runpy.run_module(...,
+  run_name="__main__")` in another file all get past it), so the project's
+  fail-closed rule keeps it opt-in. Only use it together with a definitive
+  check: the collection check, or `rr migrate verify` against fresh test
+  evidence before merging. apply prints a warning saying so whenever the
+  flag is given. With the flag, such a function is still judged when anything that may run at import
+  time names it (a module-level call, an alias, a `getattr` / `globals()`
+  string, a test, a default argument), when it is decorated, rebound or named
+  like a test or a hook, or when another scanned file imports it, passes its
+  module around, reads it from `sys.modules` or names it on a pytest item's
+  `.module` / `.obj`. Nothing in the file is excluded when it may rebind
+  `__name__`, when code that may run at import looks names up dynamically
+  (`globals()`, `vars()`, `eval`, a computed `getattr`,
+  `inspect.getmembers`, `__dict__`, `sys.modules`, a frame), or when the
+  block launches the tests in-process (`pytest.main()`, `unittest.main()`:
+  a `py_test` whose main is the file runs the block before collection); nor
+  anywhere when another scanned file may reach any module's functions
+  without importing it (a computed `sys.modules` read, a frame, `eval` /
+  `exec`, a `pytest_pycollect_makeitem` hook, a computed lookup on a pytest
+  item's module).
+
 ## 0.2.0 (2026-10-04)
 
 Per-case runners and migration tooling, towards **one test case, one

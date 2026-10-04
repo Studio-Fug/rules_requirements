@@ -31,7 +31,7 @@ from typing import Any, Iterable, Mapping
 
 from rules_requirements import config as cfg
 from rules_requirements._vendor import yaml
-from rules_requirements.case_keys import CaseKey, CaseRow, index_cases
+from rules_requirements.case_keys import CaseKey, CaseRow, index_cases, run_targets
 from rules_requirements.ingest import Evidence
 from rules_requirements.model import Model
 from rules_requirements.util import dedupe, natural_key
@@ -298,6 +298,11 @@ def decisions(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
     return out
 
 
+def owner_ids(owner: str) -> list[str]:
+    """The ids a case decided ``owner`` must end up declaring: ``[owner]``, or none for ``none``."""
+    return [] if owner == NONE else [owner]
+
+
 def case_files(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
     """Each contested case's test source (its row's ``file``), where the evidence named one."""
     out: dict[CaseKey, str] = {}
@@ -343,6 +348,195 @@ def model_edits(doc: Mapping[str, Any]) -> list[dict[str, str]]:
             else:
                 action, why = "keep", f"{req} owns every decided case"
             out.append({"target": target, "requirement": req, "action": action, "reason": why})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Verifying the result against test evidence                                  #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Offence:
+    """One case the new evidence contradicts the worksheet on."""
+
+    key: CaseKey
+    reason: str
+    expected: list[str]
+    found: list[str] | None  # None: no result of the case in the new evidence
+
+    def describe(self) -> str:
+        found = "no result" if self.found is None else _ids(self.found)
+        return f"{self.key}: {self.reason} (expected {_ids(self.expected)}, found {found})"
+
+
+def _ids(ids: Iterable[str]) -> str:
+    return "[" + ", ".join(ids) + "]"
+
+
+@dataclass
+class Verification:
+    """The outcome of :func:`verify`."""
+
+    offences: list[Offence] = field(default_factory=list)
+    decided: int = 0  # decided cases found in the new evidence with exactly their owner
+    # Cases with no result whose target has no result file in the new
+    # evidence (a target CI does not run), tolerated with allow_missing.
+    missing: list[CaseKey] = field(default_factory=list)
+    # Decided cases declaring no id before or after: they count only through
+    # verified_by. With a model, those whose target verified_by gives exactly
+    # their owner; ``pending`` holds the others (case -> its target's claimers).
+    untagged: list[CaseKey] = field(default_factory=list)
+    pending: list[tuple[CaseKey, list[str]]] = field(default_factory=list)
+    # With a model: decided cases declaring exactly their owner whose target
+    # verified_by still gives to other requirements too (case -> those).
+    also_claimed: list[tuple[CaseKey, list[str]]] = field(default_factory=list)
+    unchanged: int = 0  # undecided cases whose ids match the baseline
+    new: int = 0  # cases in the new evidence the baseline does not have
+
+    @property
+    def ok(self) -> bool:
+        return not self.offences
+
+
+def _is_label(target: str) -> bool:
+    return target.startswith(("//", "@"))
+
+
+def unkeyed(doc: Mapping[str, Any], evidence: Evidence) -> str:
+    """Why ``evidence`` cannot be matched with the worksheet ``doc`` by
+    target, else "": the worksheet's cases belong to build targets
+    (``//pkg:name``) but the evidence files no case under any build target,
+    only under ``suite:`` / ``record:`` pseudo-targets. A JUnit file's build
+    target comes from its path (``bazel-testlogs/<pkg>/<name>/test.xml``, or
+    a directory named ``testlogs``), so evidence copied into a directory of
+    another name is keyed by suite name and no case matches."""
+    wanted = sorted({k.target for k in decisions(doc) if _is_label(k.target)}, key=natural_key)
+    found = run_targets(evidence)
+    if not wanted or not found or any(_is_label(t) for t in found):
+        return ""
+    return (
+        f"the worksheet's cases belong to build targets ({wanted[0]}"
+        + (f" and {len(wanted) - 1} more" if len(wanted) > 1 else "")
+        + "), but the evidence files every case under a pseudo-target ("
+        + ", ".join(sorted(found, key=natural_key)[:3])
+        + (", ..." if len(found) > 3 else "")
+        + "): a test.xml's build target comes from its path, so keep the evidence under a directory named "
+        "bazel-testlogs or testlogs (e.g. ci/bazel-testlogs/<pkg>/<name>/test.xml)"
+    )
+
+
+def verify(
+    doc: Mapping[str, Any],
+    evidence: Evidence,
+    baseline: Evidence | None = None,
+    *,
+    allow_missing: bool = False,
+    model: Model | None = None,
+) -> Verification:
+    """Check test evidence produced after ``rr migrate apply`` against the
+    worksheet ``doc``.
+
+    Every case the worksheet decides must declare exactly its owner in
+    ``evidence`` (no id for ``none``). With a ``baseline`` (the evidence
+    from before the rewrite), every other case must declare the same ids as
+    before, and no case of the baseline may be missing from ``evidence``. A
+    target-scope result (a whole run's exit status) carries the union of its
+    cases' ids, which the decisions change: it must still be there, its ids
+    are not compared.
+
+    A case with no result is an offence, but with ``allow_missing`` one
+    whose target has no result file at all in ``evidence`` (a HITL or
+    manual target CI does not run) is only listed in ``missing``. A case
+    missing from a target that did run stays an offence: it was renamed or
+    lost. A target has run when the evidence has any result file for it
+    (:func:`~rules_requirements.case_keys.run_targets`): a case, a
+    synthetic whole-run result, or a report with no testcase at all (pytest
+    collected nothing).
+
+    Only declared ids are checked. A decided case that declared no id before
+    the rewrite and declares none after counts only through ``verified_by``,
+    which ``rr migrate apply`` cannot edit (it lists the edits): it is not an
+    offence. With a ``model`` it is ``untagged`` when the requirements whose
+    ``verified_by`` names its target are exactly its owner (none for
+    ``none``), else ``pending`` a model edit (a target split between owners
+    needs case selectors, v0.3); without one it is ``untagged``, its owner
+    unchecked. "Before" is the baseline when it has the case, else the
+    worksheet: a group that lists no ``tags`` has no tagged case. With a
+    model, a decided case declaring exactly its owner whose target
+    ``verified_by`` also gives to other requirements is listed in
+    ``also_claimed``: it still counts toward them.
+
+    Cases are matched by :class:`~rules_requirements.case_keys.CaseKey`
+    (:func:`~rules_requirements.case_keys.index_cases`), so the evidence of
+    a Bazel ``py_test``, ``rr_node_test``, ``rr_case.h`` test or anything
+    else rr ingests is checked alike.
+    """
+    out = Verification()
+    decided = {k: v for k, v in decisions(doc).items() if v != OPEN}
+    rows = index_cases(evidence)
+    ran = run_targets(evidence)  # any result file for it, an empty one included
+    before = index_cases(baseline) if baseline is not None else None
+    claims: dict[CaseKey, list[str]] = {}
+    if model is not None:
+        claims = {u.row.key: sorted(u.claims, key=natural_key) for u in census(model, evidence).units}
+    untagged_groups = {
+        CaseKey(str(g.get("target", "")), str(c["path"]))
+        for g in doc.get("groups", []) or []
+        if isinstance(g, dict) and not g.get("tags")
+        for c in g.get("cases", []) or []
+        if isinstance(c, dict) and c.get("path") is not None
+    }
+
+    def untagged_before(key: CaseKey) -> bool:
+        if before is not None and key in before:
+            return not before[key].declared
+        return key in untagged_groups
+
+    def absent(key: CaseKey, reason: str, expected: list[str]) -> None:
+        if not allow_missing:
+            out.offences.append(Offence(key, reason, expected, None))
+        elif key.target not in ran:
+            out.missing.append(key)  # its target did not run here
+        else:
+            out.offences.append(Offence(key, f"{reason}, though its target ran", expected, None))
+
+    for key, owner in sorted(decided.items()):
+        want = owner_ids(owner)
+        row = rows.get(key)
+        if row is None:
+            if before is not None and key in before:
+                continue  # reported below: a case of the baseline went missing
+            absent(key, "a decided case has no result in the evidence", want)
+            continue
+        found = list(row.declared)
+        if sorted(found) == want:
+            out.decided += 1
+            others = [r for r in claims.get(key, []) if r not in want]
+            if others:
+                out.also_claimed.append((key, others))
+        elif not found and untagged_before(key):
+            # Its owner is a verified_by edit, not a tag.
+            if model is not None and claims.get(key, []) != want:
+                out.pending.append((key, claims.get(key, [])))
+            else:
+                out.untagged.append(key)
+        else:
+            out.offences.append(Offence(key, "a decided case does not declare exactly its owner", want, found))
+    if before is not None:
+        for key, old in before.items():
+            row = rows.get(key)
+            expected = owner_ids(decided[key]) if key in decided else list(old.declared)
+            if row is None:
+                absent(key, "a case of the baseline has no result in the evidence", expected)
+            elif key not in decided and not old.target_scope:
+                if sorted(row.declared) != sorted(old.declared):
+                    out.offences.append(Offence(key, "an undecided case's ids changed", expected, list(row.declared)))
+                else:
+                    out.unchanged += 1
+        out.new = sum(1 for key in rows if key not in before)
+    out.offences.sort(key=lambda o: (natural_key(o.key.target), natural_key(o.key.path)))
+    out.missing.sort(key=lambda k: (natural_key(k.target), natural_key(k.path)))
     return out
 
 

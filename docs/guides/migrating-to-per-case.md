@@ -3,9 +3,9 @@
 ```{admonition} Draft
 :class: note
 
-This guide describes the migration tooling that ships in v0.2.0: `rr cases`,
-`rr migrate plan` and `rr migrate apply --stage tags`. None of them changes a
-verdict. The guide will be completed as later releases add case selectors in
+This guide describes the migration tooling that ships in v0.2: `rr cases`,
+`rr migrate plan`, `rr migrate apply --stage tags` and (since v0.2.1)
+`rr migrate verify`. None of them changes a verdict. The guide will be completed as later releases add case selectors in
 the model (v0.3.0) and make multi-id tags an error (v0.4.0).
 ```
 
@@ -26,7 +26,7 @@ patterns make one test count twice:
   whose cases are tagged for one requirement and listed whole by another.
 
 From v0.3.0 such evidence is quarantined (it counts for nobody) and a target
-claimed by two requirements is a model error. Migrating on v0.2.0 first keeps
+claimed by two requirements is a model error. Migrating on v0.2 first keeps
 CI green throughout: every step below is valid under today's rules.
 
 ## The steps
@@ -42,8 +42,9 @@ CI green throughout: every step below is valid under today's rules.
    markers to the decided owners.
 5. **Edit the model.** Remove the `verified_by` references the decisions leave
    unused; the tool lists them.
-6. **Check.** Re-run the tests and the plan. What is left is the work for
-   v0.3.0's case selectors.
+6. **Check.** Re-run the tests, check their evidence against the worksheet
+   with `rr migrate verify`, and re-run the plan. What is left is the work
+   for v0.3.0's case selectors.
 
 ## Case keys
 
@@ -269,7 +270,11 @@ Run apply where `python -m pytest --collect-only` works for the project — the
 same interpreter and dependencies the tests need. For a plain project that is
 its virtualenv; for a Bazel project, make a virtualenv with the test
 dependencies (the same ones the `py_test` targets use) and run apply from the
-source tree. If collection fails in either tree (an import error, a non-zero
+source tree. Where that is impractical — `py_test` targets that import
+through their runfiles, generated code, toolchain-provided modules — apply
+with `--no-collect-check` (and `--trust-main-guard` only if needed), push,
+then check the rewrite against the CI test evidence with `rr migrate verify`
+before merging (see {ref}`migrate-verify`). If collection fails in either tree (an import error, a non-zero
 exit, no tests found while the worksheet has decided cases), apply refuses and
 prints the collection output, so a broken environment never passes silently.
 
@@ -308,8 +313,13 @@ tests by hand.
   everything the check adds: the before/after collection comparison, the
   refusal on symlinks that reach tests outside the tree, and the refusal on
   duplicate nodeids. Use it only where pytest cannot collect the project at
-  all, and re-run the tests and `rr migrate plan` afterwards to check the
-  result.
+  all, and check the result against real test evidence afterwards with
+  `rr migrate verify` ({ref}`migrate-verify`).
+- `--trust-main-guard` (off by default) leaves the code only an
+  `if __name__ == "__main__":` block runs out of the static guards (below).
+  That exclusion is best-effort, so only use it together with a definitive
+  check: the collection check, or `rr migrate verify` against fresh test
+  evidence before merging. apply prints a warning saying so.
 
 ## The static guards: a first, conservative line
 
@@ -324,7 +334,41 @@ and cannot change it, and the collection check vouches for the result either
 way. A function only counts as such a hook while nothing that may run at
 import time refers to it: a `setUp` or `setup_module` the module calls itself
 (directly, through a helper, `getattr`, or as a decorator) is judged like any
-other import-time code. A file is **refused** and left unchanged, never half-migrated, when:
+other import-time code.
+
+By default they also judge the code only an `if __name__ == "__main__":`
+block runs, like any other code: static analysis cannot prove what Python
+runs at import, and the guards fail closed. A script-style test whose
+`main()` loads a helper with `importlib.util.spec_from_file_location` is
+therefore refused, and with it every file that import call may import.
+**`--trust-main-guard`** (opt-in) leaves out the body of an
+`if __name__ == "__main__":` block (either operand order, either quote; not
+its `else`) and the bodies of module-level functions reachable *only* from
+it: when pytest itself imports a test module, it imports it under its module
+name, so that code does not run at collection. The exclusion is
+**best-effort**. It follows the names it can see, and a name computed at run
+time can get past it (a `builtins` alias, `__getattribute__`,
+`runpy.run_module(..., run_name="__main__")` or a `"__main__"` module spec in
+another file), so only use it together with a definitive check: the
+collection check, or `rr migrate verify` against fresh test evidence before
+merging. With the flag, such a function is still judged as usual when anything that may run
+at import time names it (a module-level call, an alias, a `getattr` /
+`globals()` string, a test, a default argument), when it is decorated,
+rebound or named like a test or a hook, or when another file under `--root`
+imports it, passes its module around, reads it from `sys.modules`, or names
+it on a pytest item's `.module` / `.obj`. Nothing in the file is excluded —
+the block included — when the file may rebind `__name__`, when code that may
+run at import looks names up dynamically (`globals()`, `vars()`, `eval`,
+`getattr` with a computed name, `inspect.getmembers`, `__dict__`,
+`sys.modules`, a frame's globals), or when the block launches the tests
+in-process (`pytest.main()`, `unittest.main()`): a Bazel `py_test` whose
+main is the test file runs the block, and whatever it runs before the
+launch runs before collection, in the same interpreter. Nor is anything
+excluded anywhere when another file may reach any module's functions
+without importing it (a computed `sys.modules` read, a frame, `eval` /
+`exec`, a `pytest_pycollect_makeitem` hook, or a computed lookup on a pytest
+item's module). A file is **refused** and left unchanged, never
+half-migrated, when:
 
 - a test in it names several ids and has no decision (`?`, or a test the
   evidence never ran). With `--unassigned drop` such tests lose their tags
@@ -433,8 +477,8 @@ The command also lists, without changing anything:
   results). Edit those by hand so that each case names one id. With `--only`,
   cases outside the given paths are only counted.
 - decided cases whose test declares no id in its source, every decorator and
-  `pytestmark` element around it being one the codemod reads. Their owner is
-  set by `verified_by` in the model.
+  `pytestmark` element around it being one the codemod reads. They count
+  only through `verified_by`: see the edits below.
 - the `verified_by` edits the decisions imply: `remove` (no case of the target
   is left for that requirement) or `split` (the requirement keeps some of the
   target's cases while others went elsewhere). A whole-target reference cannot
@@ -468,9 +512,87 @@ and their encoding.
 `--only PATH` (repeatable) limits the rewrite to files below a path, so several
 pull requests can migrate disjoint directories in parallel from one worksheet.
 
+(migrate-verify)=
+## Verifying with test evidence: `rr migrate verify`
+
+The exact check of a rewrite is the evidence of a real test run. For a Bazel
+project, where collecting the tests locally is impractical (`py_test`
+targets that import through their runfiles, as most do), this is the
+verification path: **apply with `--no-collect-check` (adding
+`--trust-main-guard` only if needed), push, then `rr migrate verify` against
+the CI evidence before merging.** `--trust-main-guard` is needed only when
+apply refuses a file for code that only its `__main__` block runs (a
+script-style test whose `main()` imports a helper by path, say); its
+exclusion is best-effort, and the `verify` run is what checks the result.
+
+```console
+$ rr migrate apply requirements/attribution.rrplan --stage tags --no-collect-check
+$ # only if apply refused a file for code only its __main__ block runs:
+$ rr migrate apply requirements/attribution.rrplan --stage tags --no-collect-check --trust-main-guard
+$ git push    # CI runs the tests; download its bazel-testlogs into ci/
+$ rr migrate verify --worksheet requirements/attribution.rrplan \
+    --evidence ci/bazel-testlogs/ --baseline bazel-testlogs/
+```
+
+Keep each evidence tree in a directory named `bazel-testlogs` (or
+`testlogs`): a `test.xml`'s build target comes from its path
+(`bazel-testlogs/<package>/<name>/test.xml`), so the same files under
+`ci-testlogs/` would be keyed by suite name and match no case of the
+worksheet. `verify` exits 2 with that hint when the worksheet's cases belong
+to build targets and the evidence names none.
+
+It checks, case by case (by {ref}`case key <case-keys>`, so pytest, node,
+`rr_case.h`, googletest and every other evidence rr ingests alike):
+
+- every case the worksheet decides declares **exactly** its owner in the
+  `--evidence` (no id at all for `none`). A decided case with no result there
+  is an error. A decided case that declared no id before the rewrite and
+  declares none after counts only through `verified_by`, which apply does
+  not edit (it lists the `keep` / `remove` / `split` edits): it is listed in
+  a note, not an error. With `--model` (or the model named in the
+  worksheet's `inputs`, when that is still there) the note says whether
+  `verified_by` gives its target exactly its owner, or the case is still
+  pending a model edit (a target split between owners needs case selectors,
+  v0.3); a decided case that declares exactly its owner while `verified_by`
+  still gives its target to other requirements is noted too, since it keeps
+  counting toward them. Without a model, `verify` checks declared ids only.
+  "Before" is the `--baseline` when it has the case, else the worksheet (a
+  group with no `tags` has no tagged case); a tagged case that ends with no
+  id lost its tag and is an error;
+- with `--baseline` (the evidence the worksheet was planned from, or any run
+  from before the rewrite), every other case — undecided, still open, or not
+  on the worksheet — declares the same ids as before (in any order), and no
+  case of the baseline is missing from the new evidence. A target-scope
+  result (a whole run's exit status) carries the union of its cases' ids,
+  which the decisions change: it must still be there, its ids are not
+  compared. Cases only the new evidence has are counted, not refused;
+- `--allow-missing` (a HITL or manual target CI does not run) makes a case
+  with no result — decided or from the baseline — a warning, not verified,
+  when its **target** has no result file at all in the new evidence. A
+  target with any result file ran: a case, a target-scope or Bazel
+  synthetic result, or a `test.xml` that holds no testcase (pytest collected
+  nothing). A case missing from a target that did run stays an error: it was
+  renamed or lost by the rewrite.
+
+It prints one line per offending case, with the ids expected and found, and
+exits 1 on any:
+
+```text
+//pi/server:server_test#pi.server.tests.test_handler::test_configure: a decided case does not declare exactly its owner (expected [PR-11], found [PR-11, PR-13])
+//pi/server:server_test#pi.server.tests.test_session::test_resume: a case of the baseline has no result in the evidence (expected [PR-13], found no result)
+```
+
+Otherwise it exits 0 with a summary on stderr. It exits 2 when the worksheet
+cannot be read or an owner is not one of the ids its case counts toward (with
+`--model`, or the model named in the worksheet's `inputs` when that is still
+there, also when it is not an entity of the model), when `--evidence` or
+`--baseline` holds no evidence at all, or when the worksheet's cases belong
+to build targets and the evidence names none (above). `--format` and `--ingestor` work as for
+`rr cases`.
+
 ## Checking the result
 
-Re-run the tests and the plan:
+Re-run the tests, verify them (above) and re-run the plan:
 
 ```console
 $ bazel test //...

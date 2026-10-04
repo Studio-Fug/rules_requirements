@@ -62,6 +62,7 @@ nothing (:meth:`ApplyResult.to_write`).
 from __future__ import annotations
 
 import ast
+import collections
 import configparser
 import fnmatch
 import importlib
@@ -428,12 +429,26 @@ class TestFile:
 
     __test__ = False
 
-    def __init__(self, text: str, path: str = "<string>", names: TestNames = DEFAULT_NAMES) -> None:
+    def __init__(
+        self,
+        text: str,
+        path: str = "<string>",
+        names: TestNames = DEFAULT_NAMES,
+        reached: Iterable[str] = (),
+        trust_main_guard: bool = False,
+    ) -> None:
         self.text = text
         self.path = path
         self.names = names
+        self.trust_main_guard = trust_main_guard
         self.lines = text.splitlines(keepends=True)
         self.tree = ast.parse(text, filename=path)
+        # Only with ``trust_main_guard`` (opt-in, best-effort): statements
+        # that never run when pytest imports the file (a __main__ block,
+        # functions only it calls); ``reached``: the names other files take
+        # from this one, which may call its functions. By default nothing is
+        # excluded: what only a __main__ block runs is judged like the rest.
+        self._skip = _not_at_import(self.tree, names, reached) if trust_main_guard else set()
         self._aliases()
         self.decls: list[Decl] = []
         self.tests: list[TestFn] = []
@@ -599,6 +614,8 @@ class TestFile:
         while todo:
             node = todo.pop()
             for child in ast.iter_child_nodes(node):
+                if id(child) in self._skip:
+                    continue  # a __main__ block's body: never run under pytest
                 if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     self._hidden_calls.update(id(d) for d in child.decorator_list)
                     if isinstance(child, ast.ClassDef) or self.names.function(child.name):
@@ -699,7 +716,8 @@ class TestFile:
                     found.append((line, arg.value, f"{name}()"))
                 else:
                     found.append((line, "", f"{name}()"))
-            todo.extend((c, how) for c in reversed(list(ast.iter_child_nodes(node))))  # in source order
+            # In source order; a __main__ block's body never runs under pytest.
+            todo.extend((c, how) for c in reversed(list(ast.iter_child_nodes(node))) if id(c) not in self._skip)
         for line, name, how in found:
             if name == "pytestmark":
                 self._opaque(holder, f"line {line}: pytestmark bound by {how}")
@@ -775,6 +793,8 @@ class TestFile:
             todo: list[ast.AST] = [self.tree]
             while todo:
                 node = todo.pop()
+                if id(node) in self._skip:
+                    continue  # never runs at import time
                 if id(node) in cands:
                     fn = cands[id(node)]
                     # Only the parts evaluated when the def is reached.
@@ -822,6 +842,8 @@ class TestFile:
         judged: set[int] = set()  # callees already judged with their call
         while todo:
             node, own, in_fn, post = todo.pop()
+            if id(node) in self._skip:
+                continue  # never runs at import time
             skip: set[int] = set()  # children already queued here
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                 params = node.args
@@ -1031,7 +1053,7 @@ class TestFile:
 
     def _unsupported(self) -> None:
         known = {id(d.call) for d in self.decls}
-        for node in ast.walk(self.tree):
+        for node in _walk(self.tree, self._skip):
             if isinstance(node, ast.Call) and self.is_decl(node) and id(node) not in known:
                 if id(node) in self._hidden_calls:
                     self.problems.append(
@@ -1421,7 +1443,7 @@ def rewrite(tf: TestFile, owners: Mapping[str, Optional[str]], line_length: int 
 
     text = _apply(tf, new, added, line_length)
     text = _drop_unused_imports(text, _names(tf.tree))
-    check = TestFile(text, tf.path, tf.names)
+    check = TestFile(text, tf.path, tf.names, trust_main_guard=tf.trust_main_guard)
     for t in check.tests:
         if t.qualname in want and not _matches(check.trace(t), want[t.qualname]):
             raise Unsupported(f"{t.qualname}: the rewrite would not give {want[t.qualname]} (internal check)")
@@ -1762,6 +1784,343 @@ def _outside_functions(tree: ast.AST) -> Iterable[ast.AST]:
             todo.extend(ast.iter_child_nodes(node))
 
 
+def _main_guard(stmt: ast.stmt) -> bool:
+    """``if __name__ == "__main__":`` (either operand order): a block that
+    runs only when the file is executed as a script, not when pytest imports
+    it under its module name."""
+    if not isinstance(stmt, ast.If) or not isinstance(stmt.test, ast.Compare):
+        return False
+    test = stmt.test
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    sides = [test.left, test.comparators[0]]
+    names = [s.id for s in sides if isinstance(s, ast.Name)]
+    consts = [s.value for s in sides if isinstance(s, ast.Constant)]
+    return names == ["__name__"] and consts == ["__main__"]
+
+
+def _identifiers(nodes: Iterable[ast.AST]) -> set[str]:
+    """Every name ``nodes`` may reach a function by: a loaded name, an
+    attribute, a string constant (``getattr(m, "f")``, ``globals()["f"]``)."""
+    out: set[str] = set()
+    for top in nodes:
+        for node in ast.walk(top):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                out.add(node.id)
+            elif isinstance(node, ast.Attribute):
+                out.add(node.attr)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                out.add(node.value)
+    return out
+
+
+def _walk(tree: ast.AST, skip: set[int]) -> list[ast.AST]:
+    """``ast.walk(tree)`` (breadth first, in its order), not entering the nodes in ``skip``."""
+    out: list[ast.AST] = []
+    todo = collections.deque([tree])
+    while todo:
+        node = todo.popleft()
+        if id(node) not in skip:
+            out.append(node)
+            todo.extend(ast.iter_child_nodes(node))
+    return out
+
+
+# What reaches a module's functions by a name computed at run time, by kind
+# (see _lookups): builtins that run code, builtins that hand out a namespace,
+# lookups by a computed name, and handles to another module's namespace that
+# need no import (frames, gc, inspect.getmodule; a pytest item's .module/.obj).
+_EXEC_BUILTINS = frozenset({"eval", "exec", "compile"})
+_NAMESPACE_BUILTINS = frozenset({"globals", "locals", "vars"})
+_LOOKUP_ATTRS = frozenset({"getmembers", "__dict__", "attrgetter", "methodcaller"})
+_FRAME_ATTRS = frozenset(
+    {"f_globals", "f_locals", "__globals__", "_getframe", "currentframe", "get_objects", "get_referrers", "getmodule"}
+)
+_HOOK_ATTRS = frozenset({"module", "obj", "_obj"})
+_SYS_MODULES_KEYED = frozenset({"get", "pop", "setdefault"})
+
+
+def _parents(nodes: Iterable[ast.AST]) -> dict[int, ast.AST]:
+    return {id(c): n for n in nodes for c in ast.iter_child_nodes(n)}
+
+
+def _sys_modules_key(node: ast.AST, parent: Optional[ast.AST], grand: Optional[ast.AST]) -> Optional[str]:
+    """For a ``sys.modules`` reference ``node``: the module name a read of
+    it names (``sys.modules["m"]``, ``.get("m")``, ``.pop("m")``,
+    ``.setdefault("m", ...)``); "" for a use that reads no module (``in``,
+    a store, a ``del``); None for any other use (it may read any module)."""
+    if isinstance(parent, ast.Compare) and node is not parent.left:
+        membership = all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)  # codespell:ignore
+        return "" if membership else None
+    if isinstance(parent, ast.Subscript) and parent.value is node:
+        if not isinstance(parent.ctx, ast.Load):
+            return ""
+        key = parent.slice
+        return key.value if isinstance(key, ast.Constant) and isinstance(key.value, str) else None
+    if (
+        isinstance(parent, ast.Attribute)
+        and parent.attr in _SYS_MODULES_KEYED
+        and isinstance(grand, ast.Call)
+        and grand.func is parent
+        and grand.args
+        and isinstance(grand.args[0], ast.Constant)
+        and isinstance(grand.args[0].value, str)
+    ):
+        return str(grand.args[0].value)
+    return None
+
+
+def _sys_modules_reads(nodes: Iterable[ast.AST]) -> list[tuple[ast.AST, Optional[str]]]:
+    """Every ``sys.modules`` reference among ``nodes`` (a flat list, as
+    :func:`_walk` gives) that may read a module, with the module name it
+    reads when that is a literal (else None); see :func:`_sys_modules_key`."""
+    nodes = list(nodes)
+    parents = _parents(nodes)
+    sys_names = {"sys"}
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            sys_names |= {a.asname for a in node.names if a.name == "sys" and a.asname}
+    out: list[tuple[ast.AST, Optional[str]]] = []
+    for node in nodes:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "modules"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in sys_names
+        ):
+            parent = parents.get(id(node))
+            key = _sys_modules_key(node, parent, parents.get(id(parent)) if parent is not None else None)
+            if key != "":
+                out.append((node, key))
+    return out
+
+
+def _lookups(nodes: Iterable[ast.AST]) -> dict[str, str]:
+    """What ``nodes`` (a flat list, as :func:`_walk` gives) may reach a
+    function by without naming it, by kind -> the first ``"line N: what"``:
+
+    * ``exec``: ``eval``, ``exec``, ``compile``;
+    * ``namespace``: ``globals()``, ``locals()``, ``vars()`` (this module's);
+    * ``computed``: a lookup by a computed name (``getattr`` with a name
+      that is not a string literal, ``vars(obj)``, ``__dict__``,
+      ``inspect.getmembers``, ``operator.attrgetter`` / ``methodcaller``);
+    * ``frame``: another module's namespace without an import (frames, gc,
+      ``inspect.getmodule``, a ``pytest_pycollect_makeitem`` hook, which is
+      handed every object of a module it collects);
+    * ``hook``: a pytest item's, node's or request's ``.module`` / ``.obj``;
+    * ``modules``: a read of ``sys.modules`` by a computed name, or any
+      other use of it but ``in``, a store, a ``del`` or a literal key."""
+    nodes = list(nodes)
+    literal = set()  # the func of a getattr(obj, "name") call
+    for node in nodes:
+        if isinstance(node, ast.Call) and _dotted(node.func) in ("getattr", "builtins.getattr"):
+            args = node.args
+            if (
+                len(args) >= 2
+                and not any(isinstance(a, ast.Starred) for a in args)
+                and isinstance(args[1], ast.Constant)
+                and isinstance(args[1].value, str)
+            ):
+                literal.add(id(node.func))
+    found: dict[str, str] = {}
+
+    def add(kind: str, node: ast.AST, what: str) -> None:
+        found.setdefault(kind, f"line {getattr(node, 'lineno', '?')}: {what}")
+
+    for node in nodes:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "pytest_pycollect_makeitem":
+            add("frame", node, node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in _EXEC_BUILTINS:
+                add("exec", node, node.id)
+            elif node.id in _NAMESPACE_BUILTINS:
+                add("namespace", node, f"{node.id}()")
+            elif node.id == "getattr" and id(node) not in literal:
+                add("computed", node, "getattr by a computed name")
+        elif isinstance(node, ast.Call) and _dotted(node.func) == "vars" and (node.args or node.keywords):
+            add("computed", node, "vars(...)")
+        elif isinstance(node, ast.Attribute):
+            if node.attr in _LOOKUP_ATTRS:
+                add("computed", node, node.attr)
+            elif node.attr == "getattr" and _dotted(node) == "builtins.getattr" and id(node) not in literal:
+                add("computed", node, "getattr by a computed name")
+            elif node.attr in _FRAME_ATTRS:
+                add("frame", node, node.attr)
+            elif node.attr in _HOOK_ATTRS:
+                add("hook", node, node.attr)
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name in _LOOKUP_ATTRS or a.name == "getattr" or a.name in _NAMESPACE_BUILTINS:
+                    add("computed", node, f"from {node.module} import {a.name}")
+                elif a.name in _FRAME_ATTRS:
+                    add("frame", node, f"from {node.module} import {a.name}")
+                elif node.module == "sys" and a.name == "modules":
+                    add("modules", node, "from sys import modules")
+    for node, key in _sys_modules_reads(nodes):
+        if key is None:
+            add("modules", node, "sys.modules")
+    return found
+
+
+# A file's own code that runs at import, using one of these: a __main__-only
+# function may run at import.
+_LOCAL_LOOKUPS = ("exec", "namespace", "computed", "frame", "modules")
+
+
+def _reaches_any(lookups: Mapping[str, str]) -> str:
+    """Whether another file's code (``lookups``, see :func:`_lookups`) may
+    reach any module's functions without importing it: why, else ""."""
+    for kind in ("exec", "modules", "frame"):
+        if kind in lookups:
+            return lookups[kind]
+    if "computed" in lookups and "hook" in lookups:
+        return f"{lookups['computed']} ({lookups['hook']})"
+    return ""
+
+
+def _rebinds_name(tree: ast.AST) -> bool:
+    """Whether anything in ``tree`` may rebind the module's ``__name__``
+    (an assignment, ``global``, an import ``as``, ``__name__=`` keyword, an
+    attribute store, or the string ``"__name__"`` as a key or setattr
+    name): then a ``__main__`` block may run at import."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "__name__" and not isinstance(node.ctx, ast.Load):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "__name__" and not isinstance(node.ctx, ast.Load):
+            return True
+        if isinstance(node, ast.Constant) and node.value == "__name__":
+            return True
+        if isinstance(node, ast.keyword) and node.arg == "__name__":
+            return True
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and "__name__" in node.names:
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and any(
+            (a.asname or a.name).split(".")[0] == "__name__" for a in node.names
+        ):
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "__name__":
+            return True
+    return False
+
+
+def _launchers(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The local names of the modules that run tests in-process (``pytest``,
+    ``unittest``), and of their ``main`` functions imported by name."""
+    mods: set[str] = set()
+    funcs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            mods |= {a.asname or a.name for a in node.names if a.name in ("pytest", "unittest")}
+        elif isinstance(node, ast.ImportFrom) and node.module in ("pytest", "unittest") and not node.level:
+            funcs |= {a.asname or a.name for a in node.names if a.name in ("main", "TextTestRunner")}
+    return mods, funcs
+
+
+def _launches(nodes: Iterable[ast.AST], mods: set[str], funcs: set[str]) -> bool:
+    """Whether ``nodes`` run tests in-process (``pytest.main()``,
+    ``unittest.main()``, a ``TextTestRunner``)."""
+    for top in nodes:
+        for node in ast.walk(top):
+            if isinstance(node, ast.Call):
+                f = node.func
+                if isinstance(f, ast.Name) and f.id in funcs:
+                    return True
+                if (
+                    isinstance(f, ast.Attribute)
+                    and f.attr in ("main", "TextTestRunner")
+                    and isinstance(f.value, ast.Name)
+                    and f.value.id in mods
+                ):
+                    return True
+    return False
+
+
+def _not_at_import(tree: ast.Module, names: TestNames = DEFAULT_NAMES, reached: Iterable[str] = ()) -> set[int]:
+    """The ids of the statements of ``tree`` that never run when pytest
+    imports it: the bodies of its ``if __name__ == "__main__":`` blocks (not
+    their ``else``), and the bodies of the module-level functions reachable
+    ONLY from them.
+
+    Such a function is a plain module-level ``def`` (no decorator), the only
+    binding of its name in the file, not named like a test, a fixture or
+    setup/teardown hook, a ``pytest_*`` hook or a dunder, not among
+    ``reached`` (the names other scanned files may reach in this one, see
+    :class:`_Index`; ``"*"``: any), referenced from a ``__main__`` block
+    (directly or through another such function) and referenced by name,
+    attribute or string nowhere else that may run at import time. Its
+    decorators, defaults and annotations run when the def is reached and
+    are never excluded.
+
+    Nothing is excluded (fail closed) when the file may rebind
+    ``__name__``, when code that may run at import looks names up
+    dynamically (:func:`_lookups`), or when the excluded code runs
+    tests in-process (``pytest.main()``, ``unittest.main()``): the file is
+    then a py_test's launcher, and what runs before the launch runs before
+    collection, in the same interpreter.
+
+    Only ``--trust-main-guard`` (``trust_main_guard=True``) uses this: it
+    is best-effort. A name computed at run time (``__getattribute__``, a
+    ``builtins`` alias, ``runpy.run_module(..., run_name="__main__")`` in
+    another file, ...) can still reach an excluded function at import, and
+    static analysis cannot prove it does not, so the exclusion is opt-in
+    and needs a definitive check after it (the collection check, or ``rr
+    migrate verify`` against fresh test evidence)."""
+    blocks = [s for s in tree.body if isinstance(s, ast.If) and _main_guard(s)]
+    if not blocks or _rebinds_name(tree):
+        return set()
+    main_body = [s for b in blocks for s in b.body]
+    reached = set(reached)
+    bound: dict[str, int] = {}
+    for node in ast.walk(tree):
+        found: list[str] = []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found = [node.name]
+        elif isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            found = [node.id]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            found = [(a.asname or a.name).split(".")[0] for a in node.names]
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            found = list(node.names)
+        for n in found:
+            bound[n] = bound.get(n, 0) + 1
+    cands: dict[str, _FuncDef] = {}
+    if "*" not in reached:
+        for stmt in tree.body:
+            if (
+                isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and not stmt.decorator_list
+                and bound.get(stmt.name) == 1
+                and stmt.name not in reached
+                and not names.any(stmt.name)
+                and stmt.name not in _POST_COLLECTION_HOOKS
+                and not stmt.name.startswith("pytest_")
+                and not (stmt.name.startswith("__") and stmt.name.endswith("__"))
+            ):
+                cands[stmt.name] = stmt
+    while True:
+        skip = {id(s) for s in main_body} | {id(s) for fn in cands.values() for s in fn.body}
+        at_import = _walk(tree, skip)
+        lookups = _lookups(at_import)
+        if any(k in lookups for k in _LOCAL_LOOKUPS):
+            return set()
+        used = {n.id for n in at_import if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        used |= {n.attr for n in at_import if isinstance(n, ast.Attribute)}
+        used |= {n.value for n in at_import if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        # Reached from a __main__ block, directly or through other candidates.
+        seen: set[str] = set()
+        frontier = _identifiers(main_body)
+        while frontier:
+            hit = [n for n in frontier if n in cands and n not in seen]
+            seen.update(hit)
+            frontier = _identifiers(s for n in hit for s in cands[n].body)
+        keep = {n: fn for n, fn in cands.items() if n in seen and n not in used}
+        if len(keep) == len(cands):
+            if _launches(main_body + [s for fn in cands.values() for s in fn.body], *_launchers(tree)):
+                return set()
+            return skip
+        cands = keep
+
+
 class _Index:
     """Every scanned Python file's imports and base classes, resolved to the
     other scanned files they name: who imports or subclasses what.
@@ -1778,10 +2137,17 @@ class _Index:
     resolve statically (a name bound by an assignment or a def, such as
     ``B = importlib.import_module(m).C``, or an expression such as
     ``getattr(m, "C")``) is ``unknown``: it may be any class. Files that do
-    not parse are ``unparsed``."""
+    not parse are ``unparsed``.
 
-    def __init__(self, texts: Mapping[str, str], names: TestNames = DEFAULT_NAMES) -> None:
+    With ``trust_main_guard`` (opt-in) the code of a file that never runs
+    when pytest imports it (:func:`_not_at_import`) is left out of the scan;
+    by default every statement is scanned."""
+
+    def __init__(
+        self, texts: Mapping[str, str], names: TestNames = DEFAULT_NAMES, trust_main_guard: bool = False
+    ) -> None:
         self.names = names
+        self.trust_main_guard = trust_main_guard
         self.parts: dict[str, list[str]] = {}
         self.trees: dict[str, ast.Module] = {}
         self.unparsed: dict[str, str] = {}
@@ -1806,8 +2172,42 @@ class _Index:
         self.unknown: dict[str, list[tuple[int, str, str]]] = {}  # file -> (line, class, base) not resolved
         self.local_bases: dict[str, set[str]] = {}  # file -> its classes another class of it subclasses
         self.dynamic: dict[str, list[tuple[int, str]]] = {}  # file -> (line, call) importing it cannot name
-        for rel in self.trees:
-            self._scan(rel)
+        # file -> statements that never run when pytest imports it (_not_at_import),
+        # and the names other files may reach in it (which may call its functions).
+        self.skip: dict[str, set[int]] = {
+            rel: _not_at_import(tree, names) if trust_main_guard else set() for rel, tree in self.trees.items()
+        }
+        self.reached: dict[str, set[str]] = {}
+        # file -> the names its code may reach a function of another file by
+        # without importing it (with a pytest item's .module / .obj: an
+        # attribute of an object it was handed, a string), and why it may
+        # reach any ("": it may not; see _reaches_any).
+        self.exposed: dict[str, set[str]] = {}
+        self.lookup: dict[str, str] = {}
+        todo = set(self.trees)
+        while todo:
+            for rel in sorted(todo):
+                self._scan(rel)
+            # A pytest hook may call ``getattr(item.module, "main")()`` without
+            # importing m: every such name may reach any file (a computed one,
+            # sys.modules or a frame: anything). sys.modules["m"] is resolved
+            # like an import of m.
+            anywhere = {n for names_ in self.exposed.values() for n in names_}
+            if any(self.lookup.values()):
+                anywhere.add("*")
+            reached: dict[str, set[str]] = {rel: set(anywhere) for rel in self.trees}
+            for refs in self.refs.values():
+                for f, used in refs.items():
+                    reached.setdefault(f, set()).update(used)
+            todo = set()
+            for rel, tree in self.trees.items():
+                if trust_main_guard and reached.get(rel, set()) != self.reached.get(rel, set()):
+                    skip = _not_at_import(tree, names, reached.get(rel, ()))
+                    if skip != self.skip[rel]:
+                        # Another file may call a function excluded so far: judge its body.
+                        self.skip[rel] = skip
+                        todo.add(rel)
+            self.reached = reached
         self.importers: dict[str, dict[str, set[str]]] = {}  # imported file -> importer -> names
         for g, refs in self.refs.items():
             for f, used in refs.items():
@@ -1840,6 +2240,7 @@ class _Index:
 
     def _scan(self, rel: str) -> None:
         tree = self.trees[rel]
+        nodes = _walk(tree, self.skip.get(rel, set()))
         refs: dict[str, set[str]] = {}
         binds: dict[str, list[tuple[str, str]]] = {}
         aliases: dict[str, list[str]] = {}  # local module spelling -> files
@@ -1848,7 +2249,7 @@ class _Index:
             if f != rel:
                 refs.setdefault(f, set()).add(name)
 
-        for node in ast.walk(tree):
+        for node in nodes:
             if isinstance(node, ast.Import):
                 for a in node.names:
                     mod = a.name.split(".")
@@ -1874,7 +2275,7 @@ class _Index:
         # Imports by a call: a constant module name resolves like an import
         # of the module object; anything else may import any file.
         dynamic: list[tuple[int, str]] = []
-        for node in ast.walk(tree):
+        for node in nodes:
             if not isinstance(node, ast.Call):
                 continue
             name = _dotted(node.func)
@@ -1908,7 +2309,27 @@ class _Index:
                     continue  # eval cannot run an import statement; a literal naming one is caught
                 dynamic.append((node.lineno, ast.unparse(node)))
         values = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
-        for node in ast.walk(tree):
+        # Code holding a pytest item's .module / .obj may name any function
+        # of the module: by an attribute of an object it was handed, or by a
+        # string (getattr(item.module, "main")).
+        lookups = _lookups(nodes)
+        exposed: set[str] = set()
+        for node in nodes if "hook" in lookups else ():
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.isidentifier():
+                exposed.add(node.value)
+            elif isinstance(node, ast.Attribute):
+                root = node.value
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if not (isinstance(root, ast.Name) and root.id in aliases):
+                    exposed.add(node.attr)  # not a module it imports (resolved below)
+        self.exposed[rel] = exposed
+        self.lookup[rel] = _reaches_any(lookups)
+        for _node, key in _sys_modules_reads(nodes):
+            for f in self.resolve(key.split("."), rel, 0) if key else ():
+                for g in self.package(f):
+                    add(g, "*")  # sys.modules["m"]: the module object itself
+        for node in nodes:
             if isinstance(node, ast.Attribute):
                 head, _, attr = _dotted(node).rpartition(".")
                 for f in aliases.get(head, ()):
@@ -1938,7 +2359,7 @@ class _Index:
         bases = []
         unknown = []
         local_bases: set[str] = set()
-        for node in ast.walk(tree):
+        for node in nodes:
             if not isinstance(node, ast.ClassDef):
                 continue
             for b in node.bases:
@@ -1960,6 +2381,8 @@ class _Index:
         self.local_bases[rel] = local_bases
         if dynamic:
             self.dynamic[rel] = dynamic
+        else:
+            self.dynamic.pop(rel, None)
 
     def _base(
         self,
@@ -2216,6 +2639,7 @@ def apply_tags(
     line_length: int = 88,
     names: Optional[TestNames] = None,
     files_of: Optional[Mapping[CaseKey, str]] = None,
+    trust_main_guard: bool = False,
 ) -> ApplyResult:
     """Rewrite the Python tests under ``root`` per the worksheet's decisions
     (``CaseKey -> id | "none" | "?"``). Nothing is written; the caller writes
@@ -2233,7 +2657,15 @@ def apply_tags(
     only to the source its evidence names when ``files_of`` (``CaseKey ->
     rr.file``, as the worksheet's case rows carry it) knows one: a C++ or
     Rust case whose path merely reads like a Python module, or a case of a
-    record, is "not a Python test" and left alone."""
+    record, is "not a Python test" and left alone.
+
+    ``trust_main_guard`` (opt-in, default off): leave out of the static
+    guards the code only an ``if __name__ == "__main__":`` block runs
+    (``_not_at_import``). That exclusion is best-effort -- static
+    analysis cannot prove what Python runs at import -- so only use it
+    together with a definitive check (the collection check, or ``rr migrate
+    verify`` against fresh test evidence before merging). By default that
+    code is judged like any other."""
     result = ApplyResult()
     names = test_names(root) if names is None else names
     only = list(only)
@@ -2253,7 +2685,9 @@ def apply_tags(
         return texts.get(rel)
 
     everything = python_files(root)
-    index = _Index({rel: text for rel in everything for text in [read(rel)] if text is not None}, names)
+    index = _Index(
+        {rel: text for rel in everything for text in [read(rel)] if text is not None}, names, trust_main_guard
+    )
     unreadable.update(index.unparsed)
     result.depends = index.depends()
 
@@ -2270,7 +2704,7 @@ def apply_tags(
             newline[rel] = "\r\n"
             text = text.replace("\r\n", "\n")
         try:
-            tf = TestFile(text, rel, names)
+            tf = TestFile(text, rel, names, index.reached.get(rel, ()), trust_main_guard)
         except SyntaxError as exc:
             unreadable[rel] = f"syntax error: {exc}"
             return None
@@ -2463,7 +2897,15 @@ def apply_tags(
         },
     )
     result.files.sort(key=lambda f: f.path)
-    _recheck(result, decided, keys, {f.path: rewritten[f.path] for f in result.changed}, unassigned, names)
+    _recheck(
+        result,
+        decided,
+        keys,
+        {f.path: rewritten[f.path] for f in result.changed},
+        unassigned,
+        names,
+        trust_main_guard,
+    )
     return result
 
 
@@ -2474,13 +2916,14 @@ def _recheck(
     rewritten: Mapping[str, str],
     unassigned: str,
     names: TestNames = DEFAULT_NAMES,
+    trust_main_guard: bool = False,
 ) -> None:
     """Re-derive each decided case's attribution from the rewritten sources,
     with the same static resolver, and compare it with the worksheet."""
     untagged = set(result.untagged)
     for rel, text in sorted(rewritten.items()):
         try:
-            tf = TestFile(text, rel, names)
+            tf = TestFile(text, rel, names, trust_main_guard=trust_main_guard)
             traces = {t.qualname: tf.trace(t) for t in tf.tests}
         except (SyntaxError, Unsupported) as exc:
             for (path, _), ks in keys.items():

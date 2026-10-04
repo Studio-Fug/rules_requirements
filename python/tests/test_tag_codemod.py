@@ -1898,3 +1898,352 @@ def test_only_pytest_test_modules_and_the_named_source_resolve(tmp_path):
     res = tag_codemod.apply_tags({other: "REQ-2"}, str(tmp_path), files_of={other: "app/other/test_config.py"})
     assert "app/other/test_config.py, which is not a scanned pytest test module" in dict(res.unresolved)[other]
     assert res.changed == []
+
+
+# The shape of a script-style test module (splanc's improv_codec_test.py): an
+# import call inside a helper that only main() calls, and main() called only
+# from the ``if __name__ == "__main__":`` block. pytest imports the module
+# under its module name, so none of that runs at collection -- unless a name
+# computed at run time reaches it, which static analysis cannot rule out. So
+# by default it is judged like any other code (refused, as in v0.2.0), and
+# only trust_main_guard (--trust-main-guard) leaves it out, best-effort.
+_SCRIPT_TEST = (
+    '"""Run: python3 pkg/codec_test.py"""\n\n'
+    "import importlib.util\nimport pathlib\nimport sys\n\n"
+    "HERE = pathlib.Path(__file__).resolve().parent\n\n\n"
+    "def _load_onboard():\n"
+    '    path = HERE.parents[1] / "tools" / "onboard.py"\n'
+    '    spec = importlib.util.spec_from_file_location("onboard", path)\n'
+    "    mod = importlib.util.module_from_spec(spec)\n"
+    "    spec.loader.exec_module(mod)\n"
+    "    return mod\n\n\n"
+    "def main() -> int:\n"
+    "    ob = _load_onboard()\n"
+    "    assert ob is not None\n"
+    "    return 0\n\n\n"
+    "GUARD\n"
+    "    sys.exit(main())\n"
+)
+_SCRIPT_DECIDED = {
+    CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_x"): "A",
+    CaseKey("//pkg:t", "pkg.test_base.BaseCase::test_y"): "A",
+}
+
+
+def _script_repo(tmp_path, script, others=None, trust_main_guard=False):
+    _repo(tmp_path, "pkg/__init__.py", "")
+    _repo(tmp_path, "pkg/test_base.py", _UNITTEST_BASE)
+    _repo(tmp_path, "pkg/codec_test.py", script)
+    for rel, text in (others or {}).items():
+        _repo(tmp_path, rel, text)
+    return tag_codemod.apply_tags(_SCRIPT_DECIDED, str(tmp_path), trust_main_guard=trust_main_guard)
+
+
+def _assert_script_refused(res):
+    refused = {f.path: f.reasons for f in res.refused}
+    assert "pkg/codec_test.py" in refused and "pkg/test_base.py" in refused, res.files
+    assert any("spec_from_file_location" in r for r in refused["pkg/codec_test.py"]), refused
+    assert res.to_write(partial=True) == []
+
+
+@pytest.mark.parametrize(
+    "guard",
+    ['if __name__ == "__main__":', 'if "__main__" == __name__:', "if __name__ == '__main__':"],
+    ids=["name-first", "main-first", "single-quotes"],
+)
+def test_an_import_call_only_a_main_block_reaches_refuses_by_default(tmp_path, guard):
+    """By default the static guards judge a __main__ block and what only it
+    reaches like any other code (as v0.2.0 did): fail closed."""
+    _assert_script_refused(_script_repo(tmp_path, _SCRIPT_TEST.replace("GUARD", guard)))
+
+
+@pytest.mark.parametrize(
+    "guard",
+    ['if __name__ == "__main__":', 'if "__main__" == __name__:', "if __name__ == '__main__':"],
+    ids=["name-first", "main-first", "single-quotes"],
+)
+def test_an_import_call_only_a_main_block_reaches_applies_with_trust_main_guard(tmp_path, guard):
+    """With trust_main_guard the static guards leave out the __main__ block
+    and the functions only it reaches, which never run under pytest."""
+    res = _script_repo(tmp_path, _SCRIPT_TEST.replace("GUARD", guard), trust_main_guard=True)
+    assert [f.path for f in res.to_write()] == ["pkg/test_base.py"] and not res.blocked, res.files
+    assert "pkg/codec_test.py" not in {f.path for f in res.refused}
+
+
+@pytest.mark.parametrize(
+    "script, others",
+    [
+        # main() also runs at import time, so _load_onboard does too.
+        (_SCRIPT_TEST.replace("GUARD", 'main()\n\nif __name__ == "__main__":'), {}),
+        # The else branch of the guard runs under pytest.
+        (_SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":\n    pass\nelse:'), {}),
+        # A module-level reference that may call it (by name, attribute or string).
+        (_SCRIPT_TEST.replace("GUARD", 'ENTRY = main\n\nif __name__ == "__main__":'), {}),
+        (_SCRIPT_TEST.replace("GUARD", 'ENTRY = globals()["_load_onboard"]\n\nif __name__ == "__main__":'), {}),
+        # A test reaches the helper too.
+        (
+            _SCRIPT_TEST.replace("GUARD", 'def test_onboard():\n    _load_onboard()\n\n\nif __name__ == "__main__":'),
+            {},
+        ),
+        # A default argument is evaluated when the def is reached.
+        (_SCRIPT_TEST.replace("GUARD", 'def helper(x=main()):\n    pass\n\n\nif __name__ == "__main__":'), {}),
+        # Not a __main__ guard.
+        (_SCRIPT_TEST.replace("GUARD", 'if __name__ != "__main__":'), {}),
+        # Another scanned file takes main from it, and may call it at its import.
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {"pkg/test_other.py": "from pkg.codec_test import main\n\nmain()\n"},
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {"pkg/test_other.py": "import pkg.codec_test as c\n\nc.main()\n"},
+        ),
+        # __name__ rebound: the guard itself may run at import.
+        (_SCRIPT_TEST.replace("GUARD", '__name__ = "__main__"\n\nif __name__ == "__main__":'), {}),
+        (_SCRIPT_TEST.replace("GUARD", 'globals()["__name__"] = "__main__"\n\nif __name__ == "__main__":'), {}),
+        # A lookup by a computed name at import time may reach any function.
+        (_SCRIPT_TEST.replace("GUARD", 'globals()["ma" + "in"]()\n\nif __name__ == "__main__":'), {}),
+        (
+            _SCRIPT_TEST.replace(
+                "GUARD",
+                "for _n, _f in list(globals().items()):\n"
+                '    if _n.startswith("_lo"):\n'
+                "        _f()\n\n"
+                'if __name__ == "__main__":',
+            ),
+            {},
+        ),
+        (_SCRIPT_TEST.replace("GUARD", 'eval("ma" + "in")()\n\nif __name__ == "__main__":'), {}),
+        (
+            _SCRIPT_TEST.replace(
+                "GUARD", 'getattr(sys.modules[__name__], "ma" + "in")()\n\nif __name__ == "__main__":'
+            ),
+            {},
+        ),
+        (
+            _SCRIPT_TEST.replace(
+                "GUARD",
+                "import inspect\n\n"
+                "for _n, _f in inspect.getmembers(sys.modules[__name__], inspect.isfunction):\n"
+                '    if _n.startswith("_lo"):\n'
+                "        _f()\n\n"
+                'if __name__ == "__main__":',
+            ),
+            {},
+        ),
+        (_SCRIPT_TEST.replace("GUARD", 'sys._getframe(0).f_globals["ma" + "in"]()\n\nif __name__ == "__main__":'), {}),
+        # Another file reaches it without importing it: sys.modules, a
+        # pytest item's module (by name or by a computed name), a
+        # pytest_pycollect_makeitem hook handed every object of the module.
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {"pkg/test_other.py": "import sys\n\nsys.modules['pkg.codec_test'].main()\n"},
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {
+                "pkg/conftest.py": "import sys\n\n\ndef pytest_collection_modifyitems(items):\n"
+                "    sys.modules['pkg.codec_test'].main()\n"
+            },
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {
+                "pkg/conftest.py": "def pytest_collection_modifyitems(items):\n"
+                "    for it in items:\n"
+                "        getattr(it.module, 'main')()\n"
+            },
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {
+                "pkg/conftest.py": "def pytest_collection_modifyitems(items):\n"
+                "    for it in items:\n"
+                "        getattr(it.module, 'ma' + 'in')()\n"
+            },
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {
+                "pkg/conftest.py": "import sys\n\n\ndef pytest_collection_modifyitems(items):\n"
+                "    for name, mod in list(sys.modules.items()):\n"
+                "        if name.endswith('_test'):\n"
+                "            mod.main()\n"
+            },
+        ),
+        (
+            _SCRIPT_TEST.replace("GUARD", 'if __name__ == "__main__":'),
+            {
+                "pkg/conftest.py": "def pytest_pycollect_makeitem(collector, name, obj):\n"
+                "    if name.startswith('_lo'):\n"
+                "        obj()\n"
+            },
+        ),
+        # The block launches the tests in-process (a py_test whose main is the
+        # file): what runs before the launch runs before collection.
+        (
+            _SCRIPT_TEST.replace(
+                "GUARD", 'if __name__ == "__main__":\n    main()\n    pytest.main([__file__])'
+            ).replace("import sys\n", "import sys\n\nimport pytest\n"),
+            {},
+        ),
+        (
+            _SCRIPT_TEST.replace(
+                "GUARD", 'if __name__ == "__main__":\n    _load_onboard()\n    unittest.main()'
+            ).replace("import sys\n", "import sys\nimport unittest\n"),
+            {},
+        ),
+    ],
+    ids=[
+        "main-called-at-module-level",
+        "else-branch",
+        "aliased",
+        "globals-string",
+        "called-by-a-test",
+        "default-argument",
+        "not-main",
+        "imported-by-another-file",
+        "module-passed-around",
+        "name-rebound",
+        "name-rebound-via-globals",
+        "globals-computed-name",
+        "globals-iterated",
+        "eval",
+        "getattr-computed-name",
+        "inspect-getmembers",
+        "frame-globals",
+        "other-file-sys-modules",
+        "conftest-sys-modules",
+        "conftest-item-module",
+        "conftest-item-module-computed",
+        "conftest-sys-modules-iterated",
+        "conftest-pycollect-makeitem",
+        "pytest-main-launcher",
+        "unittest-main-launcher",
+    ],
+)
+@pytest.mark.parametrize("trust_main_guard", [False, True], ids=["default", "trust-main-guard"])
+def test_an_import_call_also_reached_at_import_time_still_refuses(tmp_path, script, others, trust_main_guard):
+    """Refused by default, and the hardened exclusion still refuses each
+    with trust_main_guard."""
+    _assert_script_refused(_script_repo(tmp_path, script, others, trust_main_guard))
+
+
+_G = 'if __name__ == "__main__":'
+
+
+# Shapes that run main() (or the guard's body) at import time and that the
+# best-effort exclusion does NOT see: refused only because the exclusion is
+# off by default. trust_main_guard lets them through, which is why it needs
+# a definitive check after it.
+@pytest.mark.parametrize(
+    "guard, others",
+    [
+        ('import builtins\n\nbuiltins.globals()["ma" + "in"]()\n\n' + _G, {}),
+        ('import builtins\n\nbuiltins.eval("ma" + "in")()\n\n' + _G, {}),
+        ('__builtins__["ev" + "al"]("ma" + "in")()\n\n' + _G, {}),
+        ('import pkg.codec_test as _me\n\n_me.__getattribute__("ma" + "in")()\n\n' + _G, {}),
+        ('__import__("pkg.codec_test", fromlist=["x"]).__getattribute__("ma" + "in")()\n\n' + _G, {}),
+        ('object.__getattribute__(sys.modules.get("pkg.codec_test"), "ma" + "in")()\n\n' + _G, {}),
+        (_G, {"pkg/test_other.py": "import pkg.codec_test as c\n\nc.__getattribute__('ma' + 'in')()\n"}),
+        (_G, {"pkg/test_other.py": "import pkg.codec_test as c\n\nc.__dict__['ma' + 'in']()\n"}),
+        (
+            _G,
+            {
+                "pkg/conftest.py": "def pytest_collection_modifyitems(items):\n"
+                "    for it in items:\n"
+                "        it.module.__getattribute__('ma' + 'in')()\n"
+            },
+        ),
+        (_G, {"pkg/test_other.py": "import runpy\n\nrunpy.run_path('pkg/codec_test.py', run_name='__main__')\n"}),
+        (_G, {"pkg/test_other.py": "import runpy\n\nrunpy.run_module('pkg.codec_test', run_name='__main__')\n"}),
+        (
+            _G,
+            {
+                "pkg/test_other.py": "import importlib.util\n\n"
+                "_s = importlib.util.spec_from_file_location('__main__', 'pkg/codec_test.py')\n"
+                "_m = importlib.util.module_from_spec(_s)\n"
+                "_s.loader.exec_module(_m)\n"
+            },
+        ),
+    ],
+    ids=[
+        "builtins-globals",
+        "builtins-eval",
+        "dunder-builtins-eval",
+        "self-import-getattribute",
+        "dunder-import-getattribute",
+        "object-getattribute",
+        "other-getattribute",
+        "other-dict",
+        "conftest-hook-getattribute",
+        "other-runpy-path",
+        "other-runpy-module",
+        "other-spec-main",
+    ],
+)
+def test_a_main_only_function_reached_by_a_computed_name_refuses_by_default(tmp_path, guard, others):
+    _assert_script_refused(_script_repo(tmp_path, _SCRIPT_TEST.replace("GUARD", guard), others))
+
+
+@pytest.mark.parametrize(
+    "guard, others",
+    [
+        # sys.modules tested or written, not read, at import time.
+        ('if "bleak" not in sys.modules:\n    sys.modules["bleak"] = sys\n\nif __name__ == "__main__":', {}),
+        # Another file reads a module of sys.modules by a literal name: not this one.
+        ('if __name__ == "__main__":', {"pkg/test_other.py": "import sys\n\nE = sys.modules['bleak.exc'].E\n"}),
+        # Another file names a "main" without a handle on this module.
+        (
+            'if __name__ == "__main__":',
+            {"pkg/test_other.py": "BRANCH = 'main'\n\n\ndef test_x(app):\n    app.main()\n"},
+        ),
+        # The guard's body is not a launcher: unittest.main elsewhere is not run here.
+        (
+            'if __name__ == "__main__":',
+            {"pkg/test_other.py": "import unittest\n\nif __name__ == '__main__':\n    unittest.main()\n"},
+        ),
+    ],
+    ids=["sys-modules-written", "other-reads-another-module", "other-names-main", "other-launcher"],
+)
+def test_what_cannot_reach_a_main_only_function_does_not_refuse(tmp_path, guard, others):
+    """With trust_main_guard only; by default the __main__ code is judged."""
+    res = _script_repo(tmp_path, _SCRIPT_TEST.replace("GUARD", guard), others, trust_main_guard=True)
+    assert "pkg/codec_test.py" not in {f.path for f in res.refused}, res.files
+    assert "pkg/test_base.py" in [f.path for f in res.to_write()] and not res.blocked, res.files
+    _assert_script_refused(_script_repo(tmp_path, _SCRIPT_TEST.replace("GUARD", guard), others))
+
+
+def test_bindings_a_main_block_makes_refuse_by_default():
+    """By default a test name bound in a __main__ block, or by a function
+    only it calls, is judged like any other binding."""
+    head = 'import sys\n\nimport pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n\n\n'
+    helper = 'def install():\n    setattr(sys.modules[__name__], "test_z", test_a)\n\n\n'
+    main = 'if __name__ == "__main__":\n    globals()["test_y"] = test_a\n    install()\n'
+    blind = " ".join(TestFile(head + helper + main).scope_blind.values())
+    assert "test_z is bound by setattr()" in blind or "test_y is bound by an item assignment" in blind, blind
+
+
+def test_bindings_a_main_block_makes_do_not_refuse_with_trust_main_guard():
+    """With trust_main_guard, a test name bound in a __main__ block, or by a
+    function only it calls, is never bound under pytest; the same binding at
+    import time still is."""
+    head = 'import sys\n\nimport pytest\n\npytestmark = pytest.mark.rr("A", "B")\n\n\ndef test_a():\n    pass\n\n\n'
+    helper = 'def install():\n    setattr(sys.modules[__name__], "test_z", test_a)\n\n\n'
+    main = 'if __name__ == "__main__":\n    globals()["test_y"] = test_a\n    install()\n'
+    tf = TestFile(head + helper + main, trust_main_guard=True)
+    assert not tf.scope_blind and not tf.problems, tf.scope_blind
+    # Called at import time, install reads sys.modules there: nothing is
+    # excluded, the __main__ block's binding included (fail closed).
+    tf = TestFile(head + helper + "install()\n\n" + main, trust_main_guard=True)
+    blind = " ".join(tf.scope_blind.values())
+    assert "test_z is bound by setattr()" in blind or "test_y is bound by an item assignment" in blind, blind
+    tf = TestFile(
+        head + helper + 'if __name__ == "__main__":\n    pass\nelse:\n    globals()["test_y"] = test_a\n',
+        trust_main_guard=True,
+    )
+    assert any("test_y is bound by an item assignment" in why for why in tf.scope_blind.values()), tf.scope_blind
+    # Taken by another file (which may call it at its own import): judged.
+    tf = TestFile(head + helper + main, reached=["install"], trust_main_guard=True)
+    blind = " ".join(tf.scope_blind.values())
+    assert "test_z is bound by setattr()" in blind or "test_y is bound by an item assignment" in blind, blind
