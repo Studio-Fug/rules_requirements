@@ -15,18 +15,20 @@ Unblocks applying a worksheet in Bazel projects.
 - `rr migrate verify`: checks the test evidence of a run after
   `rr migrate apply` against the worksheet — every decided case declares
   exactly its owner; with `--baseline`, every other case keeps its ids and
-  none disappears (`--allow-missing` for targets CI does not run). The
+  none disappears (`--allow-missing` for targets CI does not run: a target
+  with any result file, an empty `test.xml` included, ran). The
   verification path where the collection check cannot run (Bazel `py_test`s):
-  apply with `--no-collect-check`, push, verify against the CI evidence.
-
-### Fixed
-
-- `rr migrate apply`: the static guards skip the `if __name__ == "__main__":`
-  block and the functions only it reaches, which never run when pytest
-  imports the module; an import call in a script-style test's `main()` no
-  longer refuses every file. Nothing is skipped when the file may rebind
-  `__name__`, looks names up dynamically at import, or launches its tests
-  in-process from the block.
+  apply with `--no-collect-check` (and `--trust-main-guard` only if needed),
+  push, verify against the CI evidence before merging.
+- `rr migrate apply --trust-main-guard` (opt-in): the static guards skip the
+  `if __name__ == "__main__":` block and the functions only it reaches,
+  which never run when pytest imports the module, so an import call in a
+  script-style test's `main()` no longer refuses every file. Best-effort
+  (static analysis cannot prove what runs at import): use it only with the
+  collection check or `rr migrate verify` against fresh evidence. Without
+  the flag, apply judges that code like any other, as 0.2.0 does. Even with
+  it, nothing is skipped when the file may rebind `__name__`, looks names up
+  dynamically at import, or launches its tests in-process from the block.
 
 ## 0.2.0 (2026-10-04)
 

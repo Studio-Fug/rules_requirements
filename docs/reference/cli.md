@@ -32,11 +32,18 @@ unreadable or an owner is not one of the ids its case counts toward.
 `migrate verify` exits `1` when a decided case does not declare exactly its
 owner or has no result, or, with `--baseline`, an undecided case's ids
 changed or a case disappeared (`--allow-missing` excuses a missing case only
-when its target has no result at all), and `2` when the worksheet is
+when its target has no result file at all: a `test.xml` with no testcase
+means the target ran), and `2` when the worksheet is
 unreadable or invalid, the evidence or baseline holds none, or it names no
 build target while the worksheet's cases belong to build targets. `wrap`
 exits with the wrapped command's status; `case` exits `2` when it cannot record
 the case (no output file, more than one id, a malformed id or `--artifact`).
+
+`migrate apply` judges the code only an `if __name__ == "__main__":` block
+runs like any other code unless given `--trust-main-guard`. That opt-in
+exclusion is best-effort: only use it together with a definitive check (the
+collection check, or `migrate verify` against fresh test evidence before
+merging).
 
 The reference below is generated from the command's own argument parser.
 

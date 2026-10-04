@@ -272,9 +272,9 @@ its virtualenv; for a Bazel project, make a virtualenv with the test
 dependencies (the same ones the `py_test` targets use) and run apply from the
 source tree. Where that is impractical — `py_test` targets that import
 through their runfiles, generated code, toolchain-provided modules — apply
-with `--no-collect-check`, push, then check the rewrite against the CI test
-evidence with `rr migrate verify` before merging (see
-{ref}`migrate-verify`). If collection fails in either tree (an import error, a non-zero
+with `--no-collect-check` (and `--trust-main-guard` only if needed), push,
+then check the rewrite against the CI test evidence with `rr migrate verify`
+before merging (see {ref}`migrate-verify`). If collection fails in either tree (an import error, a non-zero
 exit, no tests found while the worksheet has decided cases), apply refuses and
 prints the collection output, so a broken environment never passes silently.
 
@@ -315,6 +315,11 @@ tests by hand.
   duplicate nodeids. Use it only where pytest cannot collect the project at
   all, and check the result against real test evidence afterwards with
   `rr migrate verify` ({ref}`migrate-verify`).
+- `--trust-main-guard` (off by default) leaves the code only an
+  `if __name__ == "__main__":` block runs out of the static guards (below).
+  That exclusion is best-effort, so only use it together with a definitive
+  check: the collection check, or `rr migrate verify` against fresh test
+  evidence before merging. apply prints a warning saying so.
 
 ## The static guards: a first, conservative line
 
@@ -329,13 +334,24 @@ and cannot change it, and the collection check vouches for the result either
 way. A function only counts as such a hook while nothing that may run at
 import time refers to it: a `setUp` or `setup_module` the module calls itself
 (directly, through a helper, `getattr`, or as a decorator) is judged like any
-other import-time code. Nor do they judge the body of an
+other import-time code.
+
+By default they also judge the code only an `if __name__ == "__main__":`
+block runs, like any other code: static analysis cannot prove what Python
+runs at import, and the guards fail closed. A script-style test whose
+`main()` loads a helper with `importlib.util.spec_from_file_location` is
+therefore refused, and with it every file that import call may import.
+**`--trust-main-guard`** (opt-in) leaves out the body of an
 `if __name__ == "__main__":` block (either operand order, either quote; not
-its `else`), or the bodies of module-level functions reachable *only* from
+its `else`) and the bodies of module-level functions reachable *only* from
 it: when pytest itself imports a test module, it imports it under its module
-name, so that code never runs at collection. A script-style test whose
-`main()` loads a helper with `importlib.util.spec_from_file_location` is not
-refused for it. Such a function is judged as usual when anything that may run
+name, so that code does not run at collection. The exclusion is
+**best-effort**. It follows the names it can see, and a name computed at run
+time can get past it (a `builtins` alias, `__getattribute__`,
+`runpy.run_module(..., run_name="__main__")` or a `"__main__"` module spec in
+another file), so only use it together with a definitive check: the
+collection check, or `rr migrate verify` against fresh test evidence before
+merging. With the flag, such a function is still judged as usual when anything that may run
 at import time names it (a module-level call, an alias, a `getattr` /
 `globals()` string, a test, a default argument), when it is decorated,
 rebound or named like a test or a hook, or when another file under `--root`
@@ -502,11 +518,17 @@ pull requests can migrate disjoint directories in parallel from one worksheet.
 The exact check of a rewrite is the evidence of a real test run. For a Bazel
 project, where collecting the tests locally is impractical (`py_test`
 targets that import through their runfiles, as most do), this is the
-verification path: **apply with `--no-collect-check`, push, then verify
-against the CI evidence before merging.**
+verification path: **apply with `--no-collect-check` (adding
+`--trust-main-guard` only if needed), push, then `rr migrate verify` against
+the CI evidence before merging.** `--trust-main-guard` is needed only when
+apply refuses a file for code that only its `__main__` block runs (a
+script-style test whose `main()` imports a helper by path, say); its
+exclusion is best-effort, and the `verify` run is what checks the result.
 
 ```console
 $ rr migrate apply requirements/attribution.rrplan --stage tags --no-collect-check
+$ # only if apply refused a file for code only its __main__ block runs:
+$ rr migrate apply requirements/attribution.rrplan --stage tags --no-collect-check --trust-main-guard
 $ git push    # CI runs the tests; download its bazel-testlogs into ci/
 $ rr migrate verify --worksheet requirements/attribution.rrplan \
     --evidence ci/bazel-testlogs/ --baseline bazel-testlogs/
@@ -546,9 +568,11 @@ It checks, case by case (by {ref}`case key <case-keys>`, so pytest, node,
   compared. Cases only the new evidence has are counted, not refused;
 - `--allow-missing` (a HITL or manual target CI does not run) makes a case
   with no result — decided or from the baseline — a warning, not verified,
-  when its **target** has no result at all in the new evidence (no case, no
-  target-scope result). A case missing from a target that did run stays an
-  error: it was renamed or lost by the rewrite.
+  when its **target** has no result file at all in the new evidence. A
+  target with any result file ran: a case, a target-scope or Bazel
+  synthetic result, or a `test.xml` that holds no testcase (pytest collected
+  nothing). A case missing from a target that did run stays an error: it was
+  renamed or lost by the rewrite.
 
 It prints one line per offending case, with the ids expected and found, and
 exits 1 on any:

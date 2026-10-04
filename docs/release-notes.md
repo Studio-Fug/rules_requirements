@@ -19,8 +19,11 @@ report goldens are byte-identical to 0.2.0.
   before (in any order; a target-scope result's are not compared) and no
   case of the baseline may be missing. A case with no result is an error;
   `--allow-missing` (a HITL or manual target CI does not run) makes it a
-  warning when its target has no result at all in the new evidence, never
-  when the target ran (a case renamed or lost by the rewrite). A decided
+  warning when its target has no result file at all in the new evidence,
+  never when the target ran (a case renamed or lost by the rewrite). A
+  target with any result file ran: a `test.xml` that holds no testcase
+  (pytest collected nothing) or only Bazel's synthetic whole-run result
+  counts. A decided
   case that declared no id before and declares none after counts only
   through `verified_by` (a model edit apply does not make): it is listed in
   a note, not an error; with a model (`--model`, or the worksheet's), the
@@ -36,19 +39,28 @@ report goldens are byte-identical to 0.2.0.
   shape `rr` ingests (pytest, `rr_node_test`, `rr_case.h`, googletest, ...).
   It is the verification path where the collection check cannot run — Bazel
   `py_test` targets importing through their runfiles: apply with
-  `--no-collect-check`, push, then verify against the CI evidence before
-  merging.
+  `--no-collect-check` (and `--trust-main-guard` only if needed), push, then
+  verify against the CI evidence before merging.
 
-### Fixed
+### New: `rr migrate apply --trust-main-guard`
 
-- `rr migrate apply --stage tags`: the static guards no longer judge code
+- **Opt-in, off by default.** By default `rr migrate apply` judges the code
+  only an `if __name__ == "__main__":` block runs like any other code, as
+  0.2.0 does. `--trust-main-guard` leaves out of the static guards the code
   that never runs when pytest imports a test module — the body of an
   `if __name__ == "__main__":` block (either operand order, either quote; not
   its `else`) and the bodies of module-level functions reachable only from
   it. A script-style test module whose `main()` loads a helper with
-  `importlib.util.spec_from_file_location` refused every rewritten file in
-  the tree, because an import call the codemod cannot name may import any of
-  them. Such a function is still judged when anything that may run at import
+  `importlib.util.spec_from_file_location` refuses every rewritten file in
+  the tree without it, because an import call the codemod cannot name may
+  import any of them. The exclusion is **best-effort**: static analysis
+  cannot prove what Python runs at import (a name computed at run time, a
+  `builtins` alias, `__getattribute__`, `runpy.run_module(...,
+  run_name="__main__")` in another file all get past it), so the project's
+  fail-closed rule keeps it opt-in. Only use it together with a definitive
+  check: the collection check, or `rr migrate verify` against fresh test
+  evidence before merging. apply prints a warning saying so whenever the
+  flag is given. With the flag, such a function is still judged when anything that may run at import
   time names it (a module-level call, an alias, a `getattr` / `globals()`
   string, a test, a default argument), when it is decorated, rebound or named
   like a test or a hook, or when another scanned file imports it, passes its
