@@ -343,15 +343,59 @@ def _record(item: Any) -> None:
     setattr(item, _WRITTEN, tuple(props))
 
 
+def _pair(prop: Any) -> tuple[Any, Any] | None:
+    """``prop`` unpacked to ``(name, value)`` the way junitxml does
+    (``for name, value in user_properties``), or None if it does not unpack.
+
+    Any two-item iterable is a property to junitxml (a tuple, a list, a
+    two-key dict), so the guard must not care what shape the entry has.
+    """
+    try:
+        name, value = prop
+    except Exception:
+        return None
+    return name, value
+
+
+def _materialize(item: Any, report: Any) -> None:
+    """Replace one-shot iterator entries with tuples, in the item and the report.
+
+    The guard unpacks every entry to read its name; an iterator would be
+    consumed by that, and junitxml would then see an empty one. The item and
+    the report hold the SAME entry objects, so each is materialized once.
+    """
+    done: dict[int, tuple[Any, ...]] = {}
+    for props in (item.user_properties, getattr(report, "user_properties", None)):
+        if not isinstance(props, list):
+            continue
+        for i, prop in enumerate(props):
+            try:
+                one_shot = iter(prop) is prop
+            except TypeError:
+                continue
+            if one_shot:
+                if id(prop) not in done:
+                    done[id(prop)] = tuple(prop)
+                props[i] = done[id(prop)]
+
+
 def _raw_trace_properties(item: Any, properties: list[Any]) -> list[Any]:
     """The ``requirement`` / ``requirements`` entries of ``properties`` this
-    plugin did not write (a raw ``record_property``), by identity."""
+    plugin did not write (a raw ``record_property``), by identity.
+
+    An entry is a trace property if junitxml would write it as one: any
+    two-item entry (a tuple, a list, ...) whose name, as junitxml writes it
+    (``str(name)``), is ``requirement`` or ``requirements``.
+    """
     written = getattr(item, _WRITTEN, ())
-    return [
-        p
-        for p in properties
-        if isinstance(p, tuple) and len(p) == 2 and p[0] in _TRACE_PROPERTIES and not any(p is w for w in written)
-    ]
+    raw = []
+    for p in properties:
+        if any(p is w for w in written):
+            continue
+        pair = _pair(p)
+        if pair is not None and str(pair[0]) in _TRACE_PROPERTIES:
+            raw.append(p)
+    return raw
 
 
 def _guard_raw_properties(item: Any, report: Any) -> None:
@@ -362,6 +406,7 @@ def _guard_raw_properties(item: Any, report: Any) -> None:
     scope should have replaced), so the property is removed from the item
     and the report, and the test fails: use ``@pytest.mark.rr``.
     """
+    _materialize(item, report)
     raw = _raw_trace_properties(item, list(item.user_properties))
     if raw:
         item.user_properties[:] = [p for p in item.user_properties if not any(p is r for r in raw)]
@@ -370,7 +415,7 @@ def _guard_raw_properties(item: Any, report: Any) -> None:
         report.user_properties = [p for p in report.user_properties if not any(p is r for r in stale)]
     if not raw:
         return
-    named = ", ".join(f"record_property({name!r}, {value!r})" for name, value in raw)
+    named = ", ".join(f"record_property({str(name)!r}, {value!r})" for name, value in filter(None, map(_pair, raw)))
     message = (
         f"rr: {item.nodeid}: {named} bypasses @pytest.mark.rr and was dropped [{E_RAW_PROPERTY}]: "
         'declare the ONE requirement a test verifies with @pytest.mark.rr("<id>")'
@@ -380,6 +425,10 @@ def _guard_raw_properties(item: Any, report: Any) -> None:
     else:
         report.outcome = "failed"
         report.longrepr = message
+    if hasattr(report, "wasxfail"):
+        # An xfail marker turns a failure into "xfailed" (junitxml writes it
+        # as <skipped>): the guard's failure is not the expected one.
+        del report.wasxfail
 
 
 if pytest is not None:

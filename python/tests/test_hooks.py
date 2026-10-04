@@ -1382,6 +1382,31 @@ def test_pytest_raw_requirement_property_is_dropped_and_fails_the_test(tmp_path)
         "@pytest.mark.rr('REQ-7')\n"
         "def test_other_properties(record_property):\n"
         "    record_property('dut', 'c6')\n"
+        # junitxml writes any two-item entry (`for name, value in ...`), not just a tuple
+        "@pytest.mark.rr('REQ-10')\n"
+        "def test_list_entry(request):\n"
+        "    request.node.user_properties.append(['requirement', 'REQ-11'])\n"
+        "def test_dict_entry(request):\n"
+        "    request.node.user_properties.append({'requirement': 0, 'REQ-12': 0})\n"
+        "def test_iterator_entry(request):\n"
+        "    request.node.user_properties.append(iter(('requirements', 'REQ-13')))\n"
+        "class Name:\n"
+        "    def __str__(self):\n"
+        "        return 'requirement'\n"
+        "def test_str_name(record_property):\n"
+        "    record_property(Name(), 'REQ-14')\n"
+        "def test_iterator_other(request):\n"
+        "    request.node.user_properties.append(iter(('bench', 'rig-2')))\n"
+        # an xfail test's guard failure is a failure, not an expected one (<skipped>)
+        "@pytest.mark.rr('REQ-15')\n"
+        "@pytest.mark.xfail(reason='known defect')\n"
+        "def test_xfail_raw(record_property):\n"
+        "    record_property('requirement', 'REQ-16')\n"
+        "    assert False\n"
+        "@pytest.mark.rr('REQ-17')\n"
+        "@pytest.mark.xfail(reason='known defect')\n"
+        "def test_xpass_raw(record_property):\n"
+        "    record_property('requirement', 'REQ-18')\n"
     )
     proc, out, cases = _run_pytest(tmp_path)
     assert proc.returncode == 1, out
@@ -1394,6 +1419,18 @@ def test_pytest_raw_requirement_property_is_dropped_and_fails_the_test(tmp_path)
     assert cases["test_in_teardown"].status == "error" and cases["test_in_teardown"].requirements == ()
     other = cases["test_other_properties"]
     assert other.status == "passed" and other.requirements == ("REQ-7",) and other.properties["dut"] == "c6"
+    for name, ids in [
+        ("test_list_entry", ("REQ-10",)),
+        ("test_dict_entry", ()),
+        ("test_iterator_entry", ()),
+        ("test_str_name", ()),
+        ("test_xfail_raw", ("REQ-15",)),
+        ("test_xpass_raw", ("REQ-17",)),
+    ]:
+        assert (cases[name].status, cases[name].requirements) == ("failed", ids), name
+        assert "RR-E102" in cases[name].message, name
+    bench = cases["test_iterator_other"]
+    assert bench.status == "passed" and bench.properties["bench"] == "rig-2"
 
 
 def test_pytest_nearest_scope_wins_over_class_and_module(tmp_path):
