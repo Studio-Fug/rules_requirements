@@ -352,6 +352,7 @@ def test_unittest_subtests_and_fixture_errors(tmp_path):
         cases = ingest.collect([str(xml)]).cases
         fixture = next(c for c in cases if c.name == "setUpClass")
         assert fixture.status == "error" and fixture.requirements == ("REQ-8",) and fixture.duration < 60
+        assert fixture.properties["rr.file"].endswith("test_hooks.py"), fixture.properties  # the class's file
         sub = [c for c in cases if c.name.startswith("test_many")]
         assert [c.status for c in sub] == ["failed", "failed"] and sub[0].requirements == ("REQ-9",)
         assert "(i=2)" in sub[0].name

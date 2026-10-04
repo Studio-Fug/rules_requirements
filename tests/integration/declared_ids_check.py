@@ -5,8 +5,10 @@ A test case verifies at most one requirement. The two deprecated multi-id
 cases (``rust_hook_test::multiple_ids`` and
 ``GtestHook::IdsAccumulateAcrossCalls``) must reach the evidence with EVERY id
 they name, so attribution quarantines them (they verify none of those
-requirements); no other case may declare more than one id. Whether the
-quarantine itself happens is attribution's job, asserted where it runs.
+requirements); no other case may declare more than one id. A target-scope
+``exit-status`` case (``leaky_wrapped_test`` passes its only test, then exits
+1) declares no id at all, while the passing case keeps its own one. Whether
+the quarantine itself happens is attribution's job, asserted where it runs.
 """
 
 import sys
@@ -35,6 +37,12 @@ def main(argv: list) -> int:
             check(len(case.requirements) <= 1, f"{name} declares {list(case.requirements)}: more than one id")
         if case.name == "exit-status":
             check(not case.requirements, f"{name}: a target-scope exit-status case declares no requirement")
+            check(case.properties.get("rr.scope") == "target", f"{name} is not target-scope: {case.properties}")
+    exits = [c for c in cases.values() if c.name == "exit-status"]
+    check(len(exits) == 1, f"expected one exit-status case (leaky_wrapped_test), got {len(exits)}")
+    leaky = [c for c in cases.values() if c.name == "passes" and c.classname == "leaky"]
+    check(len(leaky) == 1 and leaky[0].requirements == ("REQ-1",), f"leaky::passes: {leaky}")
+    check(leaky[0].status == "passed", f"leaky::passes is {leaky[0].status}")
     return 0
 
 
