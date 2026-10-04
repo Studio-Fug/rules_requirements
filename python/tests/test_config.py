@@ -86,3 +86,81 @@ def test_unquoted_off_is_off():
     errors: list[str] = []
     config = parse_config({"rules": {"unknown-field": False}}, errors)
     assert not errors and config.rules["unknown-field"] == "off"
+
+
+def test_attribution_keys():
+    errors: list[str] = []
+    c = parse_config(
+        {
+            "attribution": "model",
+            "main_repo": "splanc",
+            "sets_lock": "verification.rrlock",
+            "flaky": "flag",
+            "set_consistency": False,  # an unquoted YAML `off`
+            "variants": [["//p:a", "@splanc//p:b"], ["//q:a", "//q:b", "//q:c"]],
+            "rules": {"bare-target-reference": "error", "glob-selector": "warning", "lock-stale": "off"},
+        },
+        errors,
+    )
+    assert errors == []
+    assert (c.attribution, c.main_repo, c.sets_lock, c.flaky, c.set_consistency) == (
+        "model",
+        "splanc",
+        "verification.rrlock",
+        "flag",
+        "off",
+    )
+    assert c.variants == (("//p:a", "@splanc//p:b"), ("//q:a", "//q:b", "//q:c"))
+    assert c.variant_groups() == (("//p:a", "//p:b"), ("//q:a", "//q:b", "//q:c"))
+    assert c.rule("bare-target-reference") == "error" and c.rule("lock-stale") == "off"
+
+
+def test_attribution_defaults():
+    c = Config()
+    assert (c.attribution, c.main_repo, c.sets_lock, c.flaky, c.set_consistency, c.variants) == (
+        "hybrid",
+        "",
+        "",
+        "under-verify",
+        "warn",
+        (),
+    )
+    assert c.rule("bare-target-reference") == "warning" and c.rule("glob-selector") == "off"
+    assert c.rule("lock-stale") == "error"
+    for hard in cfg.HARD_ERRORS:
+        assert hard not in cfg.DEFAULT_RULES and c.rule(hard) == "error"
+
+
+def test_hard_errors_stay_errors_even_when_a_config_object_says_off():
+    # parse_config refuses such keys; a Config built in Python must not get around that
+    c = Config(rules={hard: "off" for hard in cfg.HARD_ERRORS})
+    assert {c.rule(hard) for hard in cfg.HARD_ERRORS} == {"error"}
+    assert Config(rules={"glob-selector": "error"}).rule("glob-selector") == "error"  # ordinary rules do follow
+
+
+@pytest.mark.parametrize(
+    "raw, fragment",
+    [
+        ({"attribution": "tags"}, "config.attribution: must be one of"),
+        ({"flaky": "ignore"}, "config.flaky: must be one of"),
+        ({"set_consistency": "strict"}, "config.set_consistency: must be one of"),
+        ({"main_repo": "@splanc"}, "config.main_repo"),
+        ({"main_repo": 3}, "config.main_repo"),
+        ({"sets_lock": ""}, "config.sets_lock"),
+        ({"variants": "//a:b"}, "config.variants: must be a list"),
+        ({"variants": [["//a:b"]]}, "at least two targets"),
+        ({"variants": [["//a:b", "//a:b"]]}, "lists a target twice"),
+        ({"variants": [["//a:a", "//a"]]}, "lists a target twice"),
+        ({"variants": [["//a:b", "//a:c"], ["//a:c", "//a:d"]]}, "merge the two groups"),
+        ({"variants": [[1, 2]]}, "must be a list of target labels"),
+        ({"rules": {"shared-case": "off"}}, "'shared-case' is always an error and cannot be configured"),
+        ({"rules": {"bad-target": "warning"}}, "'bad-target' is always an error"),
+        ({"rules": {"same-code-multiple-owners": "off"}}, "always an error"),
+        ({"rules": {"multi-tag": "off"}}, "report-time quarantine, not a rule"),
+        ({"rules": {"attribution-conflict": "warning"}}, "report-time quarantine, not a rule"),
+    ],
+)
+def test_attribution_key_errors(raw, fragment):
+    errors: list[str] = []
+    parse_config(raw, errors)
+    assert any(fragment in e for e in errors), errors

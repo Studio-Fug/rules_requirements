@@ -26,6 +26,8 @@ rr_py_test(
         "//tests/node:fixtures",
         # test_migrate.py, test_schema.py: the worksheet schema and fixtures.
         "//:schema/worksheet.schema.json",
+        # test_schema.py: the verification-set lock schema.
+        "//:schema/verification_lock.schema.json",
     ] + glob(["fixtures/**"]),
     env = {
         "RR_CASE_FIXTURE": "$(rootpath :rr_case_fixture)",

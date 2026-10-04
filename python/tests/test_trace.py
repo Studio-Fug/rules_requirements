@@ -159,6 +159,33 @@ def test_verified_by_targets(tmp_path):
     assert not v.pyramid_violation
 
 
+def test_claims_on_external_targets_match_their_testlogs(tmp_path):
+    # Claims are normalized at parse; bazel-testlogs/external/<repo>~|+/ paths
+    # must be looked up in the same spelling (one passing case each).
+    from rules_requirements.trace import find_gaps
+
+    path = write(
+        tmp_path,
+        "m.yaml",
+        """
+        user_needs: [{id: UN-1, title: n}]
+        requirements:
+          - {id: REQ-1, title: r, satisfies: [UN-1], verified_by: ["@foo~//p:n"]}
+          - {id: REQ-2, title: r, satisfies: [UN-1], verified_by: [{target: "@bar//q:m", whole: true}]}
+          - {id: REQ-3, title: r, satisfies: [UN-1], verified_by: ["@@baz+//r:s"]}
+        """,
+    )
+    model = load_model(path)
+    junit(tmp_path, "bazel-testlogs/external/foo~/p/n/test.xml", [("a", "passed", [], "")])
+    junit(tmp_path, "bazel-testlogs/external/bar+/q/m/test.xml", [("b", "passed", [], "")])
+    junit(tmp_path, "bazel-testlogs/external/baz~/r/s/test.xml", [("c", "failed", [], "")])
+    m = build_matrix(model, ingest.collect([str(tmp_path / "bazel-testlogs")]))
+    assert [m.verdicts[r].status for r in ("REQ-1", "REQ-2", "REQ-3")] == [VERIFIED, VERIFIED, FAILED]
+    assert [e.name for e in m.verdicts["REQ-1"].evidence] == ["@foo//p:n"]
+    # the failure is REQ-3's, not an untraced one
+    assert [g.kind for g in find_gaps(m) if g.kind == "untraced-failure"] == []
+
+
 def test_refinement_rollup(tmp_path):
     path = write(
         tmp_path,

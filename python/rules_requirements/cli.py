@@ -27,6 +27,7 @@ from typing import Any, Iterable, Mapping
 
 from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
+from rules_requirements.labels import read_known_targets
 from rules_requirements.model import Model, read_model
 from rules_requirements.trace import FAILED, UNVERIFIED, build_matrix
 from rules_requirements.util import natural_key
@@ -77,29 +78,56 @@ def _kv(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
-def _load(paths: list[str], strict: bool = False, quiet: bool = False) -> tuple[Model, bool]:
-    """Read + validate; print issues. Returns (model, ok)."""
+# Claim conflicts `rr migrate` exists to resolve: it plans and applies on a
+# model that still has them (every other error still stops it).
+_MIGRATE_TOLERATES = ("shared-case", "same-code-multiple-owners")
+
+
+def _load(
+    paths: list[str],
+    strict: bool = False,
+    quiet: bool = False,
+    known_targets: list[str] | None = None,
+    tolerate: tuple[str, ...] = (),
+) -> tuple[Model, bool]:
+    """Read + validate; print issues. Returns (model, ok); errors whose code
+    is in ``tolerate`` are printed but do not make the model invalid."""
     resolved = [_path(p) for p in paths]
     for p in resolved:
         if not os.path.exists(p):
             print(f"rr: model path not found: {p}", file=sys.stderr)
             return Model(), False
     model, warnings = read_model(resolved, root=_root())
-    issues = validate(model, strict=strict)
+    issues = validate(model, strict=strict, known_targets=known_targets)
     for w in warnings:
         print(f"warning: [unknown-field] {w}", file=sys.stderr)
     errors = 0
     for issue in issues:
-        errors += issue.severity == "error"
+        errors += issue.severity == "error" and issue.code not in tolerate
         if not quiet or issue.severity == "error":
             print(str(issue), file=sys.stderr)
     return model, errors == 0
 
 
+def _known_targets(path: str) -> list[str] | None:
+    """The labels of a `--known-targets` file (`bazel query 'tests(//...)'`)."""
+    if not path:
+        return None
+    try:
+        with open(_path(path), encoding="utf-8") as fh:
+            known, bad = read_known_targets(fh.read())
+    except OSError as exc:
+        raise SystemExit(f"rr validate: cannot read --known-targets: {exc}") from None
+    for line in bad:
+        print(f"warning: --known-targets: not a label: {line!r}", file=sys.stderr)
+    return known
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
-    model, ok = _load(args.model, strict=args.strict)
+    known = _known_targets(args.known_targets)
+    model, ok = _load(args.model, strict=args.strict, known_targets=known)
     if args.format == "json":
-        issues = validate(model, strict=args.strict)
+        issues = validate(model, strict=args.strict, known_targets=known)
         print(
             json.dumps(
                 [
@@ -318,7 +346,7 @@ def cmd_cases(args: argparse.Namespace) -> int:
 def cmd_migrate_plan(args: argparse.Namespace) -> int:
     from rules_requirements import migrate
 
-    model, ok = _load(args.model, quiet=True)
+    model, ok = _load(args.model, quiet=True, tolerate=_MIGRATE_TOLERATES)
     if not ok:
         print("rr: requirements model is invalid (see above)", file=sys.stderr)
         return 2
@@ -403,7 +431,7 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
             model_paths = [str(p) for p in planned]
             print(f"rr migrate: checking owners against the planned model: {' '.join(model_paths)}", file=sys.stderr)
     if model_paths:
-        model, ok = _load(model_paths, quiet=True)
+        model, ok = _load(model_paths, quiet=True, tolerate=_MIGRATE_TOLERATES)
         if not ok:
             print("rr: requirements model is invalid (see above)", file=sys.stderr)
             return 2
@@ -730,6 +758,13 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("model", nargs="*", default=[DEFAULT_MODEL])
     v.add_argument("--strict", action="store_true", help="treat warnings as errors")
     v.add_argument("--format", choices=["text", "json"], default="text")
+    v.add_argument(
+        "--known-targets",
+        default="",
+        metavar="FILE",
+        help="labels of every test target, one per line (`bazel query 'tests(//...)'`); "
+        "a claim, config.variants entry or lock target naming any other label is an unknown-target error",
+    )
     v.set_defaults(func=cmd_validate)
 
     s = sub.add_parser("scan", aliases=["check-annotations"], help="check source annotations")

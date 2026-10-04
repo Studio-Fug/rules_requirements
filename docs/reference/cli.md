@@ -23,7 +23,9 @@ paths resolve against the directory Bazel was invoked from.
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds; `2`
 when the model is invalid for `scan`, `report`, `graph` and `migrate`, or a
-report format cannot be inferred. `cases` and `migrate plan` exit `2` when the
+report format cannot be inferred (`migrate` still runs on a model whose only
+errors are `shared-case` / `same-code-multiple-owners`: resolving them is its
+job). `cases` and `migrate plan` exit `2` when the
 `--evidence` paths hold no evidence at all. `migrate apply` exits `1`, and writes
 nothing unless given `--partial`, when it refused a file or could not find a
 decided case's test in the module it names, and `2` when the worksheet is

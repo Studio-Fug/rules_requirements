@@ -33,6 +33,7 @@ from typing import Any, Mapping
 from rules_requirements import config as cfg
 from rules_requirements._vendor import yaml
 from rules_requirements.model import (
+    CLAIM_FIELDS,
     FIELDS,
     Entity,
     Location,
@@ -40,9 +41,13 @@ from rules_requirements.model import (
     Note,
     VerifiedBy,
     _LineLoader,
+    _parse_verified_by,
+    claim_items,
     parse_documents,
     parse_entity,
 )
+
+_CLAIM_KEYS = frozenset(CLAIM_FIELDS.values())
 
 
 class EditError(ValueError):
@@ -61,7 +66,7 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
         value = getattr(ent, key, None)
         if key == "notes":
             value = [_note_dict(n) for n in ent.notes]
-        elif key == "verified_by":
+        elif key in _CLAIM_KEYS:
             value = [_verified_by_item(v) for v in value or ()]
         elif isinstance(value, tuple):
             value = list(value)
@@ -72,11 +77,22 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
 
 
 def _verified_by_item(v: VerifiedBy) -> Any:
-    if not v.level and not v.extra:
-        return v.target
-    item: dict[str, Any] = {"target": v.target}
+    """A ``verified_by`` / ``validated_by`` item as plain data: the target as
+    written, in canonical key order (target, cases | whole, level, reason).
+    A malformed item (``problem``) is returned exactly as authored."""
+    if v.problem and v.authored is not None:
+        return v.authored
+    if v.legacy and not v.level and not v.extra:
+        return v.label
+    item: dict[str, Any] = {"target": v.label}
+    if v.cases or (v.problem and not v.whole):
+        item["cases"] = list(v.cases)
+    if v.whole and not v.legacy:
+        item["whole"] = True
     if v.level:
         item["level"] = v.level
+    if v.reason:
+        item["reason"] = v.reason
     item.update(dict(v.extra))
     return item
 
@@ -101,6 +117,9 @@ def dict_to_entity(
     errors: list[str] = []
     unknown: list[str] = []
     ent = parse_entity(kind, dict(data), location or Location(), errors, unknown, nested=[])
+    if ent is not None:  # a malformed claim item is never written (bad-selector)
+        rel = CLAIM_FIELDS.get(kind, "")
+        errors += [f"{ent.id}: {rel} {vb.label}: {vb.problem}" for vb in claim_items(ent) if vb.problem]
     return ent, errors + unknown
 
 
@@ -158,26 +177,38 @@ def _dq(text: str) -> str:
     return "".join(out)
 
 
-def _scalar(value: Any) -> str:
+# Inside a flow collection (``[a, b]``, ``{k: v}``) these end or open a node,
+# so a plain scalar holding one would be split ("a, b" reads as two items) or
+# not parse at all; outside one they are ordinary characters.
+_FLOW_INDICATORS = frozenset(",[]{}")
+
+
+def _scalar(value: Any, flow: bool = False) -> str:
+    """One scalar, plain when that reads back as the same string, else
+    double-quoted. ``flow``: it sits inside a flow collection."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value)
     text = str(value)
+    if flow and not _FLOW_INDICATORS.isdisjoint(text):
+        return _dq(text)
     return text if _plain_ok(text) else _dq(text)
 
 
-def _value(value: Any) -> str:
-    """Any plain YAML value in flow form (for keys this model does not define)."""
+def _value(value: Any, flow: bool = True) -> str:
+    """Any plain YAML value, collections in flow form (for keys this model
+    does not define). ``flow``: a scalar ``value`` sits inside a flow
+    collection; nested scalars always do."""
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_value(v) for v in value) + "]"
     if isinstance(value, Mapping):
-        return "{" + ", ".join(f"{_scalar(k)}: {_value(v)}" for k, v in value.items()) + "}"
+        return "{" + ", ".join(f"{_scalar(k, flow=True)}: {_value(v)}" for k, v in value.items()) + "}"
     if value is None:
         return "null"
     if isinstance(value, (bool, int, float)):
         return _scalar(value)
-    return _scalar(str(value)) if not hasattr(value, "isoformat") else _dq(value.isoformat())
+    return _scalar(str(value), flow) if not hasattr(value, "isoformat") else _dq(value.isoformat())
 
 
 def _reads_back(snippet: str, expected: Any) -> bool:
@@ -191,9 +222,9 @@ def _flow_list(items: list[Any]) -> str:
     parts = []
     for item in items:
         if isinstance(item, Mapping):
-            parts.append("{" + ", ".join(f"{k}: {_value(v)}" for k, v in item.items()) + "}")
+            parts.append("{" + ", ".join(f"{_scalar(k, flow=True)}: {_value(v)}" for k, v in item.items()) + "}")
         else:
-            parts.append(_scalar(item))
+            parts.append(_scalar(item, flow=True))
     return "[" + ", ".join(parts) + "]"
 
 
@@ -242,11 +273,13 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
                     continue
                 prefix = f"{pad}  - " if first else f"{pad}    "
                 # a key this model does not define keeps its value as-is
-                block = _text_block(nk, str(note[nk]), "") if nk in known else [f"{nk}: {_value(note[nk])}"]
+                block = _text_block(nk, str(note[nk]), "") if nk in known else [f"{nk}: {_value(note[nk], flow=False)}"]
                 lines.append(prefix + block[0])
                 lines += [f"{pad}    {ln}" if ln else "" for ln in block[1:]]
                 first = False
         return lines
+    if key in _CLAIM_KEYS and isinstance(value, (list, tuple)):
+        return _claim_block(key, list(value), pad)
     if isinstance(value, (list, tuple)):
         items = list(value)
         flow = f"{pad}{key}: {_flow_list(items)}"
@@ -260,6 +293,69 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
                 out.append(f"{pad}  - {_scalar(item)}")
         return out
     return [f"{pad}{key}: {_scalar(value)}"]
+
+
+def _claim_block(key: str, items: list[Any], pad: str) -> list[str]:
+    """``verified_by`` / ``validated_by``: one flow line if it fits, else one
+    entry per item — a flow mapping if it fits, else a block mapping with the
+    selectors as a block list (long case names stay readable in diffs).
+
+    Every candidate is re-parsed and the first that reads back exactly wins;
+    the last resort is block form with every string double-quoted, and an
+    items list that not even that renders is refused with :class:`EditError`.
+    """
+    flow = f"{pad}{key}: {_flow_list(items)}"
+    if len(flow) <= WIDTH and _reads_back(f"{key}: {_flow_list(items)}\n", {key: items}):
+        return [flow]
+    for lines in (_claim_lines(key, items, pad), _quoted_block(key, items, pad)):
+        snippet = "\n".join(ln[len(pad) :] for ln in lines) + "\n"
+        if _reads_back(snippet, {key: items}):
+            return lines
+    raise EditError(f"{key}: cannot render {items!r} so that it reads back unchanged")
+
+
+def _claim_lines(key: str, items: list[Any], pad: str) -> list[str]:
+    out = [f"{pad}{key}:"]
+    for item in items:
+        if not isinstance(item, Mapping):
+            out.append(f"{pad}  - {_scalar(item)}")
+            continue
+        line = f"{pad}  - " + _flow_list([item])[1:-1]
+        if len(line) <= WIDTH or "cases" not in item or not isinstance(item["cases"], list):
+            out.append(line)
+            continue
+        first = True
+        for k, v in item.items():
+            lead = f"{pad}  - " if first else f"{pad}    "
+            first = False
+            if k == "cases" and v:
+                out.append(f"{lead}cases:")
+                out += [f"{pad}      - {_value(c, flow=False)}" for c in v]
+            else:
+                out.append(f"{lead}{k}: {_value(v, flow=False)}")
+    return out
+
+
+def _quoted_block(key: str, items: list[Any], pad: str) -> list[str]:
+    """Block form with every string key and value double-quoted."""
+
+    def q(value: Any) -> str:
+        return _dq(value) if isinstance(value, str) else _value(value)
+
+    out = [f"{pad}{key}:"]
+    for item in items:
+        if not isinstance(item, Mapping) or not item:
+            out.append(f"{pad}  - {q(item)}")
+            continue
+        lead = f"{pad}  - "
+        for k, v in item.items():
+            if isinstance(v, (list, tuple)) and v:
+                out.append(f"{lead}{q(k)}:")
+                out += [f"{pad}      - {q(c)}" for c in v]
+            else:
+                out.append(f"{lead}{q(k)}: {q(v)}")
+            lead = f"{pad}    "
+    return out
 
 
 def render_entity(
@@ -855,12 +951,11 @@ def is_blank(text: str) -> bool:
         return False
 
 
-def verified_by_from(items: Any) -> tuple[VerifiedBy, ...]:
-    out = []
-    for item in items or []:
-        if isinstance(item, str):
-            out.append(VerifiedBy(item))
-        else:
-            extra = tuple((k, v) for k, v in item.items() if k not in ("target", "level"))
-            out.append(VerifiedBy(str(item["target"]), str(item.get("level", "")), extra))
-    return tuple(out)
+def verified_by_from(items: Any, main_repo: str = "") -> tuple[VerifiedBy, ...]:
+    """``verified_by`` / ``validated_by`` items from plain data, read the way
+    the model reads them; raises :class:`EditError` on an item without a target."""
+    errors: list[str] = []
+    out = _parse_verified_by(list(items or []), "verified_by", errors, [], main_repo)
+    if errors:
+        raise EditError("; ".join(errors))
+    return out
