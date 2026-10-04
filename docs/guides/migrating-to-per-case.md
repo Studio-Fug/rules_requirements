@@ -332,14 +332,27 @@ import time refers to it: a `setUp` or `setup_module` the module calls itself
 other import-time code. Nor do they judge the body of an
 `if __name__ == "__main__":` block (either operand order, either quote; not
 its `else`), or the bodies of module-level functions reachable *only* from
-it: pytest imports a test module under its module name, so that code never
-runs at collection. A script-style test whose `main()` loads a helper with
-`importlib.util.spec_from_file_location` is not refused for it. Such a
-function is judged as usual when anything that may run at import time names
-it (a module-level call, an alias, a `getattr` / `globals()` string, a test,
-a default argument), when it is decorated, rebound or named like a test or a
-hook, or when another file under `--root` imports it or passes its module
-around. A file is **refused** and left unchanged, never half-migrated, when:
+it: when pytest itself imports a test module, it imports it under its module
+name, so that code never runs at collection. A script-style test whose
+`main()` loads a helper with `importlib.util.spec_from_file_location` is not
+refused for it. Such a function is judged as usual when anything that may run
+at import time names it (a module-level call, an alias, a `getattr` /
+`globals()` string, a test, a default argument), when it is decorated,
+rebound or named like a test or a hook, or when another file under `--root`
+imports it, passes its module around, reads it from `sys.modules`, or names
+it on a pytest item's `.module` / `.obj`. Nothing in the file is excluded —
+the block included — when the file may rebind `__name__`, when code that may
+run at import looks names up dynamically (`globals()`, `vars()`, `eval`,
+`getattr` with a computed name, `inspect.getmembers`, `__dict__`,
+`sys.modules`, a frame's globals), or when the block launches the tests
+in-process (`pytest.main()`, `unittest.main()`): a Bazel `py_test` whose
+main is the test file runs the block, and whatever it runs before the
+launch runs before collection, in the same interpreter. Nor is anything
+excluded anywhere when another file may reach any module's functions
+without importing it (a computed `sys.modules` read, a frame, `eval` /
+`exec`, a `pytest_pycollect_makeitem` hook, or a computed lookup on a pytest
+item's module). A file is **refused** and left unchanged, never
+half-migrated, when:
 
 - a test in it names several ids and has no decision (`?`, or a test the
   evidence never ran). With `--unassigned drop` such tests lose their tags

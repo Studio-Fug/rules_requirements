@@ -43,8 +43,18 @@ report goldens are byte-identical to 0.2.0.
   them. Such a function is still judged when anything that may run at import
   time names it (a module-level call, an alias, a `getattr` / `globals()`
   string, a test, a default argument), when it is decorated, rebound or named
-  like a test or a hook, or when another scanned file imports it or passes
-  its module around.
+  like a test or a hook, or when another scanned file imports it, passes its
+  module around, reads it from `sys.modules` or names it on a pytest item's
+  `.module` / `.obj`. Nothing in the file is excluded when it may rebind
+  `__name__`, when code that may run at import looks names up dynamically
+  (`globals()`, `vars()`, `eval`, a computed `getattr`,
+  `inspect.getmembers`, `__dict__`, `sys.modules`, a frame), or when the
+  block launches the tests in-process (`pytest.main()`, `unittest.main()`:
+  a `py_test` whose main is the file runs the block before collection); nor
+  anywhere when another scanned file may reach any module's functions
+  without importing it (a computed `sys.modules` read, a frame, `eval` /
+  `exec`, a `pytest_pycollect_makeitem` hook, a computed lookup on a pytest
+  item's module).
 
 ## 0.2.0 (2026-10-04)
 

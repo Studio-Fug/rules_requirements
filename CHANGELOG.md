@@ -22,8 +22,11 @@ Unblocks applying a worksheet in Bazel projects.
 ### Fixed
 
 - `rr migrate apply`: the static guards skip the `if __name__ == "__main__":`
-  block and the functions only it reaches, which never run under pytest; an
-  import call in a script-style test's `main()` no longer refuses every file.
+  block and the functions only it reaches, which never run when pytest
+  imports the module; an import call in a script-style test's `main()` no
+  longer refuses every file. Nothing is skipped when the file may rebind
+  `__name__`, looks names up dynamically at import, or launches its tests
+  in-process from the block.
 
 ## 0.2.0 (2026-10-04)
 
