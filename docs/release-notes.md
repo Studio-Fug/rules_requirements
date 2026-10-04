@@ -106,14 +106,41 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   decided test names exactly its owner, laid out as black would and in the
   file's own encoding and line endings. It fails closed: whatever it cannot
   resolve — an undecided multi-id test, a declaration it cannot read, a test
-  bound or imported dynamically, a file another file imports from or
-  subclasses — refuses the change with exit 1, and by default nothing is
-  written (`--partial` writes the files not linked to a refusal). Before
-  anything is written, every rewrite is verified with a pytest collection
-  check: the tests are collected in the original tree and in a copy holding
-  the rewritten files, and any test whose ids differ from the worksheet's
-  decision (or from its own, for an undecided test) refuses the run.
-  `--dry-run` prints a diff; `--only PATH` limits the rewrite.
+  bound or imported dynamically at import or class-creation time, a file
+  another file imports from or subclasses — refuses the change with exit 1,
+  and by default nothing is written (`--partial` writes the files not linked
+  to a refusal). Code in test, fixture and `setUp`-style hook bodies runs
+  after collection and is not refused. `--dry-run` prints a diff; `--only
+  PATH` limits the rewrite; `--model` checks the decided owners exist.
+- **The collection check** (on by default): whenever apply would write
+  anything, `--partial` and `--dry-run` included, it copies the tree under
+  `--root` to a temporary directory, writes the rewritten files there (never
+  in place), and runs `python -m pytest --collect-only` in both trees from
+  `--root`, so the project's ini and `testpaths` decide what is collected.
+  Each decided case the write settles must end with exactly its owner, every
+  other test must keep exactly the ids it had, and the set of collected tests
+  must not change; otherwise apply refuses, writes nothing and names each
+  offending test with its before, after and expected ids. A collection error
+  in either tree refuses too and prints pytest's output. This catches what the
+  static guards cannot see: tests installed by a factory, a metaclass,
+  `__init_subclass__`, `setattr` or `exec`.
+  - `--python PATH`: the interpreter whose pytest and project dependencies
+    collect the tests (default: the one running `rr`); only
+    `rules_requirements` itself is added to its `PYTHONPATH`.
+  - `--pytest-args "..."`: extra arguments for both collections, one
+    shell-quoted string (`-c pytest.ini`, `-p my_project.plugin`,
+    `--ignore=scripts`); `--pytest-args=--ignore=x` and `--pytest-args
+    "--ignore=x"` both work.
+  - `--no-collect-check`: write on the static guards alone, with a warning;
+    for projects pytest cannot collect at all.
+  - Limits: the check proves only what collects in its own environment (the
+    `--python` interpreter, its packages, the current environment variables
+    and the plugins named in `--pytest-args`): a test built only when `HW=1`
+    is set, or a plugin your runner loads with `-p` that `--pytest-args`
+    leaves out, is not checked. Symlinked paths are skipped in both
+    collections, so tests reached only through a symlink are not checked
+    either. Collectors skipped at collection time (`pytest.importorskip`) are
+    listed in a warning.
 - A draft guide, docs/guides/migrating-to-per-case.md, walks through the
   steps: collect evidence, plan, decide, rewrite the tags, edit the model.
 - Ingest records the enclosing `<testsuite>` name as `TestCase.suite` (a new

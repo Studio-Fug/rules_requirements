@@ -27,7 +27,12 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
   `rr_wrapped_test(format = "junit")`.
 - Migration tooling: case keys and `rr cases`; `rr migrate plan` (the
   attribution worksheet); `rr migrate apply --stage tags` (rewrites Python
-  test tags to the decided owners, verified with a pytest collection check).
+  test tags to the decided owners). Every write, `--dry-run` and `--partial`
+  included, is first proven by a pytest collection check in a copy of the
+  tree, and refused if any test's ids would change other than as decided;
+  `--python` and `--pytest-args` set up that collection, `--no-collect-check`
+  skips it. Tests reached only through a symlink, or collected only in
+  another environment, are outside the check.
 - `rr --version`.
 
 ### Changed
