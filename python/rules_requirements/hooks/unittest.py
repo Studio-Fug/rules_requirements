@@ -26,14 +26,17 @@ test. The same decorators are honoured when pytest collects the ``TestCase``.
 from __future__ import annotations
 
 import argparse
+import inspect
 import os
 import re
 import sys
 import time
 import traceback
 import unittest
+import warnings
 from typing import Any
 
+from rules_requirements.hooks.ids import MultipleRequirementsWarning, inherited_ids, multiple_warning, split_ids
 from rules_requirements.hooks.junit_writer import JUnitWriter, source_file
 
 
@@ -43,20 +46,66 @@ def trace_of(test: unittest.TestCase) -> Any:
     The method's ``@rr.verifies`` replaces its class's (and a subclass's
     replaces its base class's): ``ids`` is one id, or none; several only for
     a deprecated multi-id declaration, recorded in full so attribution
-    quarantines the case. The nearest declaration naming a level wins, and
-    artifact keys resolve nearest-first.
+    quarantines the case. Base classes that no nearer class overrides are one
+    scope (:func:`class_ids`): two naming different ids are a multi-id
+    declaration too, not resolved by MRO order. The nearest declaration
+    naming a level wins, and artifact keys resolve nearest-first.
     """
     method = getattr(test, getattr(test, "_testMethodName", ""), None)
-    ids: list[str] = []
+    method = getattr(method, "__func__", method)
+    sources = [klass for klass, _ in inherited_ids(type(test), _own_ids)]
+    ids: list[str] = list((getattr(method, "__rr__", None) or {}).get("ids", ()))
+    ids = ids or list(dict.fromkeys(i for klass in sources for i in _own_ids(klass)))
     level = ""
     artifact: dict[str, str] = {}
-    for holder in (getattr(method, "__func__", method), type(test)):
+    for holder in (method, *sources, type(test)):
         rr = getattr(holder, "__rr__", None) or {}
-        ids = ids or list(rr.get("ids", ()))
         level = level or rr.get("level", "")
         for k, v in (rr.get("artifact") or {}).items():
             artifact.setdefault(k, v)
     return {"ids": list(dict.fromkeys(ids)), "level": level, "artifact": artifact}
+
+
+def _own_ids(obj: Any) -> list[str]:
+    """The ids of ``@rr.verifies`` on ``obj`` itself (not inherited from a base class)."""
+    try:
+        own = vars(obj).get("__rr__")
+    except TypeError:  # no __dict__
+        return []
+    return split_ids(list(own.get("ids", ()))) if isinstance(own, dict) else []
+
+
+def class_ids(cls: Any) -> list[str]:
+    """The ids ``cls`` declares or inherits through ``@rr.verifies``.
+
+    Its own declaration replaces its bases'; with none, every base that no
+    nearer class overrides counts, so sibling bases naming different ids
+    give several ids (quarantined downstream), never the first in the MRO.
+    """
+    return list(dict.fromkeys(i for _, ids in inherited_ids(cls, _own_ids) for i in ids))
+
+
+def _warn_inherited(cls: Any) -> None:
+    """Warn (RR-E101) if ``cls`` gets different ids from several sibling bases.
+
+    The case records every id (and is quarantined) either way. The warning is
+    attributed to the class definition; escalated to an error, it is printed
+    to stderr instead of aborting the run.
+    """
+    sources = inherited_ids(cls, _own_ids)
+    ids = list(dict.fromkeys(i for _, own in sources for i in own))
+    if len(sources) < 2 or len(ids) < 2:
+        return
+    names = ", ".join(getattr(k, "__qualname__", str(k)) for k, _ in sources)
+    warning = multiple_warning(f"{cls.__qualname__}: inherited from {names}", ids)
+    try:
+        filename, lineno = inspect.getsourcefile(cls) or "", inspect.getsourcelines(cls)[1]
+    except (OSError, TypeError):
+        filename, lineno = getattr(sys.modules.get(cls.__module__), "__file__", "") or cls.__module__, 1
+    try:
+        warnings.warn_explicit(warning, MultipleRequirementsWarning, filename, lineno, module=cls.__module__)
+    except Warning as escalated:
+        print(f"{escalated}", file=sys.stderr)
 
 
 def _test_file(obj: Any) -> str:
@@ -99,7 +148,7 @@ def _holder_trace(description: str) -> tuple[str, str, Any]:
                 break
     rr = getattr(owner, "__rr__", None) or {}
     trace = {
-        "ids": list(rr.get("ids", [])),
+        "ids": class_ids(owner) if isinstance(owner, type) else list(rr.get("ids", [])),
         "level": rr.get("level", ""),
         "artifact": dict(rr.get("artifact") or {}),
         "file": _test_file(owner) if owner is not None else "",
@@ -117,10 +166,14 @@ class JUnitResult(unittest.TextTestResult):
         self._start: float | None = None
         self._failed_subtests: list[tuple[str, str]] = []  # (status, label) of the running test's
         self._own_outcome = False  # whether the running test recorded a result under its own key
+        self._warned: set[int] = set()  # id() of the classes already checked by _warn_inherited
 
     def startTest(self, test: unittest.TestCase) -> None:  # noqa: N802
         self._start = time.monotonic()
         self._failed_subtests, self._own_outcome = [], False
+        if isinstance(test, unittest.TestCase) and id(type(test)) not in self._warned:
+            self._warned.add(id(type(test)))
+            _warn_inherited(type(test))
         super().startTest(test)
 
     def stopTest(self, test: unittest.TestCase) -> None:  # noqa: N802

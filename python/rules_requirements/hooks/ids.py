@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 from rules_requirements.util import dedupe
 
@@ -57,6 +57,48 @@ def split_ids(value: Any) -> list[str]:
     else:
         parts = [p for p in _SEPARATORS.split(str(value).strip()) if p]
     return dedupe(parts)
+
+
+def inherited_ids(cls: Any, own_ids: Callable[[Any], list[str]]) -> list[tuple[Any, list[str]]]:
+    """The ``(class, ids)`` declarations ``cls`` gets, nearest first: ONE scope.
+
+    ``own_ids(klass)`` gives the ids ``klass`` declares itself (not inherited).
+    A class that declares an id has that id: its bases' are replaced, nearest
+    wins. A class that declares none gets those of every direct base, each
+    resolved the same way, so two bases that no nearer class overrides form a
+    single scope: if they name different ids the class names both (a
+    multi-id declaration, quarantined downstream), and never just the first
+    one in the MRO. A class reached along several paths (a diamond) counts
+    once, and a class that is a base of another contributing class is
+    overridden by it (``class C(Sub, Base)`` with ``Sub(Base)``: ``Sub``'s).
+    """
+    memo: dict[int, list[tuple[Any, list[str]]]] = {}
+
+    def walk(klass: Any) -> list[tuple[Any, list[str]]]:
+        key = id(klass)
+        if key not in memo:
+            memo[key] = []  # a guard; class graphs are acyclic
+            own = own_ids(klass)
+            found: list[tuple[Any, list[str]]] = [(klass, own)] if own else []
+            if not own:
+                for base in getattr(klass, "__bases__", ()) or ():
+                    found.extend(pair for pair in walk(base) if all(pair[0] is not f[0] for f in found))
+            memo[key] = found
+        return memo[key]
+
+    found = walk(cls)
+    return [
+        (klass, ids)
+        for klass, ids in found
+        if not any(other is not klass and _is_subclass(other, klass) for other, _ in found)
+    ]
+
+
+def _is_subclass(a: Any, b: Any) -> bool:
+    try:
+        return issubclass(a, b)
+    except TypeError:
+        return False
 
 
 def check_id(value: Any, where: str = "requirement") -> str:

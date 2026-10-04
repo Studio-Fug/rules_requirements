@@ -95,6 +95,13 @@ def test_parses_units(): ...
   module-level `pytestmark = pytest.mark.rr("REQ-10")` is a default that a
   test's own marker overrides, never an id added to it. (0.2 recorded the ids
   of every scope.)
+- **Sibling base classes are one scope.** A class that declares no id gets
+  the ids of every base class that no nearer class overrides, together:
+  `class TestD(MixA, MixB)` with `MixA` naming `REQ-1` and `MixB` naming
+  `REQ-2` records both, warns (RR-E101), and is quarantined. It is never
+  resolved by MRO order. A base reached along two paths (a diamond) counts
+  once, and a base that another contributing base subclasses is overridden
+  by it.
 - The nearest marker naming a level wins (`rr` and `requirements` markers alike),
   and artifact keys resolve nearest-first.
 - Every case also records `rr.file`, the test file relative to the workspace.
@@ -145,7 +152,10 @@ if __name__ == "__main__":
 `rr.verifies(id, level="", artifact=None)` records the trace on the function
 or class. The nearest declaration wins: a method's decorator replaces its
 class's, and a subclass's replaces its base class's (a level or artifact key
-the nearer declaration does not set is still inherited). A `setUpClass` /
+the nearer declaration does not set is still inherited). As under pytest,
+sibling base classes that no nearer class overrides are one scope: two naming
+different ids record both, so the case is quarantined, with a warning at the
+class definition when its first test starts. A `setUpClass` /
 `setUpModule` error and a failing subtest carry the same single id as their
 test, and every case records `rr.file`. Extra ids, or stacked decorators
 naming different ids, are deprecated: every id is still recorded (so the case
@@ -723,8 +733,8 @@ the Python hooks with
 
 | Hook | Deprecated form | Warns |
 | ---- | --------------- | ----- |
-| pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
-| unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids | at the decorated definition |
+| pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, sibling base classes naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
+| unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids; sibling base classes naming different ids | at the decorated definition; for sibling bases, at the class definition when its first test starts (escalated to an error, printed to stderr, so the run goes on) |
 | `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
 | googletest | `RR_VERIFIES("A", "B")`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
 | Rust | `rr::verifies!("A", "B")`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |

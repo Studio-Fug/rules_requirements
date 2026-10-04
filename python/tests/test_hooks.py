@@ -362,6 +362,62 @@ def test_unittest_subtests_and_fixture_errors(tmp_path):
         globals().pop("Broken", None)
 
 
+def test_unittest_sibling_base_classes_naming_different_ids_record_both(tmp_path):
+    """unittest: as under pytest, bases no nearer class overrides are one
+    scope; two naming different ids record both (quarantined), not the first
+    in the MRO. A fixture error in such a class carries the same ids."""
+
+    @rr.verifies("REQ-1")
+    class MixA:
+        pass
+
+    @rr.verifies("REQ-2", level="hil")
+    class MixB:
+        pass
+
+    class Both(MixA, MixB, unittest.TestCase):
+        def test_both(self):
+            pass
+
+        @rr.verifies("REQ-3")
+        def test_own(self):
+            pass
+
+    class Left(MixB):
+        pass
+
+    class Shared(Left, MixB, unittest.TestCase):
+        def test_shared(self):
+            pass
+
+    class BrokenBoth(MixA, MixB, unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            raise RuntimeError("no bench")
+
+        def test_never_runs(self):
+            pass
+
+    BrokenBoth.__module__, BrokenBoth.__qualname__ = __name__, "BrokenBoth"
+    globals()["BrokenBoth"] = BrokenBoth
+    try:
+        suite = unittest.TestSuite(
+            [unittest.defaultTestLoader.loadTestsFromTestCase(c) for c in (Both, Shared, BrokenBoth)]
+        )
+        xml = tmp_path / "b.xml"
+        with pytest.warns(MultipleRequirementsWarning, match=r"Both: inherited from .*MixA, .*MixB") as caught:
+            rr_unittest.run(suite, str(xml), "b", verbosity=0)
+        assert ["Both" in str(w.message) for w in caught] == [True]  # once per class; Shared does not warn
+        cases = {c.name: c for c in ingest.collect([str(xml)]).cases}
+        assert cases["test_both"].requirements == ("REQ-1", "REQ-2")
+        assert cases["test_both"].level == "hil"
+        assert cases["test_own"].requirements == ("REQ-3",)
+        assert cases["test_shared"].requirements == ("REQ-2",)
+        assert cases["setUpClass"].requirements == ("REQ-1", "REQ-2")
+    finally:
+        globals().pop("BrokenBoth", None)
+
+
 def test_implements_decorator():
     @rr.implements("REQ-1, REQ-2", ["MIT-1"])
     def f():
@@ -1461,6 +1517,55 @@ def test_pytest_nearest_scope_wins_over_class_and_module(tmp_path):
         "test_module": (("REQ-1",), "sil"),
     }
     assert {c.properties.get("rr.file") for c in cases.values()} == {"test_near.py"}
+
+
+def test_pytest_sibling_base_classes_naming_different_ids_are_one_scope(tmp_path):
+    """Bases that no nearer class overrides are ONE scope: two of them naming
+    different ids make the case multi-id (warned, every id recorded, so it is
+    quarantined), never resolved silently by MRO order."""
+    (tmp_path / "test_bases.py").write_text(
+        "import pytest\n"
+        "from rules_requirements import rr\n"
+        "class MixA:\n    pytestmark = pytest.mark.rr('REQ-1')\n"
+        "class MixB:\n    pytestmark = pytest.mark.rr('REQ-2')\n"
+        "class TestDiamond(MixA, MixB):\n"
+        "    def test_d(self):\n        pass\n"
+        "class TestOwn(MixA, MixB):\n"
+        "    pytestmark = pytest.mark.rr('REQ-7')\n"  # the class's own id overrides both bases
+        "    def test_o(self):\n        pass\n"
+        "class Base:\n    pytestmark = pytest.mark.rr('REQ-3', level='hil')\n"
+        "class Left(Base):\n    pass\n"
+        "class Right(Base):\n    pass\n"
+        "class TestShared(Left, Right):\n"  # one declaration, reached two ways
+        "    def test_s(self):\n        pass\n"
+        "class Over(Base):\n    pytestmark = pytest.mark.rr('REQ-4')\n"
+        "class TestRedundant(Over, Base):\n"  # Over overrides Base, listed again or not
+        "    def test_r(self):\n        pass\n"
+        "@rr.verifies('REQ-5')\nclass VA:\n    pass\n"
+        "@rr.verifies('REQ-6')\nclass VB:\n    pass\n"
+        "class TestVerified(VA, VB):\n"
+        "    def test_v(self):\n        pass\n"
+        "class TestMixed(MixA, VB):\n"
+        "    def test_m(self):\n        pass\n"
+    )
+    proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
+    got = {name: (c.status, c.requirements) for name, c in cases.items()}
+    assert got == {
+        "test_d": ("error", ("REQ-1", "REQ-2")),
+        "test_o": ("passed", ("REQ-7",)),
+        "test_s": ("passed", ("REQ-3",)),
+        "test_r": ("passed", ("REQ-4",)),
+        "test_v": ("error", ("REQ-5", "REQ-6")),
+        "test_m": ("error", ("REQ-1", "REQ-6")),
+    }, out
+    assert cases["test_s"].level == "hil"
+    assert "RR-E101" in cases["test_d"].message and "MixA" in cases["test_d"].message
+    assert "MixB" in cases["test_d"].message
+    proc, out, cases = _run_pytest(tmp_path)  # not escalated: warned once per class, every id recorded
+    assert proc.returncode == 0, out
+    assert out.count("TestDiamond: inherited from") == 1 and "TestVerified: inherited from" in out
+    assert "TestShared" not in out and "TestRedundant" not in out and "TestOwn" not in out
+    assert cases["test_d"].requirements == ("REQ-1", "REQ-2")
 
 
 def test_pytest_trace_of_gives_the_nearest_scope(tmp_path):

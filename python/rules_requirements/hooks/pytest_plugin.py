@@ -12,8 +12,10 @@ requirement the case verifies is decided by attribution, never by the hook.
   (decorators, a conftest's ``item.add_marker``, ``@rr.verifies``), its class
   (a subclass's own declaration before its base's), then the module or
   package ``pytestmark``. A nearer id replaces a farther one; it is never
-  added to it. The nearest marker naming a ``level`` wins, and artifact keys
-  resolve nearest-first.
+  added to it. Sibling base classes that no nearer class overrides are one
+  scope: two naming different ids make the case multi-id (below), never
+  resolved by MRO order. The nearest marker naming a ``level`` wins, and
+  artifact keys resolve nearest-first.
 * A declaration naming several ids (several arguments, a list, a comma or
   whitespace inside one argument, or two declarations in one scope) is
   deprecated: it warns with
@@ -56,7 +58,13 @@ except ImportError:  # pragma: no cover - pytest is always present when the hook
     _tryfirst = _trylast
 
 
-from rules_requirements.hooks.ids import E_RAW_PROPERTY, MultipleRequirementsWarning, multiple_warning, split_ids
+from rules_requirements.hooks.ids import (
+    E_RAW_PROPERTY,
+    MultipleRequirementsWarning,
+    inherited_ids,
+    multiple_warning,
+    split_ids,
+)
 from rules_requirements.hooks.junit_writer import FILE_PROPERTY, source_file
 from rules_requirements.util import dedupe
 
@@ -88,11 +96,10 @@ def _scopes(item: Any) -> list[list[Declaration]]:
 
     The scopes, in order: the ``pytest.param(..., marks=...)`` marks; the
     test function (its markers, ``item.add_marker`` from a conftest, its
-    ``@rr.verifies``); its class, the subclass's own declaration before each
-    base class's (by MRO), each class's markers together with its
-    ``@rr.verifies``; then every enclosing node (an outer class, the module
-    ``pytestmark``, a package), nearest first. Both marker names (``rr`` and
-    ``requirements``) share one order.
+    ``@rr.verifies``); its class (see :func:`_class_scopes`); then every
+    enclosing node (an outer class, the module ``pytestmark``, a package),
+    nearest first. Both marker names (``rr`` and ``requirements``) share one
+    order.
     """
     fn = getattr(item, "obj", None)
     fn = getattr(fn, "__func__", fn)
@@ -105,7 +112,7 @@ def _scopes(item: Any) -> list[list[Declaration]]:
 
     param: list[Declaration] = []
     function: list[Declaration] = []
-    classes: dict[int, list[Declaration]] = {}  # MRO index -> that class's own declarations
+    classes: dict[int, list[Declaration]] = {}  # id(class) -> that class's own declarations
     others: dict[int, list[Declaration]] = {}  # id(node) -> declarations, nearest node first
     for node, marker in item.iter_markers_with_node():
         if marker.name not in MARKERS:
@@ -119,17 +126,58 @@ def _scopes(item: Any) -> list[list[Declaration]]:
                 function.append(decl)
         elif cls_node is not None and node is cls_node:
             owner = mark_owner.get(id(marker), cls_obj)
-            classes.setdefault(mro.index(owner) if owner in mro else 0, []).append(decl)
+            classes.setdefault(id(owner if owner in mro else cls_obj), []).append(decl)
         else:
             others.setdefault(id(node), []).append(decl)
     rr_fn = _own_rr(fn)
     if rr_fn is not None:
         function.append(rr_fn)
-    for index, klass in enumerate(mro):
+    for klass in mro:
         rr_cls = _own_rr(klass)
         if rr_cls is not None:
-            classes.setdefault(index, []).append(rr_cls)
-    return [param, function, *(classes[i] for i in sorted(classes)), *others.values()]
+            classes.setdefault(id(klass), []).append(rr_cls)
+    return [param, function, *_class_scopes(cls_obj, mro, classes), *others.values()]
+
+
+def _class_scopes(cls_obj: Any, mro: list[Any], own: dict[int, list[Declaration]]) -> list[list[Declaration]]:
+    """The class scopes of a test, nearest first, from each class's ``own`` declarations.
+
+    The first scope is every class whose id the test's class gets
+    (:func:`~rules_requirements.hooks.ids.inherited_ids`): its own, or, if it
+    names none, those of its bases that no nearer class overrides, all
+    together, so two sibling bases naming different ids make a multi-id
+    declaration rather than resolve by MRO order. The other classes follow in
+    MRO order, as scopes of their own: their ids are replaced, but a level or
+    artifact key they set is still inherited.
+    """
+    if cls_obj is None:
+        return [own[k] for k in own]
+    sources = [klass for klass, _ in inherited_ids(cls_obj, lambda k: _decl_ids(own.get(id(k), [])))]
+    nearest = [decl for klass in mro if klass in sources for decl in own.get(id(klass), [])]
+    rest = [own[id(klass)] for klass in mro if klass not in sources and id(klass) in own]
+    return [nearest, *rest]
+
+
+def _decl_ids(decls: list[Declaration]) -> list[str]:
+    return dedupe([i for ids, _, _ in decls for i in ids])
+
+
+def _inherited_sources(item: Any) -> list[tuple[Any, list[str]]]:
+    """``(class, ids)`` of each class the test's class gets its id from (one scope)."""
+    cls_node = item.getparent(pytest.Class) if pytest is not None and hasattr(item, "getparent") else None
+    cls_obj = getattr(cls_node, "obj", None) if cls_node is not None else None
+    if cls_obj is None:
+        return []
+    mark_owner = _own_class_marks(cls_obj)
+    mro = list(getattr(cls_obj, "__mro__", ()) or ())
+    own: dict[int, list[str]] = {}
+    for node, marker in item.iter_markers_with_node():
+        if marker.name in MARKERS and node is cls_node:
+            owner = mark_owner.get(id(marker), cls_obj)
+            own.setdefault(id(owner if owner in mro else cls_obj), []).extend(split_ids(list(marker.args)))
+    for klass in mro:
+        own.setdefault(id(klass), []).extend(_own_rr_ids(klass))
+    return inherited_ids(cls_obj, lambda k: dedupe(own.get(id(k), [])))
 
 
 def _declarations(item: Any) -> list[Declaration]:
@@ -257,6 +305,19 @@ def _multi_id_declarations(item: Any) -> Iterator[tuple[Hashable, str, list[str]
             # One scope, two declarations: a marker and @rr.verifies on the
             # same function (or class) name different ids.
             yield (nodeid, "rr.verifies", tuple(both)), f"{nodeid}: marker and rr.verifies", both, _location(node, item)
+
+    # One scope, several classes: sibling bases that no nearer class
+    # overrides, naming different ids (each base's own declaration names one).
+    sources = _inherited_sources(item)
+    inherited = dedupe([i for _, ids in sources for i in ids])
+    if cls_node is not None and len(sources) > 1 and len(inherited) > 1:
+        names = ", ".join(getattr(k, "__qualname__", str(k)) for k, _ in sources)
+        yield (
+            (cls_node.nodeid, "bases", tuple(inherited)),
+            f"{cls_node.nodeid}: inherited from {names}",
+            inherited,
+            _location(cls_node, item),
+        )
 
 
 def _own_class_marks(cls_obj: Any) -> dict[int, Any]:
