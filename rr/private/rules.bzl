@@ -25,9 +25,39 @@ rr_model_rule = rule(
     },
 )
 
+# A baked argument standing for the runfiles path of `executable`. Not
+# `$(rootpath <target>)`: that expands a target's files to build, which for a
+# py_binary under Bazel 7 are its launcher and its .py source (an error).
+EXECUTABLE_ARG = "$(rr_executable)"
+
+def _executable_path(ctx):
+    """The runfiles path `EXECUTABLE_ARG` stands for.
+
+    An executable target (a py_binary, a cc_test) gives its executable: under
+    Bazel 7 a py_binary's files are its launcher *and* its .py source. Anything
+    else (a checked-in script, a genrule output, a filegroup) must be exactly
+    one file, as `$(rootpath)` required in 0.1.0.
+    """
+    ftr = ctx.attr.executable[DefaultInfo].files_to_run
+    if ftr and ftr.executable:
+        return ftr.executable.short_path
+    files = ctx.files.executable
+    if len(files) != 1:
+        fail("%s: `executable` %s must be one file or an executable target, got %d file(s)" % (
+            ctx.label,
+            ctx.attr.executable.label,
+            len(files),
+        ))
+    return files[0].short_path
+
 def _rr_main_impl(ctx):
     args = []
     for a in ctx.attr.baked_args:
+        if a == EXECUTABLE_ARG:
+            if not ctx.attr.executable:
+                fail("%s in baked_args needs `executable`" % EXECUTABLE_ARG)
+            args.append(_executable_path(ctx))
+            continue
         expanded = ctx.expand_location(a, ctx.attr.data)
         if "$(rootpaths " in a or "$(locations " in a:
             args.extend([p for p in expanded.split(" ") if p])
@@ -52,6 +82,9 @@ rr_main = rule(
         "entry": attr.string(mandatory = True, values = ["cli", "pytest", "wrap", "bazel"]),
         "baked_args": attr.string_list(),
         "data": attr.label_list(allow_files = True),
+        # Not `executable = True`: rr_wrapped_test's `test` may be a checked-in
+        # script or a genrule output, as `$(rootpath test)` allowed in 0.1.0.
+        "executable": attr.label(allow_files = True, cfg = "target"),
         "out": attr.output(mandatory = True),
     },
 )

@@ -2,3 +2,5 @@
 # has no third-party runtime dependencies.
 pytest
 jsonschema
+# `rr migrate apply` must write code that black leaves unchanged.
+black

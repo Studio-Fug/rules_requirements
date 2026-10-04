@@ -1,0 +1,38 @@
+load(
+    ":coverage_hooks_test.bzl",
+    "coverage_hooks_default_test",
+    "coverage_hooks_off_test",
+    "coverage_hooks_on_test",
+    "no_coverage_test",
+)
+
+# //cc:case links libgcov's dump/reset hooks only under coverage on Linux, and
+# only while --@rules_requirements//cc:coverage_hooks is true (the default).
+_ON_LINUX = select({
+    "@bazel_tools//src/conditions:linux": True,
+    "//conditions:default": False,
+})
+
+coverage_hooks_default_test(
+    name = "coverage_hooks_default_test",
+    expect_hooks = _ON_LINUX,
+    lib = "//cc:case",
+)
+
+coverage_hooks_on_test(
+    name = "coverage_hooks_on_test",
+    expect_hooks = _ON_LINUX,
+    lib = "//cc:case",
+)
+
+coverage_hooks_off_test(
+    name = "coverage_hooks_off_test",
+    expect_hooks = False,
+    lib = "//cc:case",
+)
+
+no_coverage_test(
+    name = "no_coverage_test",
+    expect_hooks = False,
+    lib = "//cc:case",
+)

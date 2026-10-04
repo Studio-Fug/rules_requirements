@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import os
+import shutil
+import signal
 import sys
+import time
+
+import pytest
 
 from rules_requirements import bazel, ingest
 
@@ -55,6 +61,85 @@ def test_run_tests(tmp_path, monkeypatch, capsys):
     assert "FAILED (exit 3)" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(not shutil.which("setsid"), reason="needs setsid")
+def test_a_timeout_never_waits_for_what_the_test_left_holding_its_output(tmp_path):
+    # A process that left the test's group but holds its stdout must not keep
+    # the action waiting: the timeout returns after SIGTERM's grace, with the
+    # output read so far.
+    pids = tmp_path / "pids"
+    script = _exe(tmp_path / "escapes", "")
+    script.write_text(
+        f"#!/bin/sh\necho partial output\nsetsid sleep 20 & echo $! > {pids}\nsleep 60 & echo $! >> {pids}\nwait\n"
+    )
+    start = time.monotonic()
+    try:
+        code, log = bazel._run_one(str(script), str(tmp_path), {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, 1)
+        elapsed = time.monotonic() - start
+    finally:
+        for pid in pids.read_text().split() if pids.exists() else []:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except OSError:
+                pass
+    assert code == -1
+    assert log.startswith("partial output\n") and log.endswith("TIMEOUT after 1s")
+    assert 1 <= elapsed < 1 + bazel._KILL_GRACE + 1, elapsed
+
+
+@pytest.mark.skipif(not shutil.which("setsid"), reason="needs setsid")
+def test_output_of_an_escaped_process_is_not_buffered_after_the_test_ends(tmp_path):
+    # A chatty process the test left behind, out of its group and holding its
+    # stdout: once _run_one has returned, the pipe is closed on that
+    # process's next write (it dies of SIGPIPE) instead of being read into
+    # memory for the rest of the action.
+    pidfile = tmp_path / "pid"
+    script = _exe(tmp_path / "chatty", "")
+    script.write_text(
+        f"#!/bin/sh\necho hello\nsetsid sh -c 'echo $$ > {pidfile}; while :; do echo more; sleep 0.01; done' &\nsleep 0.5\n"
+    )
+    pid = None
+    try:
+        code, log = bazel._run_one(str(script), str(tmp_path), {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, 30)
+        assert code == 0 and log.startswith("hello\n")
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _running(pid):
+            time.sleep(0.05)
+        assert not _running(pid), "the escaped writer's output is still being read"
+    finally:
+        if pid is not None and _running(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _running(pid):
+    """True while ``pid`` exists and is not a zombie."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        if os.path.isdir("/proc/self"):
+            return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def test_a_timeout_kills_a_test_that_ignores_sigterm(tmp_path):
+    exe = _exe(
+        tmp_path / "stubborn",
+        "import signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n",
+    )
+    start = time.monotonic()
+    code, log = bazel._run_one(str(exe), str(tmp_path), dict(os.environ), 1)
+    assert code == -1 and log.startswith("ready\n")
+    assert time.monotonic() - start < 1 + bazel._KILL_GRACE + 2
+
+
 def test_golden(tmp_path, monkeypatch, capsys):
     actual = tmp_path / "a.json"
     actual.write_text("new\n")
@@ -95,3 +180,49 @@ def test_nonzero_exit_with_all_pass_report_is_an_error(tmp_path, monkeypatch):
     assert ev.target_status == {"//pkg:leaky": "error", "//pkg:envcheck": "passed"}
     (exit_case,) = [c for c in ev.cases if c.name == "exit-status"]
     assert "exited with 23" in exit_case.message and exit_case.requirements == ("REQ-2",)
+
+
+def test_no_junit_result_is_the_targets_single_case(tmp_path, monkeypatch):
+    """rr_evidence's case for a test that wrote no JUnit is the same
+    [target] case as Bazel's generated test.xml for that target: one key."""
+    from conftest import write
+
+    from rules_requirements.case_keys import SYNTHETIC_PATH, CaseKey, index_cases
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    _exe(tmp_path / "bin" / "flash_test", "print('flashed')\n")
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(["run-tests", "--out", str(out), "--test", "//hitl:flash_test=bin/flash_test=_main"])
+    write(
+        tmp_path,
+        "bazel-testlogs/hitl/flash_test/test.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
+        '<testsuite name="hitl/flash_test" tests="1" failures="0" errors="0">\n'
+        '<testcase name="hitl/flash_test" status="run" duration="0" time="0"></testcase>\n'
+        "<system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n"
+        "<![CDATA[flashed]]>\n</system-out>\n</testsuite>\n</testsuites>\n",
+    )
+    rows = index_cases(ingest.collect([str(tmp_path / "bazel-testlogs"), str(out)]))
+    assert list(rows) == [CaseKey("//hitl:flash_test", SYNTHETIC_PATH)]
+    assert rows[CaseKey("//hitl:flash_test", SYNTHETIC_PATH)].status == "passed"
+
+
+def test_exit_status_case_is_target_scope(tmp_path, monkeypatch):
+    from rules_requirements.case_keys import index_cases
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    _exe(
+        tmp_path / "bin" / "leaky",
+        "import os, sys\n"
+        "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite><testcase name=\"ok\"><properties>"
+        '<property name="requirement" value="REQ-2"/></properties></testcase></testsuite>\')\n'
+        "sys.exit(23)\n",
+    )
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(["run-tests", "--out", str(out), "--test", "//pkg:leaky=bin/leaky=_main"])
+    rows = {k.path: r for k, r in index_cases(ingest.collect([str(out)])).items()}
+    assert rows["//pkg:leaky::exit-status"].target_scope
+    assert rows["//pkg:leaky::exit-status"].declared == ("REQ-2",)  # 0.2 verdicts unchanged
+    assert not rows["ok"].target_scope

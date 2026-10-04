@@ -2,7 +2,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 
 package(default_visibility = ["//visibility:public"])
 
-exports_files(glob(["*.py"]))
+exports_files(glob(["*.py"]) + ["node.bzl"])
 
 # Build-time helper used by rr_evidence / rr_report / rr_golden_test.
 py_binary(

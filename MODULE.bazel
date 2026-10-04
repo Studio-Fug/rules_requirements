@@ -2,7 +2,7 @@
 
 module(
     name = "rules_requirements",
-    version = "0.1.0",
+    version = "0.2.0",
 )
 
 # Versions are floors (bzlmod picks the max across the graph). They are kept at
@@ -15,6 +15,10 @@ bazel_dep(name = "rules_rust", version = "0.71.3")
 # googletest is only needed by this repository's own tests: consumers of
 # @rules_requirements//cc:gtest bring their own googletest.
 bazel_dep(name = "googletest", version = "1.17.0.bcr.2", dev_dependency = True)
+
+# Likewise rules_js: rr_node_test takes the consumer's `js_test` as `rule`, so
+# only the tests/node fixtures need it (and its default Node toolchain).
+bazel_dep(name = "aspect_rules_js", version = "3.2.2", dev_dependency = True)
 
 # --------------------------------------------------------------------------- #
 # Development only: toolchains + test dependencies for this repository's own  #

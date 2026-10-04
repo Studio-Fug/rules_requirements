@@ -93,19 +93,33 @@ class JUnitResult(unittest.TextTestResult):
         super().__init__(stream, descriptions, verbosity)
         self.writer = writer
         self._start: float | None = None
+        self._failed_subtests: list[tuple[str, str]] = []  # (status, label) of the running test's
+        self._own_outcome = False  # whether the running test recorded a result under its own key
 
     def startTest(self, test: unittest.TestCase) -> None:  # noqa: N802
         self._start = time.monotonic()
+        self._failed_subtests, self._own_outcome = [], False
         super().startTest(test)
+
+    def stopTest(self, test: unittest.TestCase) -> None:  # noqa: N802
+        # unittest reports no outcome for a test itself once one of its
+        # subtests failed: record one under the test's own key, so the key
+        # reads failed, not missing, in the runs where a subtest fails.
+        if self._failed_subtests and not self._own_outcome and isinstance(test, unittest.TestCase):
+            status = "failed" if any(st == "failed" for st, _ in self._failed_subtests) else "error"
+            labels = ", ".join(label for _, label in self._failed_subtests)
+            self._record(test, status, f"subtest(s) failed: {labels}")
+        super().stopTest(test)
 
     def _record(self, test: Any, status: str, message: str = "", name: str = "") -> None:
         if isinstance(test, unittest.TestCase):
             tr: Any = trace_of(test)
             name = name or test._testMethodName
             classname = f"{_module_name(type(test).__module__)}.{type(test).__qualname__}"
+            self._own_outcome = self._own_outcome or name == test._testMethodName
         else:  # a class/module fixture error
             name, classname, tr = _holder_trace(getattr(test, "description", str(test)))
-        self.writer.add(
+        self.writer._append(
             name,
             tr["ids"],
             status=status,
@@ -133,6 +147,7 @@ class JUnitResult(unittest.TextTestResult):
         if err is not None:  # a failing subtest fails its test; passing ones are not reported
             status = "failed" if issubclass(err[0], test.failureException) else "error"
             label = subtest._subDescription() if hasattr(subtest, "_subDescription") else str(subtest)
+            self._failed_subtests.append((status, label))
             self._record(
                 test, status, "".join(traceback.format_exception(*err)), name=f"{test._testMethodName} {label}"
             )
@@ -153,7 +168,7 @@ class JUnitResult(unittest.TextTestResult):
 
 def run(suite: unittest.TestSuite, junit_xml: str = "", suite_name: str = "unittest", verbosity: int = 2) -> bool:
     """Run ``suite``; write JUnit to ``junit_xml`` (or ``$XML_OUTPUT_FILE``)."""
-    writer = JUnitWriter(suite_name, default_level="")
+    writer = JUnitWriter(suite_name, default_level="", file="")
     runner = unittest.TextTestRunner(
         stream=sys.stderr,
         verbosity=verbosity,

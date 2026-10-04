@@ -41,6 +41,19 @@ with open("report.html", "w", encoding="utf-8") as fh:
 
 .. automodule:: rules_requirements.ingest.records
    :members: RecordsIngestor
+
+.. automodule:: rules_requirements.case_keys
+   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
+```
+
+## Migration
+
+```{eval-rst}
+.. automodule:: rules_requirements.migrate
+   :members: census, worksheet, decisions, model_edits, check_worksheet, load_worksheet, render_yaml, render_json, render_markdown, Plan, Unit, WorksheetError
+
+.. automodule:: rules_requirements.tag_codemod
+   :members: apply_tags, rewrite, TestFile, ApplyResult, FileResult, Unsupported
 ```
 
 ## Tracing and reports
@@ -66,7 +79,13 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: verifies, implements, unittest_main
 
 .. automodule:: rules_requirements.hooks.junit_writer
-   :members: JUnitWriter
+   :members: JUnitWriter, source_file, xml_safe
+
+.. automodule:: rules_requirements.hooks.checkplan
+   :members: CheckPlan, HarnessError
+
+.. automodule:: rules_requirements.hooks.ids
+   :members: MultipleRequirementsWarning, split_ids, check_id, warn_multiple
 
 .. automodule:: rules_requirements.hooks.pytest_plugin
    :members: trace_of

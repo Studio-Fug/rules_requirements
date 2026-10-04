@@ -13,7 +13,7 @@ registry, pin a commit with `git_override`:
 
 ```starlark
 # MODULE.bazel
-bazel_dep(name = "rules_requirements", version = "0.1.0")
+bazel_dep(name = "rules_requirements", version = "0.2.0")
 git_override(
     module_name = "rules_requirements",
     remote = "https://github.com/Studio-Fug/rules_requirements.git",
@@ -28,8 +28,9 @@ The module declares `rules_python`, `rules_cc` and `rules_rust` as dependencies
 (for the Python toolkit and the C++/Rust hooks); googletest is only a development
 dependency — the googletest hook is header-only and uses your own googletest. Their versions are
 *floors* — Bazel's minimal version selection keeps whatever newer versions your
-workspace already uses — and nothing is fetched unless a target that needs it is
-built. The Python library itself uses only the standard library, so it runs on
+workspace already uses — and no toolchain is downloaded unless a target that
+needs it is built (rules_rust's own toolchain registration does fetch the
+rules_rust sources, but no Rust compiler). The Python library itself uses only the standard library, so it runs on
 whichever Python toolchain your workspace registers (3.9 or newer).
 
 Tested with Bazel 7.7.1 and 8.8.1.

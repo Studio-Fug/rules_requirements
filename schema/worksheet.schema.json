@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studio-fug.github.io/rules_requirements/schema/worksheet.schema.json",
+  "title": "rules_requirements attribution worksheet",
+  "description": "The `.rrplan` worksheet `rr migrate plan` writes (YAML, or JSON with --json): every evidence unit that counts toward two or more entities under the union semantics of v0.2, grouped by target and test module/class, with one owner decision per group and optional per-case overrides. `rr migrate apply` reads the decisions; `rr migrate apply --model` also checks that each owner exists.",
+  "type": "object",
+  "required": ["schema", "groups"],
+  "properties": {
+    "schema": { "const": "rules_requirements/attribution-worksheet/v1" },
+    "inputs": {
+      "type": "object",
+      "description": "The model and evidence paths the worksheet was computed from.",
+      "additionalProperties": { "type": "array", "items": { "type": "string" } }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+    "targets": {
+      "type": "array",
+      "description": "Targets named in verified_by that are shared, or whose cases are contested.",
+      "items": {
+        "type": "object",
+        "required": ["target", "claimed_by"],
+        "additionalProperties": false,
+        "properties": {
+          "target": { "type": "string", "minLength": 1 },
+          "claimed_by": { "$ref": "#/$defs/ids" },
+          "shared": { "type": "boolean" },
+          "cases": { "type": "integer", "minimum": 0 },
+          "per_case_output": { "type": "boolean" },
+          "uncontested": {
+            "type": "object",
+            "description": "Per claiming requirement: cases of the target that count toward it alone.",
+            "additionalProperties": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["target", "group", "owner", "cases"],
+        "additionalProperties": false,
+        "properties": {
+          "target": { "type": "string", "minLength": 1 },
+          "group": { "type": "string", "description": "The test module/class (the case path up to `::`); empty for a whole-target result." },
+          "counts_toward": { "$ref": "#/$defs/ids" },
+          "tags": { "$ref": "#/$defs/ids" },
+          "target_claims": { "$ref": "#/$defs/ids" },
+          "proposed": { "$ref": "#/$defs/id" },
+          "reason": { "type": "string" },
+          "owner": { "$ref": "#/$defs/owner" },
+          "cases": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["path"],
+              "additionalProperties": false,
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "status": { "enum": ["passed", "skipped", "failed", "error"] },
+                "counts_toward": { "$ref": "#/$defs/ids" },
+                "ignored_tags": { "$ref": "#/$defs/ids" },
+                "file": { "type": "string" },
+                "proposed": { "$ref": "#/$defs/id" },
+                "reason": { "type": "string" },
+                "owner": { "$ref": "#/$defs/owner" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "target_scope": {
+      "type": "array",
+      "description": "Whole-target results (exit status, load errors) that carry several ids today. Informational: nothing to decide.",
+      "items": {
+        "type": "object",
+        "required": ["case"],
+        "additionalProperties": false,
+        "properties": {
+          "case": { "type": "string" },
+          "status": { "type": "string" },
+          "counts_toward": { "$ref": "#/$defs/ids" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[^,\\s]+$" },
+    "ids": { "type": "array", "items": { "type": "string" } },
+    "owner": {
+      "description": "ONE entity id, `none` (verifies none of them) or `?` (undecided). A test case verifies at most one requirement, so a list or a comma-separated value is invalid.",
+      "anyOf": [{ "type": "null" }, { "$ref": "#/$defs/id" }]
+    }
+  }
+}

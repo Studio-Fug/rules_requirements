@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="2" time="0.001">
+<testcase classname="app.tests.test_smoke" name="test_boots" time="0.001">
+<properties>
+<property name="requirement" value="REQ-3" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_smoke" name="test_prints_version" time="0.001" />
+</testsuite>
+</testsuites>

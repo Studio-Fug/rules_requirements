@@ -12,9 +12,12 @@ Contributions are welcome through pull requests on
 | `python/tests/` | Unit tests (pytest). |
 | `rr/defs.bzl`, `rr/private/` | Bazel rules and macros. |
 | `cc/rr_gtest.h` | googletest hook. |
+| `cc/rr_case.h` | Per-case JUnit for plain-assert C++ tests. |
 | `rust/` | Rust hook crate (`rr`). |
+| `js/` | node:test runner behind `rr_node_test` (reporter, entry point template, `verifies` helper). |
 | `schema/` | JSON Schema for model files. |
 | `tests/integration/` | Every hook → evidence → report, pinned by goldens. |
+| `tests/node/` | `rr_node_test` fixtures for each node:test behaviour, pinned by a golden of the ingested cases. |
 | `examples/thermostat/` | The {doc}`tutorial` project (a separate Bazel module). |
 | `docs/` | This site. |
 
@@ -52,9 +55,18 @@ the diff:
 ```console
 $ bazel run //tests/integration:report_json_golden_test.update
 $ bazel run //tests/integration:report_md_golden_test.update
+$ bazel run //tests/node:cases_golden_test.update
+$ bazel run //tests/integration:rr_case_report_json_golden_test.update
+$ bazel run //tests/integration:rr_case_report_md_golden_test.update
 ```
 
 (and the same targets in `examples/thermostat`).
+
+`python/tests/fixtures/migrate/` is a small source tree for `rr migrate`: test
+sources with multi-id tags, their evidence, a decided worksheet, and under
+`expected/` the worksheet renderings and the rewritten sources the tests
+compare against. Regenerate those with
+`RR_UPDATE_FIXTURES=1 python -m pytest python/tests/test_migrate.py python/tests/test_tag_codemod.py`.
 
 ## Presubmit checks
 
@@ -77,6 +89,9 @@ $ pip install pre-commit && pre-commit run --all-files
 
 - **Lint** — the presubmit checks above.
 - **Python 3.9–3.13** — the unit tests, and the coverage gate.
+- **node:test conformance** — `rr_node_test`'s runner on Node 18 (the fallback), 20, 22 and 24
+  (`python/tests/test_node_runner.py`), so a change in node:test's event model
+  fails here rather than in a consumer.
 - **Bazel** — `bazel test //...` with Bazel 7.7.1 and 8.8.1 on Linux, and 8.8.1
   on macOS.
 - **Example** — the thermostat's tests and report with Bazel 7.7.1 and 8.8.1;

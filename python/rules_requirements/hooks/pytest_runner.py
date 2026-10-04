@@ -20,6 +20,13 @@ import os
 import sys
 
 
+def _bazel_root() -> str:
+    """The workspace's runfiles directory under ``bazel test`` / ``rr_evidence``, else ""."""
+    srcdir, workspace = os.environ.get("TEST_SRCDIR", ""), os.environ.get("TEST_WORKSPACE", "")
+    root = os.path.join(srcdir, workspace) if srcdir and workspace else ""
+    return root if root and os.path.isdir(root) else ""
+
+
 def main_argv(argv: list[str]) -> int:
     """Run pytest with ``argv`` (paths and options) exactly; see :func:`main`."""
     sys.argv = [sys.argv[0], *argv]
@@ -37,6 +44,13 @@ def main(anchor: str, extra_args: list[str] | None = None) -> int:
     # Option values ("-p no:x", "-k expr") are not paths; only existing files are.
     has_paths = any(not a.startswith("-") and os.path.exists(a.split("::")[0]) for a in argv)
     args = ([] if has_paths else [here]) + ["-p", "no:cacheprovider"]
+    root = _bazel_root()
+    if root and not any(a == "--rootdir" or a.startswith("--rootdir=") for a in argv):
+        # Case keys are rootdir-relative: without this, an ini file above the
+        # runfiles tree (the execroot's pyproject.toml, in a local or
+        # unsandboxed run) would put bazel-out/<cfg>/bin/...runfiles into
+        # every classname.
+        args.append(f"--rootdir={root}")
     xml_out = os.environ.get("XML_OUTPUT_FILE")
     if xml_out:
         args += [f"--junitxml={xml_out}", "-o", "junit_family=xunit2"]

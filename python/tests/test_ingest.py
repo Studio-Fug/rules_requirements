@@ -22,6 +22,23 @@ from rules_requirements.ingest.libtest import merge_trace, parse_libtest
         ("/x/bazel-testlogs/external/repo+/pkg/name/test.xml", "@repo+//pkg:name"),
         ("/x/reports/results.xml", ""),
         ("C:\\x\\bazel-testlogs\\pkg\\name\\test.xml", "//pkg:name"),
+        # Targets whose names merely start like a run level are targets.
+        ("bazel-testlogs/pkg/run_tests/test.xml", "//pkg:run_tests"),
+        ("bazel-testlogs/tools/shard_test/test.xml", "//tools:shard_test"),
+        ("bazel-testlogs/pkg/attempt_test/test.xml", "//pkg:attempt_test"),
+        ("bazel-testlogs/run_all/test.xml", "//:run_all"),
+        ("bazel-testlogs/web/run_smoke_test/test_attempts/attempt_1.xml", "//web:run_smoke_test"),
+        # A package with a testlogs directory: the leftmost testlogs root wins.
+        ("bazel-out/k8-fastbuild/testlogs/x/testlogs/y_test/test.xml", "//x/testlogs:y_test"),
+        ("/x/bazel-testlogs/x/testlogs/y_test/shard_1_of_2_run_1_of_2/test.xml", "//x/testlogs:y_test"),
+        # rr_evidence's output tree (<name>/testlogs) and a copy of it.
+        ("bazel-out/k8-fastbuild/bin/r/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
+        ("ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
+        # An ancestor directory merely named testlogs, above a real rr_evidence
+        # testlogs tree and with no recognised bazel root: the innermost
+        # testlogs wins (origin/main's behaviour), not the leftmost one.
+        ("/tmp/testlogs/proj/bazel-bin/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
+        ("bazel-out/k8-fastbuild/bin/x/testlogs/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
     ],
 )
 def test_target_from_path(path, label):

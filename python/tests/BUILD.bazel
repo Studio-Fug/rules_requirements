@@ -1,4 +1,5 @@
 load("@rr_dev_pip//:requirements.bzl", "requirement")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("//rr:defs.bzl", "rr_py_test")
 
 rr_py_test(
@@ -6,13 +7,42 @@ rr_py_test(
     size = "medium",
     srcs = glob(["*.py"]),
     data = [
+        "data/rr_case_fixture.cc",
+        "data/fake_gtest/gtest/gtest.h",
+        ":rr_case_fixture",
         "//:docs/_static/logo/rules_requirements_logo.svg",
         "//:docs/_static/logo/rules_requirements_logo-dark.svg",
         "//:schema/rules_requirements.schema.json",
-    ],
+        # test_rr_case.py: the rr_case.h header and its BUILD.
+        "//cc:BUILD.bazel",
+        "//cc:rr_case.h",
+        # test_rr_gtest.py: rr_gtest.h, compiled against data/fake_gtest.
+        "//cc:rr_gtest.h",
+        # test_node_runner.py: rr_node_test's runner and its fixtures.
+        "//js:node_test_main.cjs.tpl",
+        "//js:rr_node_reporter.mjs",
+        "//js:verifies.cjs",
+        "//rr/private:node.bzl",
+        "//tests/node:fixtures",
+        # test_migrate.py, test_schema.py: the worksheet schema and fixtures.
+        "//:schema/worksheet.schema.json",
+    ] + glob(["fixtures/**"]),
+    env = {
+        "RR_CASE_FIXTURE": "$(rootpath :rr_case_fixture)",
+        "RR_REQUIRE_BLACK": "1",  # black-layout tests fail, not skip, without black
+    },
     imports = ["."],  # tests import their shared helpers from conftest
     deps = [
+        requirement("black"),
         requirement("pytest"),
         requirement("jsonschema"),
     ],
+)
+
+# test_rr_case.py runs this; outside Bazel it compiles the source itself.
+cc_binary(
+    name = "rr_case_fixture",
+    testonly = True,
+    srcs = ["data/rr_case_fixture.cc"],
+    deps = ["//cc:case"],
 )

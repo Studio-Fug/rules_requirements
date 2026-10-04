@@ -3,12 +3,16 @@
 # `unittest_hook_test` contains one deliberate failure (REQ-5) so the report
 # shows a FAILED requirement; it is tagged manual and only runs inside
 # rr_evidence, where a failing test is evidence rather than a broken build.
+#
+# rr_case.h has its own model, evidence and goldens (the `rr_case_*` targets
+# at the end), with `rr_case_test` failing one case on purpose the same way.
 
 load("@rr_dev_pip//:requirements.bzl", "requirement")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_test")
-load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test", "rr_wrapped_test")
 
 rr_model(
     name = "model",
@@ -44,13 +48,62 @@ rr_rust_test(
     deps = ["//rust:rr"],
 )
 
+# A harness writing its own JUnit (a CheckPlan) to a fixed path, passed on by
+# the wrapper. Not part of the evidence below: it smoke-tests the macro.
+py_binary(
+    name = "junit_runner",
+    srcs = ["junit_runner.py"],
+    tags = ["manual"],
+    deps = ["//python"],
+)
+
+rr_wrapped_test(
+    name = "junit_wrapped_test",
+    format = "junit",
+    junit_in = "${TEST_TMPDIR}/runner/junit.xml",
+    test = ":junit_runner",
+)
+
+# rr_wrapped_test's `test` may also be a checked-in script, or a genrule output
+# that is no executable target, as `$(rootpath test)` allowed in 0.1.0.
+rr_wrapped_test(
+    name = "wrapped_script_test",
+    test = "fake_libtest.sh",
+)
+
+genrule(
+    name = "gen_libtest",
+    srcs = ["fake_libtest.sh"],
+    outs = ["gen_libtest.sh"],
+    cmd = "cp $< $@ && chmod +x $@",
+)
+
+rr_wrapped_test(
+    name = "wrapped_genrule_test",
+    test = ":gen_libtest",
+)
+
+# junit_wrapped_test passes on the wrapper's exit status alone; this asserts on
+# what the wrapper writes for the same runner (cases, level, rr.file).
+py_test(
+    name = "junit_wrapped_check_test",
+    srcs = ["junit_wrapped_check.py"],
+    args = ["$(rootpaths :junit_runner)"],
+    data = [":junit_runner"],
+    main = "junit_wrapped_check.py",
+    deps = ["//python"],
+)
+
 rr_annotations_test(
     name = "annotations_test",
-    srcs = glob([
-        "*.py",
-        "*.cc",
-        "*.rs",
-    ]),
+    srcs = glob(
+        [
+            "*.py",
+            "*.cc",
+            "*.rs",
+        ],
+        exclude = ["rr_case_test.cc"],
+    ),
     model = ":model",
 )
 
@@ -80,4 +133,47 @@ rr_golden_test(
     name = "report_md_golden_test",
     src = ":report.md",
     golden = "report.golden.md",
+)
+
+# rr_case.h: per-case JUnit from a plain-assert C++ binary, without googletest.
+
+rr_model(
+    name = "rr_case_model",
+    srcs = ["rr_case_model.yaml"],
+)
+
+cc_test(
+    name = "rr_case_test",
+    srcs = ["rr_case_test.cc"],
+    tags = ["manual"],
+    deps = ["//cc:case"],
+)
+
+rr_annotations_test(
+    name = "rr_case_annotations_test",
+    srcs = ["rr_case_test.cc"],
+    model = ":rr_case_model",
+)
+
+rr_evidence(
+    name = "rr_case_evidence",
+    tests = [":rr_case_test"],
+)
+
+rr_report(
+    name = "rr_case_report",
+    evidence = [":rr_case_evidence"],
+    model = [":rr_case_model"],
+)
+
+rr_golden_test(
+    name = "rr_case_report_json_golden_test",
+    src = ":rr_case_report.json",
+    golden = "rr_case_report.golden.json",
+)
+
+rr_golden_test(
+    name = "rr_case_report_md_golden_test",
+    src = ":rr_case_report.md",
+    golden = "rr_case_report.golden.md",
 )

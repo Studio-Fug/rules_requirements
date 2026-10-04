@@ -1,0 +1,9 @@
+# A node:test file another package's rr_node_test runs (relative paths).
+# Generated, as rules_js copies only its own package's source files to bin.
+genrule(
+    name = "other_package",
+    srcs = ["other_package.src.cjs"],
+    outs = ["other_package.test.cjs"],
+    cmd = "cp $< $@",
+    visibility = ["//tests/node:__pkg__"],
+)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+import subprocess
 import sys
 import textwrap
 
@@ -12,6 +13,32 @@ if _PKG_ROOT not in sys.path:
     sys.path.insert(0, _PKG_ROOT)
 
 from rules_requirements.model import read_model  # noqa: E402
+
+# Source trees that tests copy and rewrite (e.g. `rr migrate apply`); their
+# test_*.py files are data, not tests of this package.
+collect_ignore = ["fixtures"]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _child_interpreter_sees_the_suite_deps():
+    """`rr migrate apply`'s collection check runs `sys.executable -m pytest`.
+    Under Bazel 7, rules_python's bootstrap builds no venv: the deps are on
+    this process's sys.path only, and a child interpreter cannot import
+    pytest. Hand them over through PYTHONPATH, only when that is the case."""
+    probe = subprocess.run([sys.executable, "-c", "import pytest"], capture_output=True)
+    if probe.returncode == 0:
+        yield
+        return
+    old = os.environ.get("PYTHONPATH")
+    os.environ["PYTHONPATH"] = os.pathsep.join([p for p in sys.path if p] + ([old] if old else []))
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = old
+
 
 MODEL = """
 project:

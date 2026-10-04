@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="13" time="0.001">
+<testcase classname="app.tests.test_config" name="test_parses_minimal_file" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_config" name="test_rejects_missing_key" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_config" name="test_rejects_garbage[]" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_config" name="test_rejects_garbage[{]" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_config" name="test_rejects_garbage[]]" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_config.TestRoundTrip" name="test_dump_then_load" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-2" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_link" name="test_reconnects_after_drop" time="0.001">
+<properties>
+<property name="requirement" value="REQ-3" />
+<property name="requirement" value="REQ-1" />
+<property name="level" value="sil" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_link" name="test_backs_off_exponentially" time="0.001">
+<properties>
+<property name="requirement" value="REQ-3" />
+<property name="requirement" value="REQ-1" />
+<property name="level" value="sil" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_legacy.LegacyTest" name="test_reads_old_format" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-3" />
+<property name="level" value="simulation" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_legacy.LegacyTest" name="test_rejects_old_garbage" time="0.001">
+<properties>
+<property name="requirement" value="REQ-2" />
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-3" />
+<property name="level" value="simulation" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_obsolete" name="test_helper_shape" time="0.001">
+<properties>
+<property name="requirement" value="REQ-4" />
+<property name="requirement" value="REQ-5" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_modes" name="test_modes[fast]" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-3" />
+</properties>
+</testcase>
+<testcase classname="app.tests.test_modes" name="test_modes[slow]" time="0.001">
+<properties>
+<property name="requirement" value="REQ-1" />
+<property name="requirement" value="REQ-3" />
+</properties>
+</testcase>
+</testsuite>
+</testsuites>

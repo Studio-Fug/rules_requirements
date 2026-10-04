@@ -45,3 +45,37 @@ def test_schema_accepts_models():
 def test_schema_rejects_bad_shapes(doc):
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(doc, _schema())
+
+
+def _worksheet_schema():
+    for base in (_ROOT, os.environ.get("TEST_SRCDIR", "") + "/_main"):
+        path = os.path.join(base, "schema", "worksheet.schema.json")
+        if os.path.exists(path):
+            with open(path) as fh:
+                return json.load(fh)
+    pytest.skip("schema not available")
+
+
+def test_worksheet_schema_accepts_generated_and_decided_worksheets():
+    from test_migrate import REPO, fixture_plan
+
+    from rules_requirements import migrate
+
+    validator = jsonschema.Draft202012Validator(_worksheet_schema())
+    _, plan = fixture_plan()
+    doc = json.loads(migrate.render_json(migrate.worksheet(plan, inputs={"model": ["m"], "evidence": ["e"]})))
+    validator.validate(doc)
+    validator.validate(migrate.load_worksheet(os.path.join(REPO, "decided.rrplan")))
+
+
+@pytest.mark.parametrize(
+    "owner",
+    [["REQ-1", "REQ-2"], "REQ-1, REQ-2", "REQ-1 REQ-2", ""],
+)
+def test_worksheet_schema_rejects_more_than_one_owner(owner):
+    doc = {
+        "schema": "rules_requirements/attribution-worksheet/v1",
+        "groups": [{"target": "//a:b", "group": "m", "owner": owner, "cases": [{"path": "m::t"}]}],
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(doc, _worksheet_schema())

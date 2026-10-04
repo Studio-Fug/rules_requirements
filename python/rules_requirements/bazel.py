@@ -20,10 +20,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any
 
 from rules_requirements.hooks.junit_writer import JUnitWriter
+from rules_requirements.ingest.junit import SYNTHETIC, TARGET_SCOPE
 
 
 def _label_dir(label: str) -> str:
@@ -36,6 +38,76 @@ def _label_dir(label: str) -> str:
 
 def _norm_label(label: str) -> str:
     return label[2:] if label.startswith("@@//") else (label[1:] if label.startswith("@//") else label)
+
+
+# After our own timeout: how long the test gets to end on SIGTERM before
+# SIGKILL, and how long its output pipe is drained once it has ended.
+_KILL_GRACE = 2.0
+_DRAIN = 1.0
+
+
+def _drain(fd: int, chunks: list[bytes], done: threading.Event) -> None:
+    """Reads ``fd`` into ``chunks`` until EOF or until ``done`` is set.
+
+    Once the caller has its output (``done``), the next read ends the thread
+    and closes the pipe instead of buffering what a process the test left
+    behind keeps writing: that writer then gets EPIPE.
+    """
+    try:
+        while not done.is_set():
+            data = os.read(fd, 65536)
+            if not data or done.is_set():
+                return
+            chunks.append(data)
+    except OSError:
+        return
+    finally:
+        os.close(fd)
+
+
+def _run_one(exe: str, cwd: str, env: dict[str, str], timeout: float) -> tuple[int, str]:
+    """Runs one test executable: (exit code, combined output).
+
+    The test stays in this action's process group, so when Bazel kills the
+    action (a cancelled build, the action's own timeout) the kill reaches the
+    test and everything it started. On ``timeout`` the test itself gets
+    SIGTERM (an ``rr_case.h`` runner then kills the case it is running), and
+    SIGKILL if it is still there after a short grace. Only the test itself is
+    waited for: output is read on a thread, so a process the test left behind
+    that still holds the output pipe (a daemon, ``setsid``) never blocks the
+    action, and what was read by then is kept; the pipe is then closed at
+    the next thing such a process writes, so it is not buffered for the rest
+    of the action.
+    """
+    read_fd, write_fd = os.pipe()
+    try:
+        proc = subprocess.Popen([exe], cwd=cwd, env=env, stdout=write_fd, stderr=write_fd)
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        os.close(write_fd)
+    chunks: list[bytes] = []
+    done = threading.Event()
+    reader = threading.Thread(target=_drain, args=(read_fd, chunks, done), daemon=True)
+    reader.start()
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        proc.terminate()
+        try:
+            proc.wait(timeout=_KILL_GRACE)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    reader.join(_DRAIN)
+    done.set()
+    out = b"".join(list(chunks)).decode("utf-8", "replace")
+    if timed_out:
+        return -1, out + f"\nTIMEOUT after {timeout}s"
+    return proc.returncode, out
 
 
 def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None = None) -> int:
@@ -75,13 +147,7 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
         if not os.path.isdir(cwd):
             cwd = runfiles if os.path.isdir(runfiles) else execroot
         start = time.monotonic()
-        try:
-            proc = subprocess.run(
-                [exe], cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, check=False
-            )
-            code, log = proc.returncode, proc.stdout.decode("utf-8", "replace")
-        except subprocess.TimeoutExpired as exc:
-            code, log = -1, (exc.stdout or b"").decode("utf-8", "replace") + f"\nTIMEOUT after {timeout}s"
+        code, log = _run_one(exe, cwd, env, timeout)
         with open(os.path.join(logdir, "test.log"), "w", encoding="utf-8") as fh:
             fh.write(log)
         failures += code != 0
@@ -92,24 +158,26 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
             # the whole run is suspect, so the failure carries every id the
             # report traced — those requirements must not read VERIFIED.
             ids = [i for c in reported for i in c.requirements]
-            w = JUnitWriter(label, classname=label)
-            w.add(
+            w = JUnitWriter(label, classname=label, file="")
+            w._append(
                 "exit-status",
                 list(dict.fromkeys(ids)),
                 "error",
                 f"test binary exited with {code} although its report shows no failure\n{log[-4000:]}",
+                properties=TARGET_SCOPE,  # about the run, not a case of it
             )
             w.write(os.path.join(logdir, "test.exit.xml"))
         if not os.path.exists(xml) or os.path.getsize(xml) == 0:
             # Like Bazel: a test that writes no JUnit gets one synthetic case.
-            w = JUnitWriter(label, classname=label)
+            w = JUnitWriter(label, classname=label, file="")
             status = "passed" if code == 0 else "failed"
-            w.add(
+            w._append(
                 label.rsplit(":", 1)[-1],
                 (),
                 status,
                 "" if code == 0 else f"exit code {code}\n{log[-4000:]}",
                 time.monotonic() - start,
+                properties=SYNTHETIC,  # the target's [target] case, as Bazel's own would be
             )
             w.write(xml)
         shutil.rmtree(tmp, ignore_errors=True)

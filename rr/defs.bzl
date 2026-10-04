@@ -13,8 +13,11 @@ Model:
 
 Test hooks:
   * `rr_py_test`          — pytest with `@pytest.mark.rr(...)` traceability JUnit.
-  * `rr_wrapped_test`     — run a test binary and convert its output (libtest).
+  * `rr_wrapped_test`     — run a test binary and convert its output (libtest),
+                            or pass on the JUnit it writes (junit).
   * `rr_rust_test`        — `rust_test` + wrapper, for `rr::verifies!(...)`.
+  * `rr_node_test`        — rules_js `js_test` of a node:test file, one JUnit
+                            case per test (`verifies(t, id)` diagnostics).
   (googletest needs no wrapper: depend on `@rules_requirements//cc:gtest`.)
 
 Reports:
@@ -25,8 +28,10 @@ Reports:
 
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
+load("//rr/private:node.bzl", _rr_node_test = "rr_node_test")
 load(
     "//rr/private:rules.bzl",
+    _EXECUTABLE_ARG = "EXECUTABLE_ARG",
     _RrEvidenceInfo = "RrEvidenceInfo",
     _RrModelInfo = "RrModelInfo",
     _rr_evidence = "rr_evidence",
@@ -39,17 +44,23 @@ RrModelInfo = _RrModelInfo
 RrEvidenceInfo = _RrEvidenceInfo
 rr_evidence = _rr_evidence
 rr_report = _rr_report
+rr_node_test = _rr_node_test
 
 _LIB = Label("//python")
 
-def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], **kwargs):
-    """A py_test/py_binary whose generated main bakes in `baked_args`."""
+def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], executable = None, **kwargs):
+    """A py_test/py_binary whose generated main bakes in `baked_args`.
+
+    `executable`: a target whose executable `$(rr_executable)` in
+    `baked_args` stands for (add it to `data` for its runfiles).
+    """
     main = name + ".rr_main.py"
     _rr_main(
         name = name + ".rr_main",
         entry = entry,
         baked_args = baked_args,
         data = data,
+        executable = executable,
         out = main,
         testonly = kwargs.get("testonly", kind == "test"),
         tags = ["manual"],
@@ -177,26 +188,35 @@ def rr_py_test(name, srcs, deps = [], args = [], data = [], **kwargs):
         **kwargs
     )
 
-def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], **kwargs):
+def rr_wrapped_test(name, test, format = "libtest", level = "", args = [], junit_in = "", **kwargs):
     """Run test binary `test` and convert its output to traceability JUnit.
 
     Args:
       name: test name.
       test: the test executable target (usually tagged `manual`).
-      format: output format of the binary (`libtest`).
+      format: output format of the binary: `libtest`, or `junit` for a binary
+        that writes JUnit itself to `junit_in`.
       level: default verification level for cases without one.
       args: extra arguments for the binary.
+      junit_in: with `format = "junit"`, the path the binary writes its JUnit
+        to; `$VARS` such as `${TEST_TMPDIR}` are expanded at run time, and a
+        relative path is relative to the test's working directory.
       **kwargs: forwarded to `py_test`.
     """
+    if (format == "junit") != bool(junit_in):
+        fail("rr_wrapped_test: junit_in is required with format = \"junit\", and only then")
     wrap_args = ["--format", format, "--target", "//%s:%s" % (native.package_name(), name)]
     if level:
         wrap_args += ["--level", level]
+    if junit_in:
+        wrap_args += ["--junit-in", junit_in]
     _py(
         "test",
         name,
         "wrap",
-        baked_args = wrap_args + ["--", "$(rootpath %s)" % test] + args,
+        baked_args = wrap_args + ["--", _EXECUTABLE_ARG] + args,
         data = [test],
+        executable = test,
         **kwargs
     )
 

@@ -1,0 +1,140 @@
+{
+  "schema": "rules_requirements/report/v1",
+  "title": "rules_requirements rr_case.h integration",
+  "project": {
+    "name": "rules_requirements rr_case.h integration"
+  },
+  "summary": {
+    "user_needs": 1,
+    "user_needs_validated": 0,
+    "requirements": 3,
+    "requirements_verified": 2,
+    "requirements_under_verified": 0,
+    "requirements_partial": 0,
+    "requirements_failed": 1,
+    "requirements_unverified": 0,
+    "risks": 0,
+    "risks_mitigated": 0,
+    "mitigations": 0,
+    "mitigations_verified": 0,
+    "test_cases": 4,
+    "gaps": 1
+  },
+  "levels": [
+    {
+      "name": "analysis",
+      "rank": 1
+    },
+    {
+      "name": "simulation",
+      "rank": 2
+    },
+    {
+      "name": "sil",
+      "rank": 3
+    },
+    {
+      "name": "hil",
+      "rank": 4
+    },
+    {
+      "name": "hitl",
+      "rank": 5
+    },
+    {
+      "name": "inspection",
+      "rank": null
+    }
+  ],
+  "user_needs": [
+    {
+      "id": "UN-1",
+      "title": "Trace plain-assert C++ tests case by case",
+      "status": "FAILED",
+      "requirements": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3"
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "REQ-1",
+      "title": "A passing case verifies the one requirement it names",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "plain_assert_codec::tagged_case_is_traced",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:rr_case_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": []
+    },
+    {
+      "id": "REQ-2",
+      "title": "A failing case fails its own requirement",
+      "status": "FAILED",
+      "evidence": [
+        {
+          "name": "plain_assert_codec::failing_case_fails_its_own_requirement",
+          "status": "failed",
+          "level": "simulation",
+          "target": "//tests/integration:rr_case_test",
+          "message": "terminated by SIGABRT: tests/integration/rr_case_test.cc:13: RR_CHECK(2 + 2 == 5) failed"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": null,
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": []
+    },
+    {
+      "id": "REQ-3",
+      "title": "The cases after a failing one still run and count",
+      "status": "VERIFIED",
+      "evidence": [
+        {
+          "name": "plain_assert_codec::cases_after_a_failure_still_run",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//tests/integration:rr_case_test"
+        }
+      ],
+      "demanded_level": "simulation",
+      "provided_level": "simulation",
+      "satisfies": [
+        "UN-1"
+      ],
+      "refines": [],
+      "implements": []
+    }
+  ],
+  "mitigations": [],
+  "risks": [],
+  "test_methods": [],
+  "modules": {},
+  "high_open_risks": [],
+  "pyramid_violations": [],
+  "unknown_evidence": {},
+  "gaps": [
+    {
+      "kind": "failed",
+      "entity": "REQ-2",
+      "message": "failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement",
+      "route": "autonomous",
+      "demanded_level": "simulation"
+    }
+  ]
+}

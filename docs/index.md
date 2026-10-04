@@ -35,8 +35,8 @@ argument.
   requirements, risks, mitigations and test methods, one file or one object per
   file, validated with stable rule codes ({doc}`guides/model`).
 - **Test hooks that emit standard JUnit XML** with traceability properties, for
-  pytest, unittest, googletest and Rust, plus a writer for hand-rolled hardware
-  harnesses ({doc}`guides/hooks`).
+  pytest, unittest, googletest, plain-assert C++, Rust and node:test, plus a
+  writer for hand-rolled hardware harnesses ({doc}`guides/hooks`).
 - **Pluggable evidence ingestion** — JUnit is the standard; Rust libtest output
   and signed inspection records are built in; other formats are a small class
   away ({doc}`guides/evidence`).
@@ -86,6 +86,7 @@ guides/outputs
 guides/bazel
 guides/integration
 guides/web-editor
+guides/migrating-to-per-case
 ```
 
 ```{toctree}
@@ -103,4 +104,5 @@ reference/api
 :hidden:
 
 development
+release-notes
 ```

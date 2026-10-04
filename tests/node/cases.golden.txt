@@ -1,0 +1,42 @@
+//tests/node:args_test#args::sees its arguments  [passed]  level=sil rr.file=tests/node/args.test.cjs
+//tests/node:compiled_test#compiled > compiled::keeps the min-RTT sample  [passed]  requirement=REQ-8 rr.file=tests/node/dist-test/tests/compiled.test.js
+//tests/node:diagnostics_test#diagnostics::raw diagnostics  [passed]  requirement=REQ-1 level=hil artifact.board_rev=C rr.file=tests/node/diagnostics.test.cjs
+//tests/node:diagnostics_test#diagnostics::the verifies helper  [passed]  requirement=REQ-2 level=sil rr.file=tests/node/diagnostics.test.cjs
+//tests/node:diagnostics_test#diagnostics::verifies refuses a second id  [failed]  requirement=REQ-3 rr.file=tests/node/diagnostics.test.cjs  Error: rr.verifies(REQ-4): test already verifies REQ-3 [RR-E101]
+//tests/node:diagnostics_test#diagnostics::verifies refuses an id list  [failed]  rr.file=tests/node/diagnostics.test.cjs  TypeError: rr.verifies: 'REQ-5, REQ-6' is not ONE id [RR-E104]
+//tests/node:diagnostics_test#diagnostics::no diagnostics  [passed]  rr.file=tests/node/diagnostics.test.cjs
+//tests/node:diagnostics_test#diagnostics > after a sibling's diagnostics::first  [passed]  requirement=REQ-7 rr.file=tests/node/diagnostics.test.cjs
+//tests/node:diagnostics_test#diagnostics > after a sibling's diagnostics::second  [passed]  rr.file=tests/node/diagnostics.test.cjs
+//tests/node:duplicates_test#duplicates::same name  [passed]  rr.file=tests/node/duplicates.test.cjs
+//tests/node:duplicates_test#duplicates::same name  [failed]  rr.file=tests/node/duplicates.test.cjs  AssertionError [ERR_ASSERTION]: the second one fails
+//tests/node:failures_test#failures::fails  [failed]  rr.file=tests/node/failures.test.cjs  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+//tests/node:failures_test#failures::passes  [passed]  rr.file=tests/node/failures.test.cjs
+//tests/node:failures_test#failures > before hook fails::never runs  [failed]  rr.file=tests/node/failures.test.cjs  test did not finish before its parent and was cancelled
+//tests/node:failures_test#failures > before hook fails::<hooks>  [error]  rr.file=tests/node/failures.test.cjs rr.scope=target  Error: setup broke
+//tests/node:failures_test#failures > parent fails after its subtests::sub passes  [passed]  rr.file=tests/node/failures.test.cjs
+//tests/node:failures_test#failures > parent fails after its subtests::<hooks>  [error]  rr.file=tests/node/failures.test.cjs rr.scope=target  Error: parent body broke
+//tests/node:failures_test#failures > parent of a failing subtest::sub fails  [failed]  rr.file=tests/node/failures.test.cjs  AssertionError [ERR_ASSERTION]: sub broke
+//tests/node:late_rejection_test#late_rejection::passes  [passed]  rr.file=tests/node/late_rejection.test.cjs
+//tests/node:late_rejection_test#late_rejection::<exit-status>  [error]  rr.file=tests/node/late_rejection.test.cjs rr.scope=target  node exited 1 although no test failed; see test.log
+//tests/node:load_error_test#load_error::<load>  [error]  rr.file=tests/node/load_error.test.cjs rr.scope=target  node exited 7 before reporting any test (a load error?); see test.log
+//tests/node:nesting_test#nesting::top level  [passed]  rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > outer::in a describe  [passed]  rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > outer > inner::two levels down  [passed]  rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > parent with subtests::sub a  [passed]  rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > parent with subtests > sub b::sub sub  [passed]  rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > concurrent::slow  [passed]  requirement=REQ-slow rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > concurrent::fast  [passed]  requirement=REQ-fast rr.file=tests/node/nesting.test.cjs
+//tests/node:nesting_test#nesting > concurrent::medium  [passed]  requirement=REQ-medium rr.file=tests/node/nesting.test.cjs
+//tests/node:other_package_test#other_package::found across packages  [passed]  rr.file=tests/node/elsewhere/other_package.test.cjs
+//tests/node:root_after_hook_test#root_after_hook::passes  [passed]  rr.file=tests/node/root_after_hook.test.cjs
+//tests/node:root_after_hook_test#root_after_hook::<file>  [error]  rr.file=tests/node/root_after_hook.test.cjs rr.scope=target  Error: after hook fails
+//tests/node:skip_todo_test#skip_todo::runs  [passed]  rr.file=tests/node/skip_todo.test.cjs
+//tests/node:skip_todo_test#skip_todo::skipped with a reason  [skipped]  rr.file=tests/node/skip_todo.test.cjs  no hardware
+//tests/node:skip_todo_test#skip_todo::skipped  [skipped]  rr.file=tests/node/skip_todo.test.cjs
+//tests/node:skip_todo_test#skip_todo::todo with a reason  [skipped]  rr.file=tests/node/skip_todo.test.cjs  not written yet
+//tests/node:skip_todo_test#skip_todo::skipped at run time  [skipped]  rr.file=tests/node/skip_todo.test.cjs  decided inside the test
+//tests/node:skip_todo_test#skip_todo::todo at run time  [skipped]  rr.file=tests/node/skip_todo.test.cjs  marked inside the test
+//tests/node:skip_todo_test#skip_todo::skipped suite  [skipped]  rr.file=tests/node/skip_todo.test.cjs
+//tests/node:skip_todo_test#skip_todo > outer::skipped suite with a reason  [skipped]  rr.file=tests/node/skip_todo.test.cjs  no bench
+//tests/node:uses_helper_test#uses_helper::own  [passed]  rr.file=tests/node/uses_helper.test.cjs
+//tests/node:uses_helper_test#uses_helper::defined in a helper  [passed]  requirement=REQ-9 rr.file=tests/node/helper_cases.cjs
