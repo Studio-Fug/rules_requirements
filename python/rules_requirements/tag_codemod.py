@@ -430,17 +430,25 @@ class TestFile:
     __test__ = False
 
     def __init__(
-        self, text: str, path: str = "<string>", names: TestNames = DEFAULT_NAMES, reached: Iterable[str] = ()
+        self,
+        text: str,
+        path: str = "<string>",
+        names: TestNames = DEFAULT_NAMES,
+        reached: Iterable[str] = (),
+        trust_main_guard: bool = False,
     ) -> None:
         self.text = text
         self.path = path
         self.names = names
+        self.trust_main_guard = trust_main_guard
         self.lines = text.splitlines(keepends=True)
         self.tree = ast.parse(text, filename=path)
-        # Statements that never run when pytest imports the file (a __main__
-        # block, functions only it calls); ``reached``: the names other files
-        # take from this one, which may call its functions.
-        self._skip = _not_at_import(self.tree, names, reached)
+        # Only with ``trust_main_guard`` (opt-in, best-effort): statements
+        # that never run when pytest imports the file (a __main__ block,
+        # functions only it calls); ``reached``: the names other files take
+        # from this one, which may call its functions. By default nothing is
+        # excluded: what only a __main__ block runs is judged like the rest.
+        self._skip = _not_at_import(self.tree, names, reached) if trust_main_guard else set()
         self._aliases()
         self.decls: list[Decl] = []
         self.tests: list[TestFn] = []
@@ -1435,7 +1443,7 @@ def rewrite(tf: TestFile, owners: Mapping[str, Optional[str]], line_length: int 
 
     text = _apply(tf, new, added, line_length)
     text = _drop_unused_imports(text, _names(tf.tree))
-    check = TestFile(text, tf.path, tf.names)
+    check = TestFile(text, tf.path, tf.names, trust_main_guard=tf.trust_main_guard)
     for t in check.tests:
         if t.qualname in want and not _matches(check.trace(t), want[t.qualname]):
             raise Unsupported(f"{t.qualname}: the rewrite would not give {want[t.qualname]} (internal check)")
@@ -2048,7 +2056,15 @@ def _not_at_import(tree: ast.Module, names: TestNames = DEFAULT_NAMES, reached: 
     dynamically (:func:`_lookups`), or when the excluded code runs
     tests in-process (``pytest.main()``, ``unittest.main()``): the file is
     then a py_test's launcher, and what runs before the launch runs before
-    collection, in the same interpreter."""
+    collection, in the same interpreter.
+
+    Only ``--trust-main-guard`` (``trust_main_guard=True``) uses this: it
+    is best-effort. A name computed at run time (``__getattribute__``, a
+    ``builtins`` alias, ``runpy.run_module(..., run_name="__main__")`` in
+    another file, ...) can still reach an excluded function at import, and
+    static analysis cannot prove it does not, so the exclusion is opt-in
+    and needs a definitive check after it (the collection check, or ``rr
+    migrate verify`` against fresh test evidence)."""
     blocks = [s for s in tree.body if isinstance(s, ast.If) and _main_guard(s)]
     if not blocks or _rebinds_name(tree):
         return set()
@@ -2121,10 +2137,17 @@ class _Index:
     resolve statically (a name bound by an assignment or a def, such as
     ``B = importlib.import_module(m).C``, or an expression such as
     ``getattr(m, "C")``) is ``unknown``: it may be any class. Files that do
-    not parse are ``unparsed``."""
+    not parse are ``unparsed``.
 
-    def __init__(self, texts: Mapping[str, str], names: TestNames = DEFAULT_NAMES) -> None:
+    With ``trust_main_guard`` (opt-in) the code of a file that never runs
+    when pytest imports it (:func:`_not_at_import`) is left out of the scan;
+    by default every statement is scanned."""
+
+    def __init__(
+        self, texts: Mapping[str, str], names: TestNames = DEFAULT_NAMES, trust_main_guard: bool = False
+    ) -> None:
         self.names = names
+        self.trust_main_guard = trust_main_guard
         self.parts: dict[str, list[str]] = {}
         self.trees: dict[str, ast.Module] = {}
         self.unparsed: dict[str, str] = {}
@@ -2151,7 +2174,9 @@ class _Index:
         self.dynamic: dict[str, list[tuple[int, str]]] = {}  # file -> (line, call) importing it cannot name
         # file -> statements that never run when pytest imports it (_not_at_import),
         # and the names other files may reach in it (which may call its functions).
-        self.skip: dict[str, set[int]] = {rel: _not_at_import(tree, names) for rel, tree in self.trees.items()}
+        self.skip: dict[str, set[int]] = {
+            rel: _not_at_import(tree, names) if trust_main_guard else set() for rel, tree in self.trees.items()
+        }
         self.reached: dict[str, set[str]] = {}
         # file -> the names its code may reach a function of another file by
         # without importing it (with a pytest item's .module / .obj: an
@@ -2176,7 +2201,7 @@ class _Index:
                     reached.setdefault(f, set()).update(used)
             todo = set()
             for rel, tree in self.trees.items():
-                if reached.get(rel, set()) != self.reached.get(rel, set()):
+                if trust_main_guard and reached.get(rel, set()) != self.reached.get(rel, set()):
                     skip = _not_at_import(tree, names, reached.get(rel, ()))
                     if skip != self.skip[rel]:
                         # Another file may call a function excluded so far: judge its body.
@@ -2614,6 +2639,7 @@ def apply_tags(
     line_length: int = 88,
     names: Optional[TestNames] = None,
     files_of: Optional[Mapping[CaseKey, str]] = None,
+    trust_main_guard: bool = False,
 ) -> ApplyResult:
     """Rewrite the Python tests under ``root`` per the worksheet's decisions
     (``CaseKey -> id | "none" | "?"``). Nothing is written; the caller writes
@@ -2631,7 +2657,15 @@ def apply_tags(
     only to the source its evidence names when ``files_of`` (``CaseKey ->
     rr.file``, as the worksheet's case rows carry it) knows one: a C++ or
     Rust case whose path merely reads like a Python module, or a case of a
-    record, is "not a Python test" and left alone."""
+    record, is "not a Python test" and left alone.
+
+    ``trust_main_guard`` (opt-in, default off): leave out of the static
+    guards the code only an ``if __name__ == "__main__":`` block runs
+    (``_not_at_import``). That exclusion is best-effort -- static
+    analysis cannot prove what Python runs at import -- so only use it
+    together with a definitive check (the collection check, or ``rr migrate
+    verify`` against fresh test evidence before merging). By default that
+    code is judged like any other."""
     result = ApplyResult()
     names = test_names(root) if names is None else names
     only = list(only)
@@ -2651,7 +2685,9 @@ def apply_tags(
         return texts.get(rel)
 
     everything = python_files(root)
-    index = _Index({rel: text for rel in everything for text in [read(rel)] if text is not None}, names)
+    index = _Index(
+        {rel: text for rel in everything for text in [read(rel)] if text is not None}, names, trust_main_guard
+    )
     unreadable.update(index.unparsed)
     result.depends = index.depends()
 
@@ -2668,7 +2704,7 @@ def apply_tags(
             newline[rel] = "\r\n"
             text = text.replace("\r\n", "\n")
         try:
-            tf = TestFile(text, rel, names, index.reached.get(rel, ()))
+            tf = TestFile(text, rel, names, index.reached.get(rel, ()), trust_main_guard)
         except SyntaxError as exc:
             unreadable[rel] = f"syntax error: {exc}"
             return None
@@ -2861,7 +2897,15 @@ def apply_tags(
         },
     )
     result.files.sort(key=lambda f: f.path)
-    _recheck(result, decided, keys, {f.path: rewritten[f.path] for f in result.changed}, unassigned, names)
+    _recheck(
+        result,
+        decided,
+        keys,
+        {f.path: rewritten[f.path] for f in result.changed},
+        unassigned,
+        names,
+        trust_main_guard,
+    )
     return result
 
 
@@ -2872,13 +2916,14 @@ def _recheck(
     rewritten: Mapping[str, str],
     unassigned: str,
     names: TestNames = DEFAULT_NAMES,
+    trust_main_guard: bool = False,
 ) -> None:
     """Re-derive each decided case's attribution from the rewritten sources,
     with the same static resolver, and compare it with the worksheet."""
     untagged = set(result.untagged)
     for rel, text in sorted(rewritten.items()):
         try:
-            tf = TestFile(text, rel, names)
+            tf = TestFile(text, rel, names, trust_main_guard=trust_main_guard)
             traces = {t.qualname: tf.trace(t) for t in tf.tests}
         except (SyntaxError, Unsupported) as exc:
             for (path, _), ks in keys.items():

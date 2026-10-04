@@ -434,7 +434,16 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         unassigned=args.unassigned,
         line_length=args.line_length,
         files_of=migrate.case_files(doc),
+        trust_main_guard=args.trust_main_guard,
     )
+    if args.trust_main_guard:
+        print(
+            'rr migrate: WARNING: --trust-main-guard: code only an if __name__ == "__main__": block reaches was '
+            "left out of the static guards. That exclusion is best-effort (static analysis cannot prove what "
+            "Python runs at import); only use it with a definitive check: the collection check, or rr migrate "
+            "verify against fresh test evidence before merging.",
+            file=sys.stderr,
+        )
     writes = {f.path for f in res.to_write(partial=args.partial)}
     held = res.held_back(partial=args.partial)
     # Before writing anything, prove the rewrite against pytest itself: the
@@ -935,6 +944,15 @@ def build_parser() -> argparse.ArgumentParser:
         "every test keeps exactly the ids it should; it runs whenever anything would be written, with --partial "
         "and --dry-run too): write on the static guards alone, which are best-effort and cannot see tests pytest "
         "collects dynamically",
+    )
+    ma.add_argument(
+        "--trust-main-guard",
+        action="store_true",
+        help="leave out of the static guards the code only an 'if __name__ == \"__main__\":' block runs (its body "
+        "and the module-level functions only it reaches), which pytest does not run when it imports the module "
+        "(default: judge that code like any other). The exclusion is best-effort: static analysis cannot prove "
+        "what Python runs at import, so only use it together with a definitive check -- the collection check, or "
+        "rr migrate verify against fresh test evidence before merging",
     )
     ma.add_argument(
         "--python",
