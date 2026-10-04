@@ -23,7 +23,7 @@ class SuiteLevel : public ::testing::Test {
   static void SetUpTestSuite() { RR_VERIFIES("REQ-3"); }
 };
 
-TEST_F(SuiteLevel, InheritsSuiteIds) { EXPECT_TRUE(true); }
+TEST_F(SuiteLevel, DoesNotInheritSuiteIds) { EXPECT_TRUE(true); }
 
 class NextSuite : public ::testing::Test {
  protected:

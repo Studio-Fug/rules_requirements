@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 from rules_requirements.ingest import (
     FAILED,
@@ -131,6 +131,23 @@ def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCas
     return list(cases.values())
 
 
+def trace_ids(rec: dict[str, Any]) -> list[str]:
+    """Every id one ``rr::verifies!`` trace line names, in any shape a producer
+    writes: ``"requirement": "<id>"`` (0.3), the 0.2 list ``"requirements":
+    [...]``, and also a string under ``requirements`` or a list under
+    ``requirement``. Values are returned as written (:func:`~rules_requirements.ingest.apply_properties`
+    splits ``"A,B"``); nothing a line names is dropped, so a line naming two
+    ids always reaches attribution as a multi-tag, never as one id or none.
+    """
+    out: list[str] = []
+    for key in ("requirement", "requirements"):
+        value = rec.get(key)
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if item is not None and item != "":
+                out.append(str(item))
+    return out
+
+
 def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
     """Apply ``rr::verifies!`` trace lines to the matching cases.
 
@@ -154,10 +171,7 @@ def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
         case = by_name.get(str(rec.get("test", "")))
         if case is None:
             continue
-        props: list[tuple[str, str]] = []
-        for key in ("requirement", "requirements"):  # 0.3 single id; the 0.2 list form
-            value = rec.get(key)
-            props += [("requirement", str(r)) for r in (value if isinstance(value, list) else [value]) if r]
+        props = [("requirement", r) for r in trace_ids(rec)]
         if rec.get("level"):
             props.append(("level", str(rec["level"])))
         props += [(f"artifact.{k}", str(v)) for k, v in (rec.get("artifact") or {}).items()]

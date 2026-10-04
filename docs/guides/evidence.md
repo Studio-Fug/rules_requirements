@@ -14,7 +14,7 @@ records:
 | ----- | ------- |
 | `name`, `classname` | Identify the case; reports show `classname::name`. |
 | `status` | `passed`, `failed`, `error` or `skipped`. |
-| `declared` | The requirement ids the evidence *names* for the case — tags, in order, without duplicates. Never an owner: which requirement a case verifies is decided only by attribution. (`requirements` is a deprecated read/write alias, also accepted by the constructor, with a `DeprecationWarning`.) |
+| `declared` | The requirement ids the evidence *names* for the case — tags, in order, without duplicates. Never an owner: which requirement a case verifies is decided only by attribution. However they are given (constructor, assignment, the alias), values are split on commas and whitespace, so `["PR-1, PR-2"]` is two ids. (`requirements` is a deprecated read/write alias, also accepted by the constructor, with a `DeprecationWarning`.) |
 | `level` | Level the case provides (empty: the model's `default_provided_level`). |
 | `artifact` | Identity of the artifact exercised, for [staleness](../concepts.md#staleness). |
 | `message` | Failure or skip message. |
@@ -69,7 +69,7 @@ together.
 
 | Name | Reads | Recognised by |
 | ---- | ----- | ------------- |
-| `junit` | JUnit XML | a `.xml` file whose first 4 KiB contain `<testsuite` or `<testcase` |
+| `junit` | JUnit XML | a `.xml` file whose first 4 KiB contain `<testsuite` or `<testcase`; and always Bazel's own `test.xml` / `test_attempts/attempt_N.xml` in a testlogs tree |
 | `records` | evidence records | `*.rr.yaml`, `*.rr.yml`, `*.rr.json` |
 | `libtest` | Rust libtest output | `*.libtest.txt`, `*.libtest` |
 
@@ -88,8 +88,11 @@ cases: it is kept as `suite_declared` and reported once per suite as a
 A `<testcase>` holding `<testcase>` children (subtests, as some runners nest
 them) is a scope, not a case: each child becomes a case whose classname is the
 parent's path joined with ` > ` — `pkg > TestParse::empty`, the same shape
-`rr_node_test` gives node:test subtests. The parent's `level`, `artifact.*`
-and source reach its children; its requirement ids do not. A failure of the
+`rr_node_test` gives node:test subtests — whatever `classname` the child
+itself carries. Subtests wrapped in a `<testsuite>` inside the `<testcase>`
+are read the same way. The parent's `level`, `artifact.*` and source reach its
+children; its requirement ids do not (nor does a `requirement` attribute on a
+`<testsuite>`: it is suite-level too). A failure of the
 parent itself that none of its children explains (a setup hook) becomes a
 target-scope `<hooks>` error. A case's status is `error` if it has an `<error>`
 child, `failed` for `<failure>`, `skipped` for `<skipped>` (or googletest's
@@ -135,7 +138,11 @@ not a test case of it.
 An unreadable report (malformed XML) is not skipped: it becomes one `error`
 result for its target, `<unreadable>`, with `rr.scope=target` — so a crashed or
 corrupted run taints everything claimed on that target rather than vanishing
-or reading as one more test case.
+or reading as one more test case. Bazel's own report files (`test.xml`, and
+`test_attempts/attempt_N.xml`, in a testlogs tree) are always read as JUnit,
+whatever their first bytes: an empty, binary or non-JUnit one is
+`<unreadable>` too, and one whose root element comes after a long prolog is
+read in full.
 
 ### Records
 

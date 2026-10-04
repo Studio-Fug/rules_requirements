@@ -39,6 +39,7 @@ from rules_requirements.ingest import (
     Evidence,
     TestCase,
     name_tags,
+    split_ids,
     workspace_relative,
 )
 from rules_requirements.ingest.junit import ATTEMPT, SHARD_RUN
@@ -156,8 +157,13 @@ def is_target_scope(case: TestCase) -> bool:
 
 def declared_of(case: TestCase) -> tuple[str, ...]:
     """The ids a raw case declares: its ``declared`` tags plus any ``[rr:ID]``
-    name tags (also for a hand-built :class:`~rules_requirements.ingest.TestCase`). Tags, never owners."""
-    return tuple(dedupe([*case.declared, *name_tags(case.name)]))
+    name tags (also for a hand-built :class:`~rules_requirements.ingest.TestCase`). Tags, never owners.
+
+    Every value is split on commas and whitespace (``"PR-1, PR-2"`` is two
+    ids, whatever produced it), so a case naming two ids reads as a multi-tag.
+    """
+    ids = [rid for value in case.declared for rid in split_ids(str(value))]
+    return tuple(dedupe([*ids, *name_tags(case.name)]))
 
 
 def target_of(case: TestCase) -> str:

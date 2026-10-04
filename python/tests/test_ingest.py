@@ -4,25 +4,26 @@ import os
 import shutil
 import sys
 import unittest
+import warnings
 
 import pytest
 from conftest import junit, write
 
 # Producer harnesses of other test modules, reused by the producer matrix below.
 from test_hooks import _run_pytest
-from test_node_runner import needs_reporters, run_fixture  # noqa: F401  (a fixture)
+from test_node_runner import needs_node, needs_reporters, run_fixture  # noqa: F401  (a fixture)
 from test_rr_case import _run as _run_rr_case
 from test_rr_case import binary  # noqa: F401  (a fixture)
 
-from rules_requirements import bazel, ingest, rr
-from rules_requirements.case_keys import SYNTHETIC_PATH, CaseKey, index_cases, is_target_scope, key_of
+from rules_requirements import bazel, cli, ingest, rr
+from rules_requirements.case_keys import SYNTHETIC_PATH, CaseKey, declared_of, index_cases, is_target_scope, key_of
 from rules_requirements.hooks import unittest as rr_unittest
 from rules_requirements.hooks import wrap
 from rules_requirements.hooks.checkplan import CheckPlan
 from rules_requirements.hooks.junit_writer import JUnitWriter
 from rules_requirements.ingest import IngestIssue, Ingestor, TestCase, apply_properties, split_ids
-from rules_requirements.ingest.junit import JUnitIngestor, target_from_path
-from rules_requirements.ingest.libtest import merge_trace, parse_libtest
+from rules_requirements.ingest.junit import JUnitIngestor, is_testlogs_report, target_from_path
+from rules_requirements.ingest.libtest import merge_trace, parse_libtest, trace_ids
 
 
 @pytest.mark.parametrize(
@@ -100,6 +101,58 @@ def test_junit_unparseable_reports_a_target_scope_error(tmp_path):
     assert case.scope == "target" and is_target_scope(case) and case.declared == ()
     (row,) = index_cases([case]).values()
     assert row.target_scope and row.key == CaseKey("//p:t", "<unreadable>")
+
+
+@pytest.mark.parametrize(
+    "rel, data",
+    [
+        ("test.xml", b""),  # a crash left an empty report
+        ("test.xml", b"\x00\x01garbage, not XML"),
+        ("shard_1_of_2/test.xml", b"   \n"),
+        ("test_attempts/attempt_1.xml", b""),
+        ("test.xml", b'<?xml version="1.0"?><html><body>not a test report</body></html>'),
+    ],
+    ids=["empty", "binary", "blank-shard", "empty-attempt", "foreign-root"],
+)
+def test_a_testlogs_report_that_cannot_be_read_taints_its_target(tmp_path, rel, data):
+    """A file Bazel names as a target's report is never skipped: unreadable, it
+    is the target's <unreadable> error, so the target reads tainted, not as
+    "did not run"."""
+    path = tmp_path / "bazel-testlogs" / "pkg" / "crash_test" / rel
+    path.parent.mkdir(parents=True)
+    path.write_bytes(data)
+    ev = ingest.collect([str(tmp_path / "bazel-testlogs")])
+    assert ev.skipped_files == []
+    (case,) = ev.cases
+    assert (case.target, case.name, case.status, case.scope) == ("//pkg:crash_test", "<unreadable>", "error", "target")
+    assert "unreadable JUnit report" in case.message and case.declared == ()
+
+
+def test_a_testlogs_report_with_a_long_prolog_is_still_read(tmp_path):
+    # The root element after more than the 4 KiB sniff window: the failure is kept.
+    xml = (
+        '<?xml version="1.0"?>\n<!--' + "x" * 5000 + "-->\n"
+        '<testsuites><testsuite name="s"><testcase classname="c" name="a"><failure message="boom"/>'
+        "</testcase></testsuite></testsuites>"
+    )
+    ev = ingest.collect([str(write(tmp_path, "bazel-testlogs/pkg/late_test/test.xml", xml))])
+    assert [(c.target, c.name, c.status) for c in ev.cases] == [("//pkg:late_test", "a", "failed")]
+
+
+def test_only_bazel_report_files_skip_the_sniff(tmp_path):
+    # Outside a testlogs tree, or for any other file in it, an XML file that
+    # is not JUnit is not evidence (an undeclared output, a coverage report).
+    assert is_testlogs_report("bazel-testlogs/p/t/test.xml")
+    assert is_testlogs_report("bazel-testlogs/p/t/run_1_of_2/test_attempts/attempt_3.xml")
+    assert is_testlogs_report("ev/testlogs/p/t/shard_1_of_2_run_1_of_2/test.xml")
+    assert not is_testlogs_report("reports/test.xml")
+    assert not is_testlogs_report("bazel-testlogs/p/t/test.outputs/test.xml")
+    assert not is_testlogs_report("bazel-testlogs/p/t/test.outputs/coverage.xml")
+    assert not is_testlogs_report("bazel-testlogs/p/t/test_attempts/notes.xml")
+    write(tmp_path, "reports/test.xml", "")
+    write(tmp_path, "bazel-testlogs/p/t/test.outputs/coverage.xml", "<coverage/>")
+    ev = ingest.collect([str(tmp_path)])
+    assert ev.cases == [] and len(ev.skipped_files) == 2
 
 
 def test_testsuites_level_properties_and_attempts(tmp_path):
@@ -465,6 +518,42 @@ def test_junit_declared_ids(tmp_path, testcase, declared):
     assert key_of(case) == CaseKey("//p:t", "t")
 
 
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: TestCase("t", "passed", declared=["PR-1, PR-2"]),
+        lambda: TestCase("t", "passed", requirements="PR-1 PR-2"),
+        lambda: TestCase("t", "passed", declared="PR-1,PR-2"),
+        lambda: TestCase("t", "passed", declared=["PR-1", " PR-2 ", "PR-1"]),
+    ],
+    ids=["comma-in-element", "alias-string", "string", "padded-duplicate"],
+)
+def test_hand_built_ids_are_normalized(build):
+    """However a third-party ingestor or hand-built Evidence spells two ids,
+    the case declares two (a multi-tag downstream), never one odd id."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)  # the requirements= alias
+        case = build()
+    assert case.declared == ("PR-1", "PR-2") and declared_of(case) == ("PR-1", "PR-2")
+
+
+def test_assigned_ids_are_normalized_too():
+    case = TestCase("t", "passed", declared=[" PR-1 "])
+    assert case.declared == ("PR-1",)
+    with pytest.warns(DeprecationWarning):
+        case.requirements = ["PR-1,PR-2"]
+    assert case.declared == ("PR-1", "PR-2")
+    case.declared = ["PR-3 PR-4", ""]  # a direct assignment, as an ingestor might do
+    assert case.declared == ("PR-3", "PR-4")
+    case.suite_declared = "PR-5, PR-6"
+    assert case.suite_declared == ("PR-5", "PR-6")
+    assert TestCase("t", "passed", suite_declared=["PR-7 PR-8"]).suite_declared == ("PR-7", "PR-8")
+    # declared_of splits on its own as well (a case object built around __setattr__).
+    raw = TestCase("t", "passed")
+    object.__setattr__(raw, "declared", ("PR-1,PR-2",))
+    assert declared_of(raw) == ("PR-1", "PR-2")
+
+
 def test_name_tags_are_declared_for_hand_built_cases_too():
     rows = index_cases([TestCase("probe [rr:PR-1] ok", "passed", target="//a:b")])
     (row,) = rows.values()
@@ -547,12 +636,51 @@ def test_nested_testcases_become_a_scope(tmp_path):
     assert {i.scope for i in ev.issues} == {"go"}
 
 
+def test_a_nested_case_keys_under_its_parent_whatever_its_own_classname(tmp_path):
+    # The rule: a nested case's classname is its parent's path; a classname
+    # attribute of its own (some runners repeat the suite's) is ignored.
+    xml = """<testsuite name="s">
+      <testcase classname="pkg" name="TestA"><testcase classname="other.Module" name="sub"/></testcase>
+    </testsuite>"""
+    (case,) = JUnitIngestor().ingest(write(tmp_path, "bazel-testlogs/pkg/a_test/test.xml", xml))
+    assert key_of(case) == CaseKey("//pkg:a_test", "pkg > TestA::sub")
+
+
+def test_subtests_in_a_suite_nested_in_a_testcase_are_kept(tmp_path):
+    xml = """<testsuites><testsuite name="s">
+      <testcase classname="c" name="outer [rr:REQ-5]">
+        <testsuite name="inner"><properties><property name="requirement" value="REQ-6"/></properties>
+          <testcase classname="k" name="leaf"><failure message="x"/></testcase>
+          <testcase name="ok"><properties><property name="requirement" value="REQ-1"/></properties></testcase>
+        </testsuite>
+      </testcase>
+      <testcase classname="c" name="lonely"><failure message="own"/><testsuite name="empty"/></testcase>
+    </testsuite></testsuites>"""
+    ev = ingest.collect([write(tmp_path, "bazel-testlogs/pkg/nest_test/test.xml", xml)])
+    got = {str(key_of(c)): (c.status, c.scope, c.declared, c.suite_declared) for c in ev.cases}
+    assert got == {
+        # The failing leaf is kept (it used to vanish behind a passing "outer").
+        "//pkg:nest_test#c > outer::leaf": ("failed", "case", (), ("REQ-5", "REQ-6")),
+        "//pkg:nest_test#c > outer::ok": ("passed", "case", ("REQ-1",), ("REQ-5", "REQ-6")),
+        # A <testcase> whose nested suite is empty is an ordinary case.
+        "//pkg:nest_test#c::lonely": ("failed", "case", (), ()),
+    }
+
+
+def test_a_requirement_attribute_on_a_suite_is_suite_level(tmp_path):
+    xml = '<testsuite name="s" requirement="REQ-1, REQ-2"><testcase classname="c" name="a"/></testsuite>'
+    ev = ingest.collect([write(tmp_path, "bazel-testlogs/p/t/test.xml", xml)])
+    (case,) = ev.cases
+    assert case.declared == () and case.suite_declared == ("REQ-1", "REQ-2")
+    assert [(i.code, i.ids) for i in ev.issues] == [("suite-level-requirement", ("REQ-1", "REQ-2"))]
+
+
 def test_records_target_and_single_requirement(tmp_path):
     path = write(
         tmp_path,
         "evidence/panel_inspection.rr.yaml",
         """
-        target: record:panel_inspection
+        target: //bench:panel_test
         evidence:
           - name: label-legible
             status: passed
@@ -581,7 +709,11 @@ def test_records_target_and_single_requirement(tmp_path):
     assert cases["two-ids"].declared == ("REQ-13", "REQ-14")  # multi-tag downstream
     assert cases["both-keys"].declared == ("REQ-1", "REQ-2")
     assert cases["untagged"].declared == ()
-    assert key_of(cases["label-legible"]) == CaseKey("record:panel_inspection", "label-legible")
+    # The document's target (not the record:<stem> fallback) files every entry
+    # that names none of its own.
+    assert cases["label-legible"].target == "//bench:panel_test"
+    assert key_of(cases["label-legible"]) == CaseKey("//bench:panel_test", "label-legible")
+    assert key_of(cases["untagged"]) == CaseKey("//bench:panel_test", "untagged")
     assert key_of(cases["elsewhere"]) == CaseKey("//bench:soak_test", "elsewhere")
     # Without a document target, the key's target is record:<file stem>.
     bare = write(tmp_path, "bench.rr.yaml", "evidence:\n  - {name: x, status: passed, requirement: REQ-1}\n")
@@ -607,6 +739,27 @@ def test_rust_trace_lines_single_id_and_legacy_lists():
     assert by_path["parse::accepts_c"].declared == ("REQ-1", "REQ-2")
     assert by_path["slow::soak"].declared == ("REQ-3", "REQ-4")
     assert by_path["::top_level"].declared == ()
+
+
+@pytest.mark.parametrize(
+    "rec, ids",
+    [
+        ({"requirement": "REQ-1"}, ["REQ-1"]),
+        ({"requirements": ["REQ-1", "REQ-2"]}, ["REQ-1", "REQ-2"]),
+        ({"requirements": "REQ-1,REQ-2"}, ["REQ-1,REQ-2"]),  # a string under the plural key
+        ({"requirement": ["REQ-1", "REQ-2"]}, ["REQ-1", "REQ-2"]),  # a list under the singular key
+        ({"requirement": "REQ-1", "requirements": ["REQ-2"]}, ["REQ-1", "REQ-2"]),
+        ({"requirement": 7}, ["7"]),
+        ({"requirement": "", "requirements": None}, []),
+        ({"test": "x"}, []),
+    ],
+)
+def test_trace_ids_reads_every_shape(rec, ids):
+    """Fail closed: a trace line naming two ids, in whatever shape, is never read
+    as one id or none (each shape below reaches merge_trace as a multi-tag)."""
+    assert trace_ids(rec) == ids
+    (case,) = merge_trace([TestCase("t", "passed", classname="m")], json.dumps({"test": "m::t", **rec}))
+    assert len(case.declared) == len(set(split_ids(",".join(ids))))
 
 
 def test_file_and_line(tmp_path):
@@ -915,7 +1068,10 @@ def test_producer_rr_evidence(tmp_path, monkeypatch):
         (
             "leaky",
             "import os, sys\n"
-            "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite><testcase name=\"ok\"/></testsuite>')\n"
+            "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite>"
+            '<testcase name="ok"><properties><property name="requirement" value="REQ-1"/></properties></testcase>'
+            '<testcase name="ok2"><properties><property name="requirement" value="REQ-2"/></properties></testcase>'
+            "</testsuite>')\n"
             "sys.exit(23)\n",
         ),
     ):
@@ -929,8 +1085,47 @@ def test_producer_rr_evidence(tmp_path, monkeypatch):
     rows = _rows(out)
     assert rows["//p:plain#" + SYNTHETIC_PATH].synthetic
     assert rows["//p:leaky#ok"].status == "passed" and not rows["//p:leaky#ok"].target_scope
+    assert rows["//p:leaky#ok"].declared == ("REQ-1",) and rows["//p:leaky#ok2"].declared == ("REQ-2",)
     (exit_status,) = [r for k, r in rows.items() if k.endswith("exit-status")]
     assert exit_status.target_scope and exit_status.status == "error"
+
+
+def test_producer_rr_case_cli(capsys, tmp_path, monkeypatch):
+    """`rr case` (shell harnesses): each call appends one case to the target's report."""
+    out = tmp_path / "out.xml"
+    monkeypatch.setenv("TEST_TARGET", "//bench:smoke_test")
+    monkeypatch.chdir(tmp_path)
+    calls = [
+        ["--name", "boots", "--requirement", "REQ-1", "--level", "hitl", "--file", "bench/smoke.sh"],
+        ["--name", "banner [rr:REQ-2]", "--status", "failed", "--message", "no banner"],
+        ["--name", "untagged", "--classname", "bench.misc"],
+        ["--name", "two", "--requirement", "REQ-1,REQ-2"],  # refused (RR-E104): nothing appended
+    ]
+    codes = [cli.main(["case", "--out", str(out), *argv]) for argv in calls]
+    assert codes == [0, 0, 0, 2]
+    capsys.readouterr()
+    rows = _rows(_testlogs(tmp_path, "//bench:smoke_test", out))
+    t = "//bench:smoke_test#"
+    assert set(rows) == {t + "smoke_test::boots", t + "smoke_test::banner", t + "bench.misc::untagged"}
+    boots = rows[t + "smoke_test::boots"]
+    assert (boots.status, boots.declared, boots.level, boots.file) == ("passed", ("REQ-1",), "hitl", "bench/smoke.sh")
+    assert rows[t + "smoke_test::banner"].declared == ("REQ-2",) and rows[t + "smoke_test::banner"].status == "failed"
+    assert rows[t + "bench.misc::untagged"].declared == ()
+    assert not any(r.synthetic or r.target_scope for r in rows.values())
+
+
+@needs_node
+def test_producer_node_without_a_reporter(run_fixture, tmp_path):  # noqa: F811
+    """rr_node_test on a Node without --test-reporter (< 20, forced here): one
+    synthetic [target] result, never a member of a case claim."""
+    ok = run_fixture("nesting", env={"RR_NODE_TEST_PLAIN": "1"})
+    rows = _rows(_testlogs(tmp_path / "ok", "//tests/node:nesting_test", ok.xml))
+    assert list(rows) == ["//tests/node:nesting_test#" + SYNTHETIC_PATH]
+    (row,) = rows.values()
+    assert row.synthetic and not row.target_scope and row.status == "passed" and row.declared == ()
+    bad = run_fixture("load_error", env={"RR_NODE_TEST_PLAIN": "1"})
+    (row,) = _rows(_testlogs(tmp_path / "bad", "//tests/node:load_error_test", bad.xml)).values()
+    assert row.key.path == SYNTHETIC_PATH and row.status == "failed" and row.declared == ()
 
 
 def _write_report(path, cases):

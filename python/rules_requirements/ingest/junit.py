@@ -14,8 +14,16 @@ classname is the parent's path joined with `` > `` (the shape rr_node_test
 gives node:test subtests), and a failure of the parent itself that none of
 its children explains becomes a target-scope ``<hooks>`` error.
 
+A ``<testcase>`` whose subtests sit in a ``<testsuite>`` of their own is a
+scope the same way. A nested case's own ``classname`` attribute is ignored:
+its classname is always its parent's path, so a subtest keys under the case
+that ran it.
+
 A report that cannot be read at all is one target-scope error, so whatever
-the target verified reads as tainted, never as missing.
+the target verified reads as tainted, never as missing. A file Bazel names as
+a report (``test.xml`` or ``test_attempts/attempt_N.xml`` in a testlogs tree)
+is read whatever its first bytes are: empty, binary or with its root element
+after a long prolog, it is still the target's report.
 
 Bazel writes one ``test.xml`` per test target under ``bazel-testlogs``; the
 target label is recovered from that path so ``verified_by`` target traces work.
@@ -83,6 +91,25 @@ _TESTLOGS_ROOT = re.compile(r"(?:^|/)(?:bazel-testlogs|bazel-out/[^/]+/testlogs)
 _TESTLOGS_DIR = re.compile(r"(?:^|/)testlogs/")
 
 
+def is_testlogs_report(path: str) -> bool:
+    """Whether ``path`` is a report Bazel itself names inside a testlogs tree:
+    ``<target dir>/test.xml`` (also under ``shard_i_of_n`` / ``run_k_of_n``) or
+    ``<target dir>/test_attempts/attempt_N.xml``.
+
+    Such a file is JUnit by contract, whatever its first bytes say, so it is
+    never skipped: an empty, binary or late-rooted one is read (and, if it
+    cannot be, becomes the target's ``<unreadable>`` error).
+    """
+    norm = path.replace("\\", "/")
+    parts = norm.split("/")
+    if len(parts) < 2 or not target_from_path(norm):
+        return False
+    base, parent = parts[-1], parts[-2]
+    if base == "test.xml":
+        return parent not in _RUN_LEVELS
+    return parent == "test_attempts" and ATTEMPT.match(base) is not None
+
+
 def target_from_path(path: str) -> str:
     """``.../bazel-testlogs/pkg/sub/name/test.xml`` -> ``//pkg/sub:name``.
 
@@ -124,6 +151,7 @@ __all__ = [
     "TARGET_SCOPE",
     "JUnitIngestor",
     "is_bazel_generated",
+    "is_testlogs_report",
     "target_from_path",
 ]
 
@@ -218,8 +246,25 @@ class _Scope:
         self.file = file  # a parent case's source
 
     def below(self, el: ET.Element) -> _Scope:
-        keep, ids = _inheritable(_props(el))
+        # A requirement written as an attribute of the suite is suite-level
+        # too: not inherited, reported like the property form.
+        attrs = [(k, v) for k, v in el.attrib.items() if k in (REQUIREMENT_PROPERTY, "requirements")]
+        keep, ids = _inheritable(attrs + _props(el))
         return _Scope(self.props + keep, self.ids + ids, self.classname, self.file)
+
+
+_JUNIT_TAGS = ("testsuites", "testsuite", "testcase")
+
+
+def _unreadable(path: str, target: str, why: str) -> TestCase:
+    return TestCase(
+        name=UNREADABLE_NAME,
+        status=ERROR,
+        message=f"unreadable JUnit report: {why}",
+        source=path,
+        target=target,
+        properties=dict(TARGET_SCOPE),
+    )
 
 
 class JUnitIngestor(Ingestor):
@@ -227,7 +272,9 @@ class JUnitIngestor(Ingestor):
     suffixes = (".xml",)
 
     def sniff(self, path: str, head: bytes) -> bool:
-        return path.endswith(".xml") and (b"<testsuite" in head or b"<testcase" in head)
+        if not path.endswith(".xml"):
+            return False
+        return b"<testsuite" in head or b"<testcase" in head or is_testlogs_report(path)
 
     def ingest(self, path: str) -> Iterable[TestCase]:
         target = target_from_path(path)
@@ -237,19 +284,13 @@ class JUnitIngestor(Ingestor):
             root = ET.parse(path).getroot()  # noqa: S314
         except (ET.ParseError, OSError) as exc:
             # A report we cannot read must not silently vanish: it may well be
-            # the report of a failing run (e.g. control characters in a log).
-            # It is about the whole run (rr.scope=target), so every member
-            # claimed on the target reads tainted rather than missing.
-            return [
-                TestCase(
-                    name=UNREADABLE_NAME,
-                    status=ERROR,
-                    message=f"unreadable JUnit report: {exc}",
-                    source=path,
-                    target=target,
-                    properties=dict(TARGET_SCOPE),
-                )
-            ]
+            # the report of a failing run (e.g. control characters in a log,
+            # or an empty file left by a crash). It is about the whole run
+            # (rr.scope=target), so every member claimed on the target reads
+            # tainted rather than missing.
+            return [_unreadable(path, target, str(exc) or type(exc).__name__)]
+        if root.tag not in _JUNIT_TAGS and root.find(".//testsuite") is None and root.find(".//testcase") is None:
+            return [_unreadable(path, target, f"no JUnit content (root element <{root.tag}>)")]
         if root.tag == "testcase":  # a bare case as the whole report
             return list(self._case(root, _Scope(), path, target, ""))
         return list(self._suite(root, _Scope(), path, target))
@@ -276,14 +317,19 @@ class JUnitIngestor(Ingestor):
         suite: str,
         synthetic: bool = False,
     ) -> Iterator[TestCase]:
-        children = el.findall("testcase")
+        # Nested cases, directly or inside a <testsuite> of their own: either
+        # way the <testcase> is a scope for them, never a case beside them.
+        children = [c for c in el if c.tag in ("testcase", "testsuite")]
         status, message = _status(el)
         name = el.get("name", "")
         classname = scope.classname or el.get("classname", "")
         own_file = el.get("file", "")
         if children:
-            yield from self._parent(el, children, scope, path, target, suite, classname, own_file)
-            return
+            nested = list(self._parent(el, children, scope, path, target, suite, classname, own_file))
+            if nested:
+                yield from nested
+                return
+            # Only empty nested suites: the <testcase> is an ordinary case.
         case = TestCase(
             name=name,
             classname=classname,
@@ -319,7 +365,7 @@ class JUnitIngestor(Ingestor):
         classname: str,
         own_file: str,
     ) -> Iterator[TestCase]:
-        """A ``<testcase>`` with ``<testcase>`` children: a scope for them."""
+        """A ``<testcase>`` with ``<testcase>`` (or ``<testsuite>``) children: a scope for them."""
         leaf = NAME_TAG.sub("", el.get("name", "")).strip()
         props = [(k, v) for k, v in el.attrib.items() if k in _TRACE_ATTRS] + _props(el)
         keep, ids = _inheritable(props)
@@ -333,7 +379,12 @@ class JUnitIngestor(Ingestor):
         )
         cases: list[TestCase] = []
         for child in children:
-            cases.extend(self._case(child, inner, path, target, suite))
+            if child.tag == "testsuite":
+                cases.extend(self._suite(child, inner, path, target))
+            else:
+                cases.extend(self._case(child, inner, path, target, suite))
+        if not cases:
+            return  # nothing nested after all (empty suites): the caller reads a leaf
         yield from cases
         status, message = _status(el)
         if status in (FAILED, ERROR) and not any(c.is_failure for c in cases):

@@ -114,12 +114,19 @@ def workspace_relative(path: str) -> str:
 
 
 def _ids(value: Any) -> tuple[str, ...]:
+    """Normalize declared ids, however they were given: a string or any
+    iterable of them, each split on commas and whitespace (:func:`split_ids`),
+    blanks dropped, duplicates removed, order kept. The one place ids enter a
+    :class:`TestCase` (constructor, ``declared``/``suite_declared``
+    assignment, the ``requirements`` alias), so ``"PR-1, PR-2"`` is always
+    two ids, never one id that happens to contain a comma."""
     if value is None:
         return ()
-    if isinstance(value, str):
-        return (value,)
-    return tuple(value)
+    items = [value] if isinstance(value, str) else list(value)
+    return tuple(dedupe([rid for item in items for rid in split_ids(str(item))]))
 
+
+_ID_FIELDS = frozenset(("declared", "suite_declared"))
 
 _ALIAS_WARNING = (
     "TestCase.requirements is deprecated: use TestCase.declared. A case's declared ids are tags, "
@@ -198,6 +205,14 @@ class TestCase:
         self.file = file
         self.line = line
         self.suite_declared = _ids(suite_declared)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Every way of setting the ids (a hand-built case, a third-party
+        # ingestor assigning ``case.declared = [...]``) is normalized, so a
+        # case naming two ids always reads as two (multi-tag downstream).
+        if name in _ID_FIELDS:
+            value = _ids(value)
+        object.__setattr__(self, name, value)
 
     @property
     def requirements(self) -> tuple[str, ...]:
