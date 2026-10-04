@@ -135,6 +135,10 @@ def witness(p: str, q: str) -> str | None:
     selectors spell out, and is a shortest one.
     """
     a, b = tokens(p), tokens(q)
+    if STAR not in a or STAR not in b:  # a literal: the only candidate is its own path
+        lit, other = (p, q) if STAR not in a else (q, p)
+        path = literal_path(lit)
+        return path if matches(other, path) else None
     n, m = len(a), len(b)
     # ok[i][j]: a[i:] and b[j:] match a common string; step[i][j] records how.
     # Steps: 0 = a's star matches nothing, 1 = b's star matches nothing,
