@@ -31,8 +31,9 @@ from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from rules_requirements import config as cfg
+from rules_requirements import labels
 from rules_requirements.annotations import Reference
-from rules_requirements.ingest import Evidence, TestCase
+from rules_requirements.ingest import STATUS_ORDER, Evidence, TestCase
 from rules_requirements.model import Model, Requirement
 from rules_requirements.util import natural_key
 
@@ -261,7 +262,16 @@ def build_matrix(
         for rid in case.requirements:
             by_id.setdefault(rid, []).append(case)
         if case.target:
-            by_target.setdefault(case.target, []).append(case)
+            by_target.setdefault(_evidence_target(case.target, c.main_repo), []).append(case)
+    # Claims are normalized when the model is parsed, so evidence targets are
+    # looked up in the same spelling (bazel-testlogs/external/foo~/... is
+    # @foo~//..., claimed as @foo//...).
+    target_status: dict[str, str] = {}
+    for target, st in evidence.target_status.items():
+        key = _evidence_target(target, c.main_repo)
+        cur = target_status.get(key)
+        if cur is None or STATUS_ORDER[st] > STATUS_ORDER[cur]:
+            target_status[key] = st
 
     def target_stale(target: str) -> bool:
         """A target's evidence is stale when its identity-stamped cases say so.
@@ -300,7 +310,7 @@ def build_matrix(
             )
         for vb in verified_by:
             target, level = vb.target, vb.level or c.default_provided_level  # type: ignore[attr-defined]
-            status = evidence.target_status.get(target)
+            status = target_status.get(target)
             if status is not None:
                 refs.append(
                     EvidenceRef(
@@ -441,6 +451,12 @@ def build_matrix(
     return matrix
 
 
+def _evidence_target(target: str, main_repo: str) -> str:
+    """An evidence target in the spelling claims use (labels.normalize_label);
+    as recorded if it is not a label."""
+    return labels.try_normalize(target, main_repo) or target if target else target
+
+
 def find_gaps(matrix: Matrix) -> list[Gap]:
     """Everything that stands between the model and a complete V&V argument."""
     m, c = matrix.model, matrix.model.config
@@ -505,7 +521,7 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
                 )
     covered_targets = {vb.target for req in m.requirements.values() for vb in req.verified_by}
     for cs in matrix.evidence.cases:
-        if cs.is_failure and not cs.requirements and cs.target not in covered_targets:
+        if cs.is_failure and not cs.requirements and _evidence_target(cs.target, c.main_repo) not in covered_targets:
             gaps.append(
                 Gap(
                     "untraced-failure",
