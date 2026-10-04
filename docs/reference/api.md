@@ -33,7 +33,7 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: normalize_label, try_normalize, is_pseudo, read_known_targets, BadTarget
 
 .. automodule:: rules_requirements.lock
-   :members: Lock, LockEntry, LockError, parse_lock, load_lock
+   :members: Lock, LockEntry, LockError, LockPlan, parse_lock, load_lock, configured_lock, render_lock, write_lock, plan_lock
 ```
 
 ## Evidence
@@ -52,7 +52,7 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: RecordsIngestor
 
 .. automodule:: rules_requirements.case_keys
-   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
+   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, normalize_target, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
 ```
 
 ## Migration
@@ -63,6 +63,13 @@ with open("report.html", "w", encoding="utf-8") as fh:
 
 .. automodule:: rules_requirements.tag_codemod
    :members: apply_tags, rewrite, TestFile, ApplyResult, FileResult, Unsupported
+```
+
+## Attribution
+
+```{eval-rst}
+.. automodule:: rules_requirements.attribution
+   :members: attribute, resolve_cases, Attribution, CaseResult, TargetRun, Member, Quarantine, AttributionIssue, AttributionInvariantError, is_stale
 ```
 
 ## Tracing and reports

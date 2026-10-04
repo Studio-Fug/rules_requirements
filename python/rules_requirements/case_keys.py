@@ -32,6 +32,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
+from rules_requirements import labels
 from rules_requirements.ingest import (
     FILE_PROPERTY,
     NAME_TAG,
@@ -64,6 +65,7 @@ __all__ = [
     "key_of",
     "name_tags",
     "nodeid_to_case_path",
+    "normalize_target",
     "pseudo_target",
     "run_dims_from_path",
     "target_of",
@@ -188,10 +190,25 @@ def is_unscoped(target: str) -> bool:
     return target.startswith(SUITE_PREFIX)
 
 
-def key_of(case: TestCase) -> CaseKey:
-    """The :class:`CaseKey` a raw ingested case is filed under."""
+def normalize_target(target: str, main_repo: str = "") -> str:
+    """``target`` in the spelling claims use (:func:`~rules_requirements.labels.normalize_label`
+    with ``config.main_repo``), so ``@@//p:n``, ``//p`` and a canonical
+    ``@repo~//p:n`` file under the same key a model names. A target that is
+    no label (pseudo-targets pass through) is kept as recorded, with ``#``
+    (the key separator) replaced."""
+    return labels.try_normalize(target, main_repo) or target.replace("#", "_")
+
+
+def key_of(case: TestCase, main_repo: str | None = None) -> CaseKey:
+    """The :class:`CaseKey` a raw ingested case is filed under.
+
+    With ``main_repo`` (``config.main_repo``, ``""`` for none) the target is
+    normalized (:func:`normalize_target`), as attribution files every case;
+    without it the target is kept as the evidence recorded it.
+    """
     path = SYNTHETIC_PATH if is_synthetic(case) else case_path(case.classname, case.name)
-    return CaseKey(target_of(case), path)
+    target = target_of(case)
+    return CaseKey(target if main_repo is None else normalize_target(target, main_repo), path)
 
 
 def file_of(case: TestCase) -> str:
@@ -292,8 +309,11 @@ def _worst(statuses: Iterable[str]) -> str:
     return max(statuses, key=lambda s: STATUS_ORDER.get(s, 0))
 
 
-def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRow]:
+def index_cases(evidence: Evidence | Iterable[TestCase], *, main_repo: str | None = None) -> dict[CaseKey, CaseRow]:
     """One :class:`CaseRow` per key, sorted by key.
+
+    ``main_repo`` normalizes every target as :func:`key_of` does (so two
+    spellings of one target are one key); ``None`` keeps them as recorded.
 
     * **Attempts** (``test_attempts/attempt_N.xml`` next to ``test.xml``): the
       final report is authoritative; an earlier failure under a final pass
@@ -310,7 +330,7 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
     decided here.
     """
     cases = evidence.cases if isinstance(evidence, Evidence) else list(evidence)
-    observed = [(case, key_of(case), run_dims_from_path(case.source)) for case in cases]
+    observed = [(case, key_of(case, main_repo), run_dims_from_path(case.source)) for case in cases]
 
     def slot_of(case: TestCase, key: CaseKey, dims: RunDims) -> tuple[str, str, int, int]:
         # Everything but the attempt: one (target, root, run, shard) slot.
