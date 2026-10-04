@@ -108,12 +108,75 @@
                   "off",
                   false
                 ]
+              },
+              "propertyNames": {
+                "not": {
+                  "enum": [
+                    "attribution-conflict",
+                    "bad-selector",
+                    "bad-target",
+                    "lock-invalid",
+                    "lock-owner-changed",
+                    "multi-tag",
+                    "same-code-multiple-owners",
+                    "shared-case",
+                    "unknown-target"
+                  ]
+                },
+                "description": "Hard errors and report-time quarantines are not rules and cannot be configured."
               }
             },
             "annotation_patterns": {
               "type": "array",
               "items": {
                 "type": "string"
+              }
+            },
+            "attribution": {
+              "enum": [
+                "hybrid",
+                "model"
+              ],
+              "description": "hybrid: a single-id tag may own a case no claim covers; model: only claims own cases."
+            },
+            "main_repo": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9._-]*$",
+              "description": "The apparent name of this repository: '@<main_repo>//x:y' means '//x:y'."
+            },
+            "sets_lock": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The verification-set lock, relative to this file."
+            },
+            "flaky": {
+              "enum": [
+                "accept",
+                "flag",
+                "under-verify",
+                "fail"
+              ]
+            },
+            "set_consistency": {
+              "enum": [
+                "off",
+                "warn",
+                "enforce",
+                false
+              ]
+            },
+            "variants": {
+              "type": "array",
+              "description": "Groups of targets that run the same test code.",
+              "items": {
+                "type": "array",
+                "minItems": 2,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "pattern": "^((@@?[^/]*)?//[^:]*(:.+)?|suite:.+|record:.+)$",
+                  "description": "A Bazel label (//pkg:name, @repo//pkg:name; spellings are normalized) or a pseudo-target (suite:<testsuite>, record:<stem>)."
+                }
               }
             }
           }
@@ -248,6 +311,13 @@
         },
         "rationale": {
           "type": "string"
+        },
+        "validated_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifiedBy"
+          },
+          "description": "Validation evidence: claims in the same namespace as verified_by."
         },
         "kind": {
           "const": "user_need"
@@ -385,26 +455,7 @@
         "verified_by": {
           "type": "array",
           "items": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "target"
-                ],
-                "properties": {
-                  "target": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string"
-                  }
-                }
-              }
-            ]
+            "$ref": "#/$defs/verifiedBy"
           }
         },
         "modules": {
@@ -680,6 +731,13 @@
             }
           ]
         },
+        "verified_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifiedBy"
+          },
+          "description": "Effectiveness evidence of the control (ISO 14971 §7.2)."
+        },
         "kind": {
           "const": "mitigation"
         }
@@ -879,6 +937,13 @@
         },
         "rationale": {
           "type": "string"
+        },
+        "validated_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifiedBy"
+          },
+          "description": "Validation evidence: claims in the same namespace as verified_by."
         }
       }
     },
@@ -1012,26 +1077,7 @@
         "verified_by": {
           "type": "array",
           "items": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "object",
-                "additionalProperties": false,
-                "required": [
-                  "target"
-                ],
-                "properties": {
-                  "target": {
-                    "type": "string"
-                  },
-                  "level": {
-                    "type": "string"
-                  }
-                }
-              }
-            ]
+            "$ref": "#/$defs/verifiedBy"
           }
         },
         "modules": {
@@ -1298,6 +1344,13 @@
               }
             }
           ]
+        },
+        "verified_by": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/verifiedBy"
+          },
+          "description": "Effectiveness evidence of the control (ISO 14971 §7.2)."
         }
       }
     },
@@ -1397,6 +1450,94 @@
           "type": "string"
         }
       }
+    },
+    "verifiedBy": {
+      "description": "One claim item: the cases of one target an entity claims. Claims of two entities that can select one case are a shared-case error.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "DEPRECATED: whole target (rule bare-target-reference).",
+          "pattern": "^((@@?[^/]*)?//[^:]*(:.+)?|suite:.+|record:.+)$"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target",
+            "cases"
+          ],
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^((@@?[^/]*)?//[^:]*(:.+)?|suite:.+|record:.+)$",
+              "description": "A Bazel label (//pkg:name, @repo//pkg:name; spellings are normalized) or a pseudo-target (suite:<testsuite>, record:<stem>)."
+            },
+            "cases": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Case selectors: whole case paths; '*' matches anything ('\\\\*' a literal star)."
+            },
+            "level": {
+              "type": "string",
+              "description": "Level for cases that declare none (default: config.default_provided_level)."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why the target cannot be claimed per case."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "target",
+            "whole"
+          ],
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^((@@?[^/]*)?//[^:]*(:.+)?|suite:.+|record:.+)$",
+              "description": "A Bazel label (//pkg:name, @repo//pkg:name; spellings are normalized) or a pseudo-target (suite:<testsuite>, record:<stem>)."
+            },
+            "whole": {
+              "const": true,
+              "description": "Every result of the target; its single synthetic result when it reports no cases."
+            },
+            "level": {
+              "type": "string",
+              "description": "Level for cases that declare none (default: config.default_provided_level)."
+            },
+            "reason": {
+              "type": "string",
+              "description": "Why the target cannot be claimed per case."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "description": "DEPRECATED: {target} / {target, level} claims the whole target (rule bare-target-reference).",
+          "additionalProperties": false,
+          "required": [
+            "target"
+          ],
+          "properties": {
+            "target": {
+              "type": "string",
+              "pattern": "^((@@?[^/]*)?//[^:]*(:.+)?|suite:.+|record:.+)$",
+              "description": "A Bazel label (//pkg:name, @repo//pkg:name; spellings are normalized) or a pseudo-target (suite:<testsuite>, record:<stem>)."
+            },
+            "level": {
+              "type": "string",
+              "description": "Level for cases that declare none (default: config.default_provided_level)."
+            }
+          }
+        }
+      ]
     }
   }
 }
