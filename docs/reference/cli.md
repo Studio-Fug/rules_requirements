@@ -15,10 +15,11 @@ paths resolve against the directory Bazel was invoked from.
 | `cases` | List every test case key in the evidence, with status, declared ids and flags. | {doc}`../guides/evidence` |
 | `migrate plan` | Write the attribution worksheet: evidence that counts toward two or more entities. | {doc}`../guides/migrating-to-per-case` |
 | `migrate apply` | Rewrite multi-id Python test tags to the owners decided on a worksheet. | {doc}`../guides/migrating-to-per-case` |
+| `migrate verify` | Check test evidence from after `migrate apply` against the worksheet (and a baseline). | {doc}`../guides/migrating-to-per-case` |
 | `wrap` | Run a test binary and convert its output to traceability JUnit. | {doc}`../guides/hooks` |
 | `case` | Append one test case to a JUnit file (shell and ad-hoc harnesses). | {doc}`../guides/hooks` |
 
-`rr --version` prints the installed version (`rr 0.2.0`).
+`rr --version` prints the installed version (`rr 0.2.1`).
 
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds; `2`
@@ -27,7 +28,11 @@ report format cannot be inferred. `cases` and `migrate plan` exit `2` when the
 `--evidence` paths hold no evidence at all. `migrate apply` exits `1`, and writes
 nothing unless given `--partial`, when it refused a file or could not find a
 decided case's test in the module it names, and `2` when the worksheet is
-unreadable or an owner is not one of the ids its case counts toward. `wrap`
+unreadable or an owner is not one of the ids its case counts toward.
+`migrate verify` exits `1` when a decided case does not declare exactly its
+owner (or has no result, without `--allow-missing`) or, with `--baseline`, an
+undecided case's ids changed or a case disappeared, and `2` when the worksheet
+is unreadable or invalid or the evidence or baseline holds none. `wrap`
 exits with the wrapped command's status; `case` exits `2` when it cannot record
 the case (no output file, more than one id, a malformed id or `--artifact`).
 

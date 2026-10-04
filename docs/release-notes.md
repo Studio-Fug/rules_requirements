@@ -3,6 +3,49 @@
 This page is the detailed record of each release. `CHANGELOG.md` at the
 repository root summarises each version in a few lines and links here.
 
+## 0.2.1 (2026-10-05)
+
+A patch release for projects migrating to one requirement per test case
+whose tests run under Bazel. Nothing else changes: verdicts, reports and the
+report goldens are byte-identical to 0.2.0.
+
+### New: `rr migrate verify`
+
+- **`rr migrate verify --worksheet W.rrplan --evidence NEW [--baseline OLD]
+  [--allow-missing] [--model DIR]`** ({ref}`migrate-verify`) checks the test
+  evidence of a run after `rr migrate apply` against the worksheet, case by
+  case key: every decided case must declare exactly its owner (no id for
+  `none`); with `--baseline`, every other case must declare the ids it had
+  before (in any order; a target-scope result's are not compared) and no
+  case of the baseline may be missing. A decided case with no result is an
+  error unless `--allow-missing`, which lists it as a warning — never when
+  the baseline has it. A decided case that declared no id before and declares
+  none after counts only through `verified_by` (its owner is a model edit
+  apply does not make): it is listed in a note, not an error. One line per
+  offending case (expected and found ids)
+  and exit `1`; exit `0` with a summary; exit `2` for an unreadable or
+  invalid worksheet, or evidence paths holding none. It reads every evidence
+  shape `rr` ingests (pytest, `rr_node_test`, `rr_case.h`, googletest, ...).
+  It is the verification path where the collection check cannot run — Bazel
+  `py_test` targets importing through their runfiles: apply with
+  `--no-collect-check`, push, then verify against the CI evidence before
+  merging.
+
+### Fixed
+
+- `rr migrate apply --stage tags`: the static guards no longer judge code
+  that never runs when pytest imports a test module — the body of an
+  `if __name__ == "__main__":` block (either operand order, either quote; not
+  its `else`) and the bodies of module-level functions reachable only from
+  it. A script-style test module whose `main()` loads a helper with
+  `importlib.util.spec_from_file_location` refused every rewritten file in
+  the tree, because an import call the codemod cannot name may import any of
+  them. Such a function is still judged when anything that may run at import
+  time names it (a module-level call, an alias, a `getattr` / `globals()`
+  string, a test, a default argument), when it is decorated, rebound or named
+  like a test or a hook, or when another scanned file imports it or passes
+  its module around.
+
 ## 0.2.0 (2026-10-04)
 
 Per-case runners and migration tooling, towards **one test case, one

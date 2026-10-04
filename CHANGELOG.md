@@ -5,6 +5,26 @@ behaviour — is the [release notes](docs/release-notes.md) (published at
 <https://studio-fug.github.io/rules_requirements/release-notes.html>); where
 the two differ, the release notes are right and this file is the bug.
 
+## 0.2.1 (2026-10-05)
+
+Unblocks applying a worksheet in Bazel projects.
+[Details](docs/release-notes.md#021-2026-10-05).
+
+### Added
+
+- `rr migrate verify`: checks the test evidence of a run after
+  `rr migrate apply` against the worksheet — every decided case declares
+  exactly its owner; with `--baseline`, every other case keeps its ids and
+  none disappears (`--allow-missing` for decided cases CI does not run). The
+  verification path where the collection check cannot run (Bazel `py_test`s):
+  apply with `--no-collect-check`, push, verify against the CI evidence.
+
+### Fixed
+
+- `rr migrate apply`: the static guards skip the `if __name__ == "__main__":`
+  block and the functions only it reaches, which never run under pytest; an
+  import call in a script-style test's `main()` no longer refuses every file.
+
 ## 0.2.0 (2026-10-04)
 
 Per-case runners and migration tooling, towards one test case, one
