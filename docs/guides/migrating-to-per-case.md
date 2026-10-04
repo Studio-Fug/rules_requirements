@@ -21,7 +21,8 @@ patterns make one test count twice:
 - a module-level `pytestmark = pytest.mark.requirements("PR-13", "PR-29")`, or
   any marker or `@rr.verifies(...)` that names two ids;
 - ids that accumulate across scopes, for example a module marker naming PR-11
-  and a function marker naming PR-13;
+  and a function marker naming PR-13 (from v0.3.0 the hooks record only the
+  nearest scope's id, here PR-13);
 - one target listed in the `verified_by` of two requirements, or one target
   whose cases are tagged for one requirement and listed whole by another.
 

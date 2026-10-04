@@ -202,11 +202,13 @@ pass the `rust_test` rule as `rule`.
 
 The wrapper also turns a crash into evidence: when the binary fails, a test
 that recorded traces but never reported a result (an abort mid-run) becomes an
-`error` case carrying its ids, and a binary that exits non-zero after every
-test passed gets an `exit-status` error case carrying every id the run traced.
+`error` case carrying its own declared id, and a binary that exits non-zero
+after every test passed gets an `exit-status` error case. That case declares no
+requirement: it is target-scope (`rr.scope=target`) and taints every case
+claimed on the target.
 It understands `--nocapture` output (the result on a line of its own). Call
 `rr::verifies!` on the test's own thread: traces from spawned threads or async
-runtimes cannot be attributed to a test (the wrapper warns about them).
+runtimes match no test and are dropped (the wrapper warns about them).
 
 (rr-node-test)=
 ### `rr_node_test`

@@ -35,9 +35,10 @@ skipped case is therefore not passing whole-target evidence — the skipped part
 may be exactly the hardware its `verified_by` level claims (an absent DUT). A
 binary that exits non-zero although every case in its report passed (a
 sanitizer, a crash after writing the report) gets an extra `exit-status` error
-case carrying every requirement id the run traced, so those requirements read
-FAILED — from `rr_evidence` and from `rr wrap`, for libtest output and for a
-runner's own JUnit (`--format junit`) alike.
+case — from `rr_evidence` and from `rr wrap`, for libtest output and for a
+runner's own JUnit (`--format junit`) alike. It declares no requirement (0.2
+copied every id the run traced onto it); it is target-scope, so it taints the
+cases claimed on its target instead.
 
 A test case should name one requirement; evidence naming several per case is
 still read in 0.2, as several ids, but the hooks that write it warn
