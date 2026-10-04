@@ -101,6 +101,10 @@ class VerifiedBy:
     # target, so it can only add conflicts, never hide one.
     problem: str = ""
     location: Location = field(default_factory=Location, compare=False)
+    # The item exactly as authored (plain data), kept when ``problem`` is set:
+    # the fields above cannot hold what was wrong with it, and an editor that
+    # rewrites the entity must neither lose nor "repair" it.
+    authored: Any = field(default=None, compare=False, repr=False)
 
     @property
     def label(self) -> str:
@@ -695,11 +699,13 @@ def _item(
             problem = "a reason belongs to a whole: true claim (add whole: true, or list cases)"
         else:
             legacy = True
+    authored: Any = None
     if problem:  # keep what was written (rewrites stay faithful); it claims the whole target
-        authored = item.get("cases")
-        if isinstance(authored, list) and all(isinstance(c, str) for c in authored):
-            cases = tuple(authored)
+        raw_cases = item.get("cases")
+        if isinstance(raw_cases, list) and all(isinstance(c, str) for c in raw_cases):
+            cases = tuple(raw_cases)
         whole = item.get("whole") is True
+        authored = _plain(item)
     return VerifiedBy(
         target=norm,
         cases=cases,
@@ -711,7 +717,17 @@ def _item(
         spelling=spelling,
         problem=problem,
         location=location or Location(),
+        authored=authored,
     )
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as plain dicts and lists (no loader subclasses), deep-copied."""
+    if isinstance(value, Mapping):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
 
 def parse_entity(

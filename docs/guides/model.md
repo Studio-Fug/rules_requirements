@@ -191,6 +191,13 @@ An item has exactly one of `cases` and `whole: true`. The 0.2 forms still
 parse — a bare label, `{target}` or `{target, level}` — as a whole-target claim,
 with a `bare-target-reference` warning (an error from 0.4).
 
+A malformed item — both or neither of `cases` and `whole: true`, an empty or
+non-list `cases`, `whole: false`, a `reason` without `whole: true` — is a
+`bad-selector` error, and until it is fixed it claims the **whole** target,
+whatever cases it lists: it can only add `shared-case` conflicts, never hide
+one. The web editor shows such an item exactly as written and refuses to
+rewrite the entity until it is fixed by hand.
+
 **Case selectors** match the whole case path (`<classname>::<name>`, see
 `rr cases`), case-sensitively. `*` matches any string, including the empty
 string, `::`, `/` and blanks; `**` is the same as `*`. `\*` is a literal star

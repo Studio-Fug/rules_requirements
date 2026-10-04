@@ -78,7 +78,10 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
 
 def _verified_by_item(v: VerifiedBy) -> Any:
     """A ``verified_by`` / ``validated_by`` item as plain data: the target as
-    written, in canonical key order (target, cases | whole, level, reason)."""
+    written, in canonical key order (target, cases | whole, level, reason).
+    A malformed item (``problem``) is returned exactly as authored."""
+    if v.problem and v.authored is not None:
+        return v.authored
     if v.legacy and not v.level and not v.extra:
         return v.label
     item: dict[str, Any] = {"target": v.label}

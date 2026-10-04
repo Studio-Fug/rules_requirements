@@ -304,6 +304,24 @@ def test_bad_targets_selectors_and_levels(tmp_path):
     assert all(i.severity == "error" for i in issues if i.code in ("bad-target", "bad-selector", "bad-level"))
 
 
+@pytest.mark.parametrize(
+    "item",
+    [
+        "{target: //a:t, cases: [x], whole: false}",
+        "{target: //a:t, cases: [x], whole: true}",
+        "{target: //a:t, whole: false}",
+        "{target: //a:t, reason: why}",
+        "{target: //a:t, cases: []}",
+    ],
+)
+def test_a_malformed_item_claims_the_whole_target(tmp_path, item):
+    # fail closed: whatever it lists, it conflicts with every other claim on the target
+    issues = issues_for(tmp_path, reqs(f"[{item}]", "[{target: //a:t, cases: [y]}]"))
+    assert only(issues, "bad-selector")
+    (shared,) = only(issues, "shared-case")
+    assert "REQ-2 and REQ-1 both claim cases of //a:t ('y' vs the whole target)" in shared.message
+
+
 def test_whole_and_legacy_rules(tmp_path):
     issues = issues_for(tmp_path, reqs("[//a:t, {target: //a:u, level: hil}, {target: //a:v, whole: true}]"))
     assert [i.severity for i in only(issues, "bare-target-reference")] == ["warning", "warning"]

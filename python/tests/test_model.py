@@ -315,6 +315,7 @@ def test_claims_cover_every_verifiable_kind_in_a_stable_order(tmp_path):
     "item, problem",
     [
         ("{target: //a:b, cases: [x], whole: true}", "either cases or whole"),
+        ("{target: //a:b, cases: [x], whole: false}", "either cases or whole"),
         ("{target: //a:b, cases: []}", "cases is empty"),
         ("{target: //a:b, cases: x}", "must be a list"),
         ("{target: //a:b, cases: [1]}", "must be a list"),
@@ -326,8 +327,10 @@ def test_malformed_items_claim_the_whole_target(tmp_path, item, problem):
     m, _ = read_model(write(tmp_path, "m.yaml", f"requirements: [{{id: REQ-1, title: r, verified_by: [{item}]}}]\n"))
     (vb,) = m.requirements["REQ-1"].verified_by
     assert problem in vb.problem
+    assert vb.selectors == (None,)
     (claim,) = m.claims()
     assert claim.whole  # fail closed: it can only add conflicts, never hide one
+    assert claim.matches("x") and claim.matches("anything else")
 
 
 def test_items_without_a_target_are_parse_errors(tmp_path):

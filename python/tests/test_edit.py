@@ -561,3 +561,26 @@ def test_claims_that_render_no_other_way_are_double_quoted_blocks(monkeypatch):
     monkeypatch.setattr(edit, "_quoted_block", lambda key, items, pad: [f"{pad}{key}: [broken"])
     with pytest.raises(edit.EditError):
         edit._claim_block("verified_by", items, "")
+
+
+@pytest.mark.parametrize(
+    "item, plain, problem",
+    [
+        ("{target: //a:b, whole: false}", {"target": "//a:b", "whole": False}, "whole must be true"),
+        ('{target: //a:b, cases: "x"}', {"target": "//a:b", "cases": "x"}, "must be a list"),
+        ("{target: //a:b, cases: [x, 3]}", {"target": "//a:b", "cases": ["x", 3]}, "must be a list"),
+        (
+            "{target: //a:b, cases: [x], whole: false}",
+            {"target": "//a:b", "cases": ["x"], "whole": False},
+            "either cases or whole",
+        ),
+        ("{target: //a:b, reason: why, ticket: Q-1}", {"target": "//a:b", "reason": "why", "ticket": "Q-1"}, "reason"),
+    ],
+)
+def test_malformed_claim_items_read_back_as_written(item, plain, problem):
+    text = f"requirements:\n  - id: REQ-1\n    title: t\n    verified_by: [{item}]\n"
+    data = edit.entity_to_dict(parse(text).get("REQ-1"))
+    assert data["verified_by"] == [plain]  # not a "repaired" {target, cases: []}
+    # any rewrite of the entity is refused, naming what is actually wrong
+    with pytest.raises(edit.EditError, match=problem):
+        edit.update_entity(text, "REQ-1", {**data, "title": "renamed"})
