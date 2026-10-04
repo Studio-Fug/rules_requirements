@@ -461,8 +461,8 @@ The command also lists, without changing anything:
   results). Edit those by hand so that each case names one id. With `--only`,
   cases outside the given paths are only counted.
 - decided cases whose test declares no id in its source, every decorator and
-  `pytestmark` element around it being one the codemod reads. Their owner is
-  set by `verified_by` in the model.
+  `pytestmark` element around it being one the codemod reads. They count
+  only through `verified_by`: see the edits below.
 - the `verified_by` edits the decisions imply: `remove` (no case of the target
   is left for that requirement) or `split` (the requirement keeps some of the
   target's cases while others went elsewhere). A whole-target reference cannot
@@ -507,32 +507,48 @@ against the CI evidence before merging.**
 
 ```console
 $ rr migrate apply requirements/attribution.rrplan --stage tags --no-collect-check
-$ git push    # CI runs the tests; download its bazel-testlogs
+$ git push    # CI runs the tests; download its bazel-testlogs into ci/
 $ rr migrate verify --worksheet requirements/attribution.rrplan \
-    --evidence ci-testlogs/ --baseline bazel-testlogs/
+    --evidence ci/bazel-testlogs/ --baseline bazel-testlogs/
 ```
+
+Keep each evidence tree in a directory named `bazel-testlogs` (or
+`testlogs`): a `test.xml`'s build target comes from its path
+(`bazel-testlogs/<package>/<name>/test.xml`), so the same files under
+`ci-testlogs/` would be keyed by suite name and match no case of the
+worksheet. `verify` exits 2 with that hint when the worksheet's cases belong
+to build targets and the evidence names none.
 
 It checks, case by case (by {ref}`case key <case-keys>`, so pytest, node,
 `rr_case.h`, googletest and every other evidence rr ingests alike):
 
 - every case the worksheet decides declares **exactly** its owner in the
   `--evidence` (no id at all for `none`). A decided case with no result there
-  is an error, unless `--allow-missing` (a HITL or manual target CI does not
-  run): those are listed as a warning, not verified. A decided case that
-  declared no id before the rewrite and declares none after counts only
-  through `verified_by`, which apply does not edit (it lists such cases):
-  its owner is set in the model, so it is listed in a note, not an error.
+  is an error. A decided case that declared no id before the rewrite and
+  declares none after counts only through `verified_by`, which apply does
+  not edit (it lists the `keep` / `remove` / `split` edits): it is listed in
+  a note, not an error. With `--model` (or the model named in the
+  worksheet's `inputs`, when that is still there) the note says whether
+  `verified_by` gives its target exactly its owner, or the case is still
+  pending a model edit (a target split between owners needs case selectors,
+  v0.3); a decided case that declares exactly its owner while `verified_by`
+  still gives its target to other requirements is noted too, since it keeps
+  counting toward them. Without a model, `verify` checks declared ids only.
   "Before" is the `--baseline` when it has the case, else the worksheet (a
   group with no `tags` has no tagged case); a tagged case that ends with no
   id lost its tag and is an error;
 - with `--baseline` (the evidence the worksheet was planned from, or any run
   from before the rewrite), every other case — undecided, still open, or not
   on the worksheet — declares the same ids as before (in any order), and no
-  case of the baseline is missing from the new evidence. `--allow-missing`
-  does not excuse a case the baseline has. A target-scope result (a whole
-  run's exit status) carries the union of its cases' ids, which the
-  decisions change: it must still be there, its ids are not compared. Cases
-  only the new evidence has are counted, not refused.
+  case of the baseline is missing from the new evidence. A target-scope
+  result (a whole run's exit status) carries the union of its cases' ids,
+  which the decisions change: it must still be there, its ids are not
+  compared. Cases only the new evidence has are counted, not refused;
+- `--allow-missing` (a HITL or manual target CI does not run) makes a case
+  with no result — decided or from the baseline — a warning, not verified,
+  when its **target** has no result at all in the new evidence (no case, no
+  target-scope result). A case missing from a target that did run stays an
+  error: it was renamed or lost by the rewrite.
 
 It prints one line per offending case, with the ids expected and found, and
 exits 1 on any:
@@ -545,8 +561,9 @@ exits 1 on any:
 Otherwise it exits 0 with a summary on stderr. It exits 2 when the worksheet
 cannot be read or an owner is not one of the ids its case counts toward (with
 `--model`, or the model named in the worksheet's `inputs` when that is still
-there, also when it is not an entity of the model), or when `--evidence` or
-`--baseline` holds no evidence at all. `--format` and `--ingestor` work as for
+there, also when it is not an entity of the model), when `--evidence` or
+`--baseline` holds no evidence at all, or when the worksheet's cases belong
+to build targets and the evidence names none (above). `--format` and `--ingestor` work as for
 `rr cases`.
 
 ## Checking the result

@@ -15,7 +15,7 @@ Unblocks applying a worksheet in Bazel projects.
 - `rr migrate verify`: checks the test evidence of a run after
   `rr migrate apply` against the worksheet — every decided case declares
   exactly its owner; with `--baseline`, every other case keeps its ids and
-  none disappears (`--allow-missing` for decided cases CI does not run). The
+  none disappears (`--allow-missing` for targets CI does not run). The
   verification path where the collection check cannot run (Bazel `py_test`s):
   apply with `--no-collect-check`, push, verify against the CI evidence.
 

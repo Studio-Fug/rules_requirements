@@ -12,7 +12,7 @@
     rr case      --name "flash ok" --status passed --requirement REQ-21   # shell harnesses
     rr cases     --evidence bazel-testlogs        # every case key, to copy into the model
     rr migrate   plan --model requirements/ --evidence bazel-testlogs --out attribution.rrplan
-    rr migrate   verify --worksheet attribution.rrplan --evidence ci-testlogs --baseline old-testlogs
+    rr migrate   verify --worksheet attribution.rrplan --evidence ci/bazel-testlogs --baseline bazel-testlogs
 
 Under ``bazel run``, relative paths resolve against the workspace root.
 """
@@ -386,10 +386,10 @@ def _symlinked_writes(root: str, paths: Iterable[str]) -> list[tuple[str, str]]:
     return out
 
 
-def _decided_worksheet(args: argparse.Namespace) -> dict[str, Any] | None:
+def _decided_worksheet(args: argparse.Namespace) -> tuple[dict[str, Any], Model | None] | None:
     """The worksheet ``args.worksheet``, checked (against ``--model``, else the
-    model it was planned with when that is still there); None, after saying
-    why, when it cannot be used."""
+    model it was planned with when that is still there), with that model (None
+    without one); None, after saying why, when it cannot be used."""
     from rules_requirements import migrate
 
     try:
@@ -413,7 +413,7 @@ def _decided_worksheet(args: argparse.Namespace) -> dict[str, Any] | None:
     problems = migrate.check_worksheet(doc, model)
     for problem in problems:
         print(f"rr migrate: {args.worksheet}: {problem}", file=sys.stderr)
-    return None if problems else doc
+    return None if problems else (doc, model)
 
 
 def cmd_migrate_apply(args: argparse.Namespace) -> int:
@@ -421,9 +421,10 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
 
     from rules_requirements import migrate, tag_codemod
 
-    doc = _decided_worksheet(args)
-    if doc is None:
+    checked = _decided_worksheet(args)
+    if checked is None:
         return 2
+    doc = checked[0]
     root = _path(args.root) if args.root else _root()
     decided = migrate.decisions(doc)
     res = tag_codemod.apply_tags(
@@ -558,9 +559,10 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
     """Check test evidence from after ``rr migrate apply`` against the worksheet."""
     from rules_requirements import migrate
 
-    doc = _decided_worksheet(args)
-    if doc is None:
+    checked = _decided_worksheet(args)
+    if checked is None:
         return 2
+    doc, model = checked
     evidence = _collect_evidence(args, "migrate verify")
     if evidence is None:
         return 2
@@ -569,28 +571,64 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
         baseline = _collect_evidence(args, "migrate verify --baseline", args.baseline)
         if baseline is None:
             return 2
-    res = migrate.verify(doc, evidence, baseline, allow_missing=args.allow_missing)
+    for flag, ev in (("--evidence", evidence), ("--baseline", baseline)):
+        why = migrate.unkeyed(doc, ev) if ev is not None else ""
+        if why:
+            print(f"rr migrate verify: {flag}: {why}", file=sys.stderr)
+            return 2
+    res = migrate.verify(doc, evidence, baseline, allow_missing=args.allow_missing, model=model)
     for off in res.offences:
         print(off.describe())
     if res.missing:
+        targets = sorted({key.target for key in res.missing}, key=natural_key)
         print(
-            f"warning: {len(res.missing)} decided case(s) have no result in the evidence (--allow-missing): "
-            "not verified",
+            f"warning: {len(res.missing)} case(s) of {len(targets)} target(s) with no result at all in the evidence "
+            f"(--allow-missing: not run there): not verified ({', '.join(targets)})",
             file=sys.stderr,
         )
         for key in res.missing:
             print(f"  {key}", file=sys.stderr)
     if res.untagged:
+        how = (
+            "verified_by gives each exactly its owner"
+            if model is not None
+            else "their owner is not checked (verify reads declared ids only; with --model, verified_by is checked "
+            "too): see the verified_by edits rr migrate apply lists, a target split between owners needs case "
+            "selectors (v0.3)"
+        )
         print(
             f"note: {len(res.untagged)} decided case(s) declare no id, before and after: they count only through "
-            "verified_by, so their owner is set in the model (see the verified_by edits rr migrate apply lists)",
+            f"verified_by; {how}",
             file=sys.stderr,
         )
         for key in res.untagged:
             print(f"  {key}", file=sys.stderr)
+    if res.pending:
+        print(
+            f"note: {len(res.pending)} decided case(s) declare no id, before and after, and verified_by does not "
+            "give their target exactly their owner: pending a model edit (keep/remove/split, see the verified_by "
+            "edits rr migrate apply lists; a split needs case selectors, v0.3)",
+            file=sys.stderr,
+        )
+        for key, claimers in res.pending:
+            print(f"  {key}: counts toward [{', '.join(claimers)}]", file=sys.stderr)
+    if res.also_claimed:
+        print(
+            f"note: {len(res.also_claimed)} decided case(s) declare exactly their owner, but verified_by gives their "
+            "target to other requirements too: they still count toward those",
+            file=sys.stderr,
+        )
+        for key, others in res.also_claimed:
+            print(f"  {key}: also [{', '.join(others)}]", file=sys.stderr)
     parts = [f"{res.decided} decided case(s) declare exactly their owner"]
     if res.untagged:
-        parts.append(f"{len(res.untagged)} declare no id (owner set by verified_by)")
+        parts.append(
+            f"{len(res.untagged)} declare no id ("
+            + ("owned through verified_by" if model is not None else "count only through verified_by")
+            + ")"
+        )
+    if res.pending:
+        parts.append(f"{len(res.pending)} pending a verified_by edit")
     if baseline is not None:
         parts.append(f"{res.unchanged} undecided case(s) kept their ids")
         parts.append(f"{res.new} case(s) are new")
@@ -930,9 +968,16 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument(
         "--allow-missing",
         action="store_true",
-        help="a decided case with no result in the evidence (a HITL or manual target) is a warning, not an error",
+        help="a case with no result is a warning, not an error, when its target has no result at all in the "
+        "evidence (a HITL or manual target CI does not run); a case missing from a target that ran stays an error",
     )
-    mv.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
+    mv.add_argument(
+        "--model",
+        "--requirements",
+        nargs="+",
+        default=[],
+        help="check the decided owners exist, and the verified_by owner of decided cases that declare no id",
+    )
     mv.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
     mv.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
     mv.set_defaults(func=cmd_migrate_verify)

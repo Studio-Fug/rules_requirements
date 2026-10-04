@@ -95,10 +95,23 @@ def evidence(root, cases, *, drop=()):
     return str(root)
 
 
-def check(tmp_path, after, *, baseline=True, allow_missing=False, drop=()):
+def check(tmp_path, after, *, baseline=True, allow_missing=False, drop=(), model=None):
     new = ingest.collect([evidence(tmp_path / "new", after, drop=drop)])
     old = ingest.collect([evidence(tmp_path / "old", BEFORE)]) if baseline else None
-    return migrate.verify(worksheet(), new, old, allow_missing=allow_missing)
+    return migrate.verify(worksheet(), new, old, allow_missing=allow_missing, model=model)
+
+
+def model(claims):
+    """A model whose requirements name targets in verified_by: ``{req: [target, ...]}``."""
+    from rules_requirements.model import Model, Requirement, VerifiedBy
+
+    ids = ["REQ-1", "REQ-2", "REQ-3", "REQ-4", "REQ-5"]
+    return Model(
+        requirements={
+            i: Requirement(id=i, title=i, verified_by=tuple(VerifiedBy(target=t) for t in claims.get(i, [])))
+            for i in ids
+        }
+    )
 
 
 def test_every_runner_shape_is_keyed_like_the_worksheet(tmp_path):
@@ -156,18 +169,65 @@ def test_a_decided_case_that_lost_its_tags(tmp_path, baseline):
 
 
 def test_a_decided_case_missing_from_the_evidence(tmp_path):
-    res = check(tmp_path, AFTER, baseline=False, drop=[NODE_A])
+    node = [NODE_A, NODE_U]  # every case of //web:clocksync_test: the target did not run
+    res = check(tmp_path, AFTER, baseline=False, drop=node)
     assert [o.describe() for o in res.offences] == [
-        f"{NODE_A}: a decided case has no result in the evidence (expected [REQ-5], found no result)"
+        f"{NODE_A}: a decided case has no result in the evidence (expected [REQ-5], found no result)",
+        f"{NODE_U}: a decided case has no result in the evidence (expected [REQ-4], found no result)",
     ]
-    # Tolerated with allow_missing (a HITL target CI does not run)...
-    res = check(tmp_path, AFTER, baseline=False, allow_missing=True, drop=[NODE_A])
-    assert res.ok and res.missing == [NODE_A] and res.decided == 3
-    # ...but never when the baseline has it: the case disappeared.
-    res = check(tmp_path, AFTER, allow_missing=True, drop=[NODE_A])
+    # Tolerated with allow_missing (a HITL target CI does not run), with or
+    # without a baseline: every case of the target, decided or not.
+    res = check(tmp_path, AFTER, baseline=False, allow_missing=True, drop=node)
+    assert res.ok and res.missing == node and res.decided == 3
+    res = check(tmp_path, AFTER, allow_missing=True, drop=node)
+    assert res.ok and res.missing == node and res.unchanged == 2
+    res = check(tmp_path / "cc", AFTER, allow_missing=True, drop=[CC_A, CC_OPEN])
+    assert res.ok and res.missing == [CC_OPEN, CC_A]
+    # Without it, a case the baseline has disappeared.
+    res = check(tmp_path, AFTER, drop=node)
     assert [o.describe() for o in res.offences] == [
-        f"{NODE_A}: a case of the baseline has no result in the evidence (expected [REQ-5], found no result)"
+        f"{NODE_A}: a case of the baseline has no result in the evidence (expected [REQ-5], found no result)",
+        f"{NODE_U}: a case of the baseline has no result in the evidence (expected [REQ-4], found no result)",
     ]
+
+
+@pytest.mark.parametrize("baseline", [True, False], ids=["baseline", "worksheet"])
+def test_allow_missing_never_excuses_a_case_missing_from_a_target_that_ran(tmp_path, baseline):
+    """A decided case gone from a target that ran was renamed or lost (a
+    mangled parametrize, a test dropped by the rewrite): an offence even with
+    allow_missing, and its replacement's ids are not what excuses it."""
+    renamed = CaseKey(PY, PY_A.path + "_renamed")
+    res = check(tmp_path, {**AFTER, renamed: ["REQ-1", "REQ-2"]}, baseline=baseline, allow_missing=True, drop=[PY_A])
+    reason = "a case of the baseline" if baseline else "a decided case"
+    assert [o.describe() for o in res.offences] == [
+        f"{PY_A}: {reason} has no result in the evidence, though its target ran (expected [REQ-1], found no result)"
+    ]
+    assert not res.missing
+    # An undecided case of a target that ran, likewise.
+    res = check(tmp_path, AFTER, allow_missing=True, drop=[CC_OPEN])
+    assert [o.key for o in res.offences] == [CC_OPEN] and not res.missing
+    # A target that ran only as a whole (a target-scope result) ran.
+    whole = CaseKey(NODE, "[target]")
+    res = check(tmp_path, {**AFTER, whole: []}, baseline=False, allow_missing=True, drop=[NODE_A, NODE_U])
+    assert [o.key for o in res.offences] == [NODE_A, NODE_U], [o.describe() for o in res.offences]
+
+
+def test_untagged_cases_with_a_model(tmp_path):
+    """With a model, a decided case that declares no id is owned through
+    verified_by only when its target's claimers are exactly its owner; else
+    it is pending a model edit. A tagged case whose target another
+    requirement still claims keeps counting toward it: listed, not refused."""
+    res = check(tmp_path, AFTER, model=model({"REQ-4": [NODE], "REQ-5": [NODE]}))
+    assert res.ok and res.untagged == [] and res.pending == [(NODE_U, ["REQ-4", "REQ-5"])]
+    assert res.also_claimed == [(NODE_A, ["REQ-4"])]
+    res = check(tmp_path, AFTER, model=model({"REQ-4": [NODE]}))
+    assert res.ok and res.untagged == [NODE_U] and res.pending == []
+    assert res.also_claimed == [(NODE_A, ["REQ-4"])]
+    res = check(tmp_path, AFTER, model=model({"REQ-5": [NODE]}))
+    assert res.pending == [(NODE_U, ["REQ-5"])] and res.also_claimed == []
+    # Without a model, its owner is not checked.
+    res = check(tmp_path, AFTER)
+    assert res.untagged == [NODE_U] and res.pending == [] and res.also_claimed == []
 
 
 @pytest.mark.parametrize("key", [PY_C, CC_OPEN], ids=["undecided", "open"])
@@ -214,10 +274,11 @@ def test_cli(tmp_path, capsys, monkeypatch):
     rc, out, err = run("--evidence", good, "--baseline", old)
     assert rc == 0 and out == "", out
     assert (
-        "ok: 4 decided case(s) declare exactly their owner; 1 declare no id (owner set by verified_by); "
+        "ok: 4 decided case(s) declare exactly their owner; 1 declare no id (count only through verified_by); "
         "2 undecided case(s) kept their ids; 0 case(s) are new"
     ) in err
     assert "note: 1 decided case(s) declare no id, before and after" in err and f"\n  {NODE_U}\n" in err
+    assert "their owner is not checked (verify reads declared ids only" in err
 
     rc, out, err = run("--evidence", bad, "--baseline", old)
     assert rc == 1 and "3 case(s) contradict the worksheet" in err
@@ -229,9 +290,48 @@ def test_cli(tmp_path, capsys, monkeypatch):
 
     rc, out, err = run("--evidence", bad, "--allow-missing")
     assert rc == 1 and out.splitlines() == [
-        f"{PY_A}: a decided case does not declare exactly its owner (expected [REQ-1], found [REQ-1, REQ-2])"
+        f"{PY_A}: a decided case does not declare exactly its owner (expected [REQ-1], found [REQ-1, REQ-2])",
+        f"{CC_A}: a decided case has no result in the evidence, though its target ran (expected [REQ-2], found no "
+        "result)",
     ]
-    assert f"1 decided case(s) have no result in the evidence (--allow-missing): not verified\n  {CC_A}" in err
+    hitl = evidence(tmp_path / "hitl", AFTER, drop=[CC_A, CC_OPEN])
+    rc, out, err = run("--evidence", hitl, "--baseline", old, "--allow-missing")
+    assert rc == 0 and out == "", out
+    assert (
+        "warning: 2 case(s) of 1 target(s) with no result at all in the evidence (--allow-missing: not run there): "
+        f"not verified ({CC})\n  {CC_OPEN}\n  {CC_A}\n"
+    ) in err
+
+    # With the model, the untagged case's owner is checked through verified_by.
+    req = tmp_path / "req"
+    req.mkdir()
+    (req / "reqs.yaml").write_text(
+        "user_needs: [{id: UN-1, title: n}]\nrequirements:\n"
+        + "".join(f"  - {{id: REQ-{i}, title: r, satisfies: [UN-1]}}\n" for i in (1, 2, 3))
+        + "".join(f"  - {{id: REQ-{i}, title: r, satisfies: [UN-1], verified_by: ['{NODE}']}}\n" for i in (4, 5)),
+        encoding="utf-8",
+    )
+    rc, out, err = run("--evidence", good, "--model", str(req))
+    assert rc == 0 and out == "", err
+    assert "1 pending a verified_by edit" in err and f"\n  {NODE_U}: counts toward [REQ-4, REQ-5]\n" in err
+    assert f"\n  {NODE_A}: also [REQ-4]\n" in err
+
+    # Evidence whose files are not under a bazel-testlogs / testlogs directory
+    # names no build target: every case would read as missing.
+    import shutil
+
+    shutil.copytree(os.path.join(good, "bazel-testlogs"), str(tmp_path / "ci-testlogs"))
+    for flag in ("--evidence", "--baseline"):
+        argv = ["--evidence", good, "--baseline", old]
+        argv[argv.index(flag) + 1] = str(tmp_path / "ci-testlogs")
+        rc, out, err = run(*argv)
+        assert rc == 2 and out == "", out
+        assert f"rr migrate verify: {flag}: the worksheet's cases belong to build targets" in err
+        assert "keep the evidence under a directory named bazel-testlogs or testlogs" in err
+    # The guide's layout keys them.
+    shutil.copytree(os.path.join(good, "bazel-testlogs"), str(tmp_path / "ci" / "bazel-testlogs"))
+    rc, out, err = run("--evidence", str(tmp_path / "ci" / "bazel-testlogs"), "--baseline", old)
+    assert rc == 0 and out == "", err
 
     # Usage errors: no evidence, a worksheet that does not read or does not check.
     rc, _, err = run("--evidence", str(tmp_path / "nowhere"))

@@ -17,14 +17,22 @@ report goldens are byte-identical to 0.2.0.
   case key: every decided case must declare exactly its owner (no id for
   `none`); with `--baseline`, every other case must declare the ids it had
   before (in any order; a target-scope result's are not compared) and no
-  case of the baseline may be missing. A decided case with no result is an
-  error unless `--allow-missing`, which lists it as a warning — never when
-  the baseline has it. A decided case that declared no id before and declares
-  none after counts only through `verified_by` (its owner is a model edit
-  apply does not make): it is listed in a note, not an error. One line per
-  offending case (expected and found ids)
-  and exit `1`; exit `0` with a summary; exit `2` for an unreadable or
-  invalid worksheet, or evidence paths holding none. It reads every evidence
+  case of the baseline may be missing. A case with no result is an error;
+  `--allow-missing` (a HITL or manual target CI does not run) makes it a
+  warning when its target has no result at all in the new evidence, never
+  when the target ran (a case renamed or lost by the rewrite). A decided
+  case that declared no id before and declares none after counts only
+  through `verified_by` (a model edit apply does not make): it is listed in
+  a note, not an error; with a model (`--model`, or the worksheet's), the
+  note says whether `verified_by` gives its target exactly its owner or the
+  case is pending a model edit, and also lists decided cases whose target
+  `verified_by` still gives to other requirements. Without a model only
+  declared ids are checked. One line per offending case (expected and found
+  ids) and exit `1`; exit `0` with a summary; exit `2` for an unreadable or
+  invalid worksheet, evidence paths holding none, or evidence that names no
+  build target while the worksheet's cases belong to build targets (JUnit
+  files outside a `bazel-testlogs` / `testlogs` directory are keyed by
+  suite name). It reads every evidence
   shape `rr` ingests (pytest, `rr_node_test`, `rr_case.h`, googletest, ...).
   It is the verification path where the collection check cannot run — Bazel
   `py_test` targets importing through their runfiles: apply with

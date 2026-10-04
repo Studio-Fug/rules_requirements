@@ -30,9 +30,11 @@ nothing unless given `--partial`, when it refused a file or could not find a
 decided case's test in the module it names, and `2` when the worksheet is
 unreadable or an owner is not one of the ids its case counts toward.
 `migrate verify` exits `1` when a decided case does not declare exactly its
-owner (or has no result, without `--allow-missing`) or, with `--baseline`, an
-undecided case's ids changed or a case disappeared, and `2` when the worksheet
-is unreadable or invalid or the evidence or baseline holds none. `wrap`
+owner or has no result, or, with `--baseline`, an undecided case's ids
+changed or a case disappeared (`--allow-missing` excuses a missing case only
+when its target has no result at all), and `2` when the worksheet is
+unreadable or invalid, the evidence or baseline holds none, or it names no
+build target while the worksheet's cases belong to build targets. `wrap`
 exits with the wrapped command's status; `case` exits `2` when it cannot record
 the case (no output file, more than one id, a malformed id or `--artifact`).
 
