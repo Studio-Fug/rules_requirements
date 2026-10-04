@@ -8,6 +8,7 @@ test refuse by default and name the item; code in test/fixture/setup bodies
 unless ``--no-collect-check`` is passed.
 """
 
+import shutil
 import sys
 import textwrap
 
@@ -500,6 +501,68 @@ def test_argline_values_are_joined():
     assert cli._join_argline_values(["--", "--pytest-args", "-x"]) == ["--", "--pytest-args", "-x"]
 
 
+def test_argline_join_is_scoped_to_migrate_apply():
+    """Only `migrate apply` takes --pytest-args; no other subcommand's argv is
+    rewritten (a value that happens to look like the option is left alone)."""
+    assert cli._join_argline_values(["migrate", "plan", "--pytest-args", "-x"]) == [
+        "migrate",
+        "plan",
+        "--pytest-args",
+        "-x",
+    ]
+    assert cli._join_argline_values(["diff", "--pytest-args", "-x"]) == ["diff", "--pytest-args", "-x"]
+    assert cli._join_argline_values(["case", "--name", "--pytest-args", "-x"]) == [
+        "case",
+        "--name",
+        "--pytest-args",
+        "-x",
+    ]
+
+
+def test_duplicate_nodeids_refuse(capsys, tmp_path):
+    """Two collected items with the same nodeid collapse in the dump (keyed by
+    nodeid), so one would go unchecked: refuse and name the nodeid."""
+    conftest = (
+        "def pytest_collection_modifyitems(items):\n"
+        "    for item in list(items):\n"
+        '        if item.nodeid.endswith("::test_a"):\n'
+        "            items.append(item)  # a second item with the same nodeid\n"
+        "            break\n"
+    )
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2, "conftest.py": conftest})
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "test_a" in err and "more than once" in err
+    assert (tmp_path / "pkg/test_m.py").read_bytes() == before  # nothing written
+
+
+def test_dump_records_duplicate_nodeids_as_separate_pairs():
+    """The dump is a list of (nodeid, ids) pairs, so duplicates are preserved
+    rather than collapsing in a dict keyed by nodeid."""
+    import json as _json
+
+    collect_dump._ITEMS.clear()
+
+    class _Item:
+        def __init__(self, nodeid):
+            self.nodeid = nodeid
+            self.user_properties = []
+
+        def iter_markers_with_node(self):
+            return iter(())
+
+        obj = None
+        cls = None
+
+    collect_dump.pytest_collection_modifyitems([_Item("pkg/test_m.py::test_a"), _Item("pkg/test_m.py::test_a")])
+    dump = _json.loads(_json.dumps({"items": collect_dump._ITEMS}))
+    nodeids = [pair[0] for pair in dump["items"]]
+    assert nodeids == ["pkg/test_m.py::test_a", "pkg/test_m.py::test_a"]
+    collect_dump._ITEMS.clear()
+
+
 def test_symlinked_dirs_are_ignored_in_both_trees(capsys, tmp_path):
     """Bazel's convenience symlinks are not copied; they must not be
     collected in the original tree either, or the nodeid sets differ."""
@@ -511,6 +574,77 @@ def test_symlinked_dirs_are_ignored_in_both_trees(capsys, tmp_path):
     _ws(tmp_path / "ws.rrplan", _D2)
     rc, _, err = _apply(capsys, tmp_path)
     assert rc == 0, err
+
+
+def _symlink_or_skip(link, target, *, directory):
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except OSError:  # pragma: no cover - no symlinks on this platform
+        pytest.skip("symlinks unsupported")
+
+
+def test_a_symlinked_package_dir_is_covered_by_the_check(capsys, tmp_path):
+    """An in-tree directory symlink a real pytest run would follow (`pkgalias ->
+    pkg`) must not be skipped silently: the check follows it in both trees and
+    refuses when the alias's attribution would change."""
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
+    _symlink_or_skip(tmp_path / "pkgalias", tmp_path / "pkg", directory=True)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "pkgalias" in err  # the aliased item is named
+    assert (tmp_path / "pkg/test_m.py").read_bytes() == before  # nothing written
+
+
+def test_a_symlinked_test_module_is_covered_by_the_check(capsys, tmp_path):
+    """An in-tree file symlink to a rewritten test module is followed in both
+    trees; the alias's changed ids make the check refuse."""
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
+    _symlink_or_skip(tmp_path / "pkg/test_alias.py", tmp_path / "pkg/test_m.py", directory=False)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "test_alias" in err
+    assert (tmp_path / "pkg/test_m.py").read_bytes() == before
+
+
+def test_a_symlink_pointing_outside_the_root_refuses(capsys, tmp_path):
+    """A symlink whose target resolves outside the tree reaches tests a real
+    pytest run would follow but the copied tree cannot cover: fail closed, name
+    the path, write nothing."""
+    ext = tmp_path.parent / f"{tmp_path.name}-ext"
+    ext.mkdir()
+    (ext / "test_sub.py").write_text("def test_z():\n    pass\n", encoding="utf-8")
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
+    _symlink_or_skip(tmp_path / "shared", ext, directory=True)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    try:
+        rc, _, err = _apply(capsys, tmp_path)
+        assert rc == 1, err
+        assert "shared" in err and "symlink" in err
+        assert (tmp_path / "pkg/test_m.py").read_bytes() == before  # nothing written
+    finally:
+        shutil.rmtree(ext, ignore_errors=True)
+
+
+def test_copy_tree_recreates_in_tree_symlinks_and_reports_outside_ones(tmp_path):
+    src = tmp_path / "src"
+    _tree(src, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    (ext / "test_sub.py").write_text("def test_z():\n    pass\n", encoding="utf-8")
+    _symlink_or_skip(src / "pkgalias", src / "pkg", directory=True)
+    _symlink_or_skip(src / "shared", ext, directory=True)
+    _symlink_or_skip(src / "bazel-out", ext, directory=True)  # a bazel convenience link: still skipped
+    ignored, offenders = collect_check._copy_tree(str(src), str(tmp_path / "dst"))
+    dst = tmp_path / "dst"
+    assert (dst / "pkgalias").is_symlink()  # in-tree link recreated into the copy
+    assert (dst / "pkgalias" / "test_m.py").exists()  # and it resolves inside the copy
+    assert [p for p, _ in offenders] == ["shared"]  # the out-of-tree link fails closed
+    assert "bazel-out" in ignored and not (dst / "bazel-out").exists()
 
 
 def test_a_dir_named_like_a_venv_is_still_copied(capsys, tmp_path):
@@ -530,8 +664,8 @@ def test_a_dir_named_like_a_venv_is_still_copied(capsys, tmp_path):
 
 def test_a_real_virtualenv_is_not_copied(tmp_path):
     _tree(tmp_path / "src", {"pkg/test_m.py": _F2, "env/pyvenv.cfg": "home = /usr\n", "env/lib/x.py": ""})
-    ignored = collect_check._copy_tree(str(tmp_path / "src"), str(tmp_path / "dst"))
-    assert "env" in ignored and not (tmp_path / "dst/env").exists()
+    ignored, offenders = collect_check._copy_tree(str(tmp_path / "src"), str(tmp_path / "dst"))
+    assert "env" in ignored and not offenders and not (tmp_path / "dst/env").exists()
     assert (tmp_path / "dst/pkg/test_m.py").exists()
 
 

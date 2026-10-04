@@ -43,10 +43,13 @@ from rules_requirements.case_keys import CaseKey, nodeid_to_case_path
 from rules_requirements.migrate import NONE, OPEN
 
 # Directories never copied into the scratch tree: version control, build and
-# tool caches, vendored trees. Bazel's convenience symlinks (and every other
-# symlink) and virtualenvs (a directory holding ``pyvenv.cfg``) are skipped
-# too. Whatever is skipped is also ``--ignore``d in BOTH collections, so the
-# two trees are collected over the same files.
+# tool caches, vendored trees. Bazel's convenience symlinks (``bazel-*``) and
+# virtualenvs (a directory holding ``pyvenv.cfg``) are skipped too. Whatever is
+# skipped is also ``--ignore``d in BOTH collections, so the two trees are
+# collected over the same files. Every OTHER symlink is NOT skipped silently:
+# one resolving inside the tree is recreated in the copy so both collections
+# follow it, and one resolving outside the tree makes apply refuse (a real
+# ``pytest`` run would follow it, changing attribution the check cannot cover).
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -101,35 +104,91 @@ def _skipped_dir(path: str, name: str) -> bool:
     return name in _SKIP_DIRS or os.path.isfile(os.path.join(path, "pyvenv.cfg"))
 
 
-def _copy_tree(src: str, dst: str) -> list[str]:
-    """Copy ``src`` to ``dst``, skipping VCS/cache dirs, virtualenvs and every
-    symlink (so ``bazel-out`` and the like are not followed). Returns the
-    skipped paths (relative, ``/``-separated) pytest could otherwise collect:
-    the caller ignores them in both collections."""
+def _is_bazel_link(name: str) -> bool:
+    """A Bazel convenience symlink (``bazel-out``, ``bazel-bin``, ``bazel-<ws>``)."""
+    return name.startswith("bazel-")
+
+
+def _within(path: str, root_real: str) -> bool:
+    """Whether ``path`` resolves to ``root_real`` or somewhere beneath it."""
+    real = os.path.realpath(path)
+    return real == root_real or real.startswith(root_real + os.sep)
+
+
+def _copy_tree(src: str, dst: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """Copy ``src`` to ``dst``; returns ``(ignored, offenders)``.
+
+    VCS/cache dirs, virtualenvs and Bazel convenience symlinks (``bazel-*``) are
+    not copied and are listed in ``ignored`` (relative, ``/``-separated), which
+    the caller ``--ignore``s in BOTH collections so the two trees collect over
+    the same files.
+
+    No OTHER symlink is skipped silently, because a real ``pytest`` run from
+    ``src`` would follow it:
+
+    * one whose target resolves INSIDE ``src`` is recreated in the copy
+      (retargeted into the copy), so both collections follow it and the
+      collection check covers whatever it reaches;
+    * one whose target resolves OUTSIDE ``src`` and could be collected (a
+      directory, or a ``.py`` file) is returned in ``offenders`` as
+      ``(path, realpath)``: the caller fails closed on it. An out-of-tree
+      symlink to a non-``.py`` file is only ``ignored`` (pytest would not
+      collect it)."""
     ignored: list[str] = []
+    offenders: list[tuple[str, str]] = []
+    src_real = os.path.realpath(src)
+
+    def rel_of(rel: str, name: str) -> str:
+        return os.path.normpath(os.path.join(rel, name)).replace(os.sep, "/")
+
+    def recreate(source: str, link: str) -> None:
+        real = os.path.realpath(source)
+        target = os.path.join(dst, os.path.relpath(real, src_real))
+        try:
+            os.symlink(target, link, target_is_directory=os.path.isdir(real))
+        except (OSError, NotImplementedError):  # pragma: no cover - platform without symlinks
+            offenders.append((os.path.relpath(source, src).replace(os.sep, "/"), real))
+
     for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
         rel = os.path.relpath(dirpath, src)
+        target_dir = dst if rel == "." else os.path.join(dst, rel)
+        os.makedirs(target_dir, exist_ok=True)
         keep = []
         for d in dirnames:
             full = os.path.join(dirpath, d)
-            if os.path.islink(full) or _skipped_dir(full, d):
+            relpath = rel_of(rel, d)
+            if os.path.islink(full):
+                if _is_bazel_link(d) or _skipped_dir(full, d):
+                    ignored.append(relpath)  # bazel convenience symlink or a cache/venv
+                elif _within(full, src_real):
+                    recreate(full, os.path.join(target_dir, d))  # covered by the copy
+                else:
+                    offenders.append((relpath, os.path.realpath(full)))  # fail closed
+                continue  # never recurse into a symlinked directory
+            if _skipped_dir(full, d):
                 if d != "__pycache__":
-                    ignored.append(os.path.normpath(os.path.join(rel, d)).replace(os.sep, "/"))
+                    ignored.append(relpath)
             else:
                 keep.append(d)
         dirnames[:] = keep
-        target_dir = dst if rel == "." else os.path.join(dst, rel)
-        os.makedirs(target_dir, exist_ok=True)
         for name in filenames:
             source = os.path.join(dirpath, name)
+            relpath = rel_of(rel, name)
             if os.path.islink(source):
-                ignored.append(os.path.normpath(os.path.join(rel, name)).replace(os.sep, "/"))
+                if _is_bazel_link(name):
+                    ignored.append(relpath)
+                elif _within(source, src_real):
+                    recreate(source, os.path.join(target_dir, name))  # covered by the copy
+                elif name.endswith(".py"):
+                    offenders.append((relpath, os.path.realpath(source)))  # fail closed
+                else:
+                    ignored.append(relpath)  # out-of-tree data file: pytest would not collect it
                 continue
             try:
                 shutil.copy2(source, os.path.join(target_dir, name))
             except OSError:
                 pass  # a socket, a vanished file: nothing pytest would import
-    return sorted(ignored)
+    return sorted(ignored), sorted(offenders)
 
 
 def _rr_pythonpath(tmp: str) -> str:
@@ -152,11 +211,13 @@ def _rr_pythonpath(tmp: str) -> str:
 
 def _collect(
     tree: str, python: str, pytest_args: list[str], dump_path: str, rr_path: str
-) -> tuple[Optional[dict[str, list[str]]], dict[str, str], str, int]:
-    """Collect ``tree`` with the dump plugin: (items or None, skipped, output, rc).
+) -> tuple[Optional[dict[str, list[str]]], dict[str, str], list[str], str, int]:
+    """Collect ``tree`` with the dump plugin: (items or None, skipped, duplicates, output, rc).
 
-    No path argument is passed, so pytest picks what to collect exactly as a
-    plain ``pytest`` run from ``tree`` would (``testpaths`` included)."""
+    ``duplicates`` names any nodeid the dump recorded more than once (two
+    collected items the check cannot tell apart). No path argument is passed,
+    so pytest picks what to collect exactly as a plain ``pytest`` run from
+    ``tree`` would (``testpaths`` included)."""
     if os.path.exists(dump_path):
         os.remove(dump_path)
     env = dict(os.environ)
@@ -182,19 +243,29 @@ def _collect(
     output = proc.stdout + proc.stderr
     items: Optional[dict[str, list[str]]] = None
     skipped: dict[str, str] = {}
+    duplicates: list[str] = []
     if os.path.exists(dump_path):
         try:
             with open(dump_path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
             got = loaded.get("items")
-            if isinstance(got, dict):
-                items = {str(k): list(v) for k, v in got.items()}
+            if isinstance(got, list):
+                items = {}
+                seen: set[str] = set()
+                dups: set[str] = set()
+                for pair in got:
+                    nid, ids = str(pair[0]), list(pair[1])
+                    if nid in seen:
+                        dups.add(nid)
+                    seen.add(nid)
+                    items[nid] = ids
+                duplicates = sorted(dups)
             sk = loaded.get("skipped")
             if isinstance(sk, dict):
                 skipped = {str(k): str(v) for k, v in sk.items()}
-        except (OSError, ValueError):
+        except (OSError, ValueError, TypeError, IndexError):
             items = None
-    return items, skipped, output, proc.returncode
+    return items, skipped, duplicates, output, proc.returncode
 
 
 def _relocate(items: Mapping[str, list[str]], copy: str, root: str) -> dict[str, list[str]]:
@@ -291,7 +362,16 @@ def check(
     tmp = tempfile.mkdtemp(prefix="rr-collect-", dir=scratch or None)
     try:
         copy = os.path.join(tmp, "after")
-        ignored = _copy_tree(root, copy)
+        ignored, symlink_offenders = _copy_tree(root, copy)
+        if symlink_offenders:
+            listing = ", ".join(f"{p} -> {real}" for p, real in symlink_offenders)
+            return CollectCheck(
+                False,
+                error=(
+                    "a symlink reaches a test outside the tree, which a real pytest run would follow "
+                    f"but the collection check cannot cover: {listing}"
+                ),
+            )
         for rel, (new_text, encoding) in rewrites.items():
             dest = os.path.join(copy, rel)
             os.makedirs(os.path.dirname(dest) or copy, exist_ok=True)
@@ -299,10 +379,10 @@ def check(
                 fh.write(new_text)
         rr_path = _rr_pythonpath(tmp)
         extra = [*(f"--ignore={p}" for p in ignored), *extra]
-        before, before_skipped, before_out, before_rc = _collect(
+        before, before_skipped, before_dups, before_out, before_rc = _collect(
             root, python, extra, os.path.join(tmp, "before.json"), rr_path
         )
-        after, after_skipped, after_out, after_rc = _collect(
+        after, after_skipped, after_dups, after_out, after_rc = _collect(
             copy, python, extra, os.path.join(tmp, "after.json"), rr_path
         )
         if after is not None:
@@ -312,9 +392,9 @@ def check(
 
     skipped = {**after_skipped, **before_skipped}
     has_decided = any(owner != OPEN for owner in decided.values())
-    for label, items, out, rc in (
-        ("original", before, before_out, before_rc),
-        ("rewritten", after, after_out, after_rc),
+    for label, items, dups, out, rc in (
+        ("original", before, before_dups, before_out, before_rc),
+        ("rewritten", after, after_dups, after_out, after_rc),
     ):
         if items is None:
             reason = "the dump plugin wrote no items (not loaded?)" if rc == 0 else f"pytest --collect-only exited {rc}"
@@ -322,6 +402,15 @@ def check(
         if rc != 0:
             return CollectCheck(
                 False, error=f"collection failed in the {label} tree: pytest --collect-only exited {rc}", output=out
+            )
+        if dups:
+            return CollectCheck(
+                False,
+                error=(
+                    f"the {label} collection has the nodeid {dups[0]!r} more than once, so the check cannot tell "
+                    "the two cases apart"
+                ),
+                output=out,
             )
         if has_decided and not items:
             return CollectCheck(

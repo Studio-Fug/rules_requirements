@@ -15,10 +15,13 @@ rr's plugin with ``-p`` (as the Bazel runner does) collects here too.
 The dump is written to the file named by the ``RR_COLLECT_DUMP`` environment
 variable when collection finishes::
 
-    {"items": {"pkg/test_m.py::test_a": ["REQ-1"], ...},
+    {"items": [["pkg/test_m.py::test_a", ["REQ-1"]], ...],
      "skipped": {"pkg/test_hw.py": "could not import 'hwlib'..."}}
 
-``skipped`` names the collectors pytest skipped at collection time
+``items`` is a list of ``[nodeid, ids]`` pairs, not a mapping, so two items
+that share a nodeid are both recorded (the check refuses on the duplicate
+rather than silently keeping only the last). ``skipped`` names the collectors
+pytest skipped at collection time
 (``importorskip``, a module-level ``pytest.skip``): tests the check cannot see.
 
 Stdlib only (``rules_requirements`` stays importable without pytest); the
@@ -35,14 +38,14 @@ from rules_requirements.hooks.pytest_plugin import _trylast, pytest_configure, t
 
 __all__ = ["pytest_collection_finish", "pytest_collection_modifyitems", "pytest_collectreport", "pytest_configure"]
 
-_ITEMS: dict[str, list[str]] = {}
+_ITEMS: list[list[Any]] = []
 _SKIPPED: dict[str, str] = {}
 
 
 @_trylast  # after every conftest's modifyitems, exactly as the JUnit hook records
 def pytest_collection_modifyitems(items: list[Any]) -> None:
     for item in items:
-        _ITEMS[item.nodeid] = trace_of(item)[0]
+        _ITEMS.append([item.nodeid, trace_of(item)[0]])
 
 
 def pytest_collectreport(report: Any) -> None:

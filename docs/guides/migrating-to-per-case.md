@@ -221,10 +221,16 @@ would write anything (with `--partial` and `--dry-run` too), apply:
 
 1. copies the tree under `--root` to a temporary directory and writes the
    rewritten files **there**, never in place. It skips version control and
-   cache directories, virtualenvs (a directory holding `pyvenv.cfg`) and every
-   symlink — Bazel's `bazel-*` convenience symlinks included — and passes an
-   `--ignore` for each skipped path to *both* collections, so the two trees are
-   collected over the same files;
+   cache directories, virtualenvs (a directory holding `pyvenv.cfg`) and Bazel's
+   `bazel-*` convenience symlinks, and passes an `--ignore` for each skipped
+   path to *both* collections, so the two trees are collected over the same
+   files. **Other symlinks are never skipped silently**, because a real pytest
+   run from `--root` would follow them: a symlink whose target resolves *inside*
+   the tree is recreated in the copy (so both collections follow it and the
+   check covers whatever it reaches, refusing if its attribution changes), and a
+   symlink that reaches a test *outside* the tree — a directory, or a `.py`
+   file — makes apply **refuse and name the path** (the copy cannot cover it).
+   Remove or redirect such a symlink, or pass `--no-collect-check`;
 2. runs `python -m pytest --collect-only` in the original tree and in the copy,
    from `--root` with no path argument (so the project's ini, `testpaths`
    included, decides what is collected, exactly as a plain `pytest` run there
@@ -243,7 +249,9 @@ matches — makes apply **refuse, write nothing, and name each offending item**
 with its before, after and expected ids (`--dry-run` exits 1 and reports the
 files as held back). This is what catches the dynamic shapes the static guards
 cannot: a `setattr`-installed method that would silently lose a shared marker,
-a factory-built subclass, an aliased test.
+a factory-built subclass, an aliased test. If either collection records the
+same nodeid twice (a conftest that builds items by hand), apply refuses and
+names it: the check cannot tell the two cases apart.
 
 Run apply where `python -m pytest --collect-only` works for the project — the
 same interpreter and dependencies the tests need. For a plain project that is
@@ -272,16 +280,24 @@ tests by hand.
   pytest.ini`, `--rootdir .`, `-p my_project.plugin` for a plugin the tests
   rely on, `--ignore=scripts` for a directory that does not import here, or a
   path to collect beyond `testpaths`. A value that starts with a dash works
-  either way: `--pytest-args "--ignore=x"` or `--pytest-args=--ignore=x`. The
+  either way: `--pytest-args "--ignore=x"` or `--pytest-args=--ignore=x`. **Any
+  plugin your runner loads with `-p` must be repeated here** (for example
+  `--pytest-args "-p my_project.plugin"`): a plugin that mutates markers at
+  collection time changes what a real run attributes, and the check is blind to
+  it unless it loads the same plugin. (Only `rr migrate apply` takes
+  `--pytest-args`; it is passed through to the check's pytest unchanged.) The
   check's plugin registers rr's `rr` markers itself, so `--strict-markers`
   collects even when rr's pytest plugin is loaded with `-p` only in the real
   run (as the Bazel runner does).
 - `--no-collect-check` skips the check and writes on the static guards alone.
   It prints a loud warning: the guards are **best-effort** and cannot see what
   pytest collects dynamically, so a rewrite they accept can still move a
-  shared marker off a test you did not mean to touch. Use it only where pytest
-  cannot collect the project at all, and re-run the tests and `rr migrate plan`
-  afterwards to check the result.
+  shared marker off a test you did not mean to touch. It also gives up
+  everything the check adds: the before/after collection comparison, the
+  refusal on symlinks that reach tests outside the tree, and the refusal on
+  duplicate nodeids. Use it only where pytest cannot collect the project at
+  all, and re-run the tests and `rr migrate plan` afterwards to check the
+  result.
 
 ## The static guards: a first, conservative line
 

@@ -887,7 +887,13 @@ _ARGLINE_OPTIONS = ("--pytest-args",)
 
 def _join_argline_values(argv: list[str]) -> list[str]:
     """``["--pytest-args", "-x"]`` -> ``["--pytest-args=-x"]``, so argparse
-    takes a dash-leading value as the option's value."""
+    takes a dash-leading value as the option's value.
+
+    Only ``rr migrate apply`` has an argline option, so every other
+    subcommand's argv is returned untouched: a value elsewhere that happens to
+    equal one of these option names is never rewritten."""
+    if argv[:2] != ["migrate", "apply"]:
+        return list(argv)
     out: list[str] = []
     i = 0
     while i < len(argv):
