@@ -117,6 +117,38 @@ rr_evidence(
     ],
 )
 
+# A target whose only test passes and which then exits 1: its exit-status case
+# must declare no requirement. Manual: as a `bazel test` target it fails, by
+# design; it is run only for the evidence below.
+rr_wrapped_test(
+    name = "leaky_wrapped_test",
+    tags = ["manual"],
+    test = "leaky_libtest.sh",
+)
+
+rr_evidence(
+    name = "exit_status_evidence",
+    tests = [":leaky_wrapped_test"],
+)
+
+# Quarantine inputs: the multi-id cases above reach the evidence with every id
+# they name (attribution then quarantines them); no other case names two, and
+# an exit-status case names none.
+py_test(
+    name = "declared_ids_check_test",
+    srcs = ["declared_ids_check.py"],
+    args = [
+        "$(rootpaths :evidence)",
+        "$(rootpaths :exit_status_evidence)",
+    ],
+    data = [
+        ":evidence",
+        ":exit_status_evidence",
+    ],
+    main = "declared_ids_check.py",
+    deps = ["//python"],
+)
+
 rr_report(
     name = "report",
     evidence = [":evidence"],

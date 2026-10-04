@@ -9,10 +9,13 @@ framework, and lets anything that can write JUnit take part ({doc}`evidence`).
 :class: important
 
 A test case verifies **at most one** requirement; a set of test cases may
-verify one requirement. Declare one id per test case. The older multi-id forms
-(`@pytest.mark.rr("REQ-1", "REQ-2")`, `@rr.verifies("REQ-1", "REQ-2")`, a list
-passed to `JUnitWriter`) still record every id in 0.2, but are deprecated and
-warn with `MultipleRequirementsWarning` — see [Deprecated: several ids per test case](#multi-id-deprecation).
+verify one requirement. Declare one id per test case. A hook only *declares*
+the id; which requirement a case verifies is decided by attribution, never by a
+hook. The older multi-id forms (`@pytest.mark.rr("REQ-1", "REQ-2")`,
+`@rr.verifies("REQ-1", "REQ-2")`, a list passed to `JUnitWriter`) still record
+every id in 0.3, but are deprecated and warn with `MultipleRequirementsWarning`;
+the case is then quarantined and counts for none of them — see
+[Deprecated: several ids per test case](#multi-id-deprecation).
 ```
 
 | Framework | Declare | Bazel | Without Bazel |
@@ -33,9 +36,11 @@ warn with `MultipleRequirementsWarning` — see [Deprecated: several ids per tes
 
 | Property | Meaning |
 | -------- | ------- |
-| `requirement` | The id the test case verifies — one per case. (Repeated properties and values separated by commas or whitespace are still read, as several ids: since 0.3 such a case is quarantined as `multi-tag` and counts for no requirement.) |
-| `requirements` | Comma-separated ids (the form googletest's single-valued `RecordProperty` needs). |
-| `rr.file` | The source file of the test code that produced the case, relative to the workspace (written by `JUnitWriter`, `CheckPlan` and `rr case --file`). Identifies the same test code run by several targets. |
+| `requirement` | The id the test case declares — one per case. (Repeated properties, and comma- or whitespace-separated values, are still read as several ids; that form is deprecated, and since 0.3 such a case is quarantined as `multi-tag` and counts for no requirement.) |
+| `requirements` | 0.2's name for comma-separated ids (googletest's hook wrote it); still read, like `requirement`. |
+| `rr.file` | The source file of the test code that produced the case, relative to the workspace (written by the pytest and unittest hooks, `JUnitWriter`, `CheckPlan` and `rr case --file`). Identifies the same test code run by several targets. |
+| `rr.scope` | `target` for a result about the whole run rather than a test case (an `exit-status` error, a report that could not be read). It declares no requirement; it taints every case claimed on its target. |
+| `rr.synthetic` | `true` for a target's single whole-run result, written when it produced no per-case results. |
 | `level` | The verification level the case provides. Default: the model's `default_provided_level`. |
 | `artifact.<key>` | One key of the identity of the artifact exercised (firmware build id, board revision, git SHA...), for staleness checks. |
 
@@ -76,20 +81,33 @@ def test_parses_units(): ...
 ```
 
 - The positional argument is the id. Several ids — several arguments, a
-  comma-separated string, a list, or several markers at one scope naming
-  different ids — are deprecated: every id is still recorded, and the plugin
-  warns once per declaring test (all its parameters), class or module
-  ([details](#multi-id-deprecation)). A string is split on its commas only:
-  whitespace does not separate ids, so `"REQ-1 REQ-2"` is, as before 0.2,
-  recorded as written — one malformed id, which matches no requirement and
-  which the report lists as an undefined id. It does not warn as several ids.
+  comma- or whitespace-separated string, a list, or several markers at one
+  scope naming different ids — are deprecated: every id is still recorded (so
+  the case is quarantined), and the plugin warns once per declaring test (all
+  its parameters), class or module ([details](#multi-id-deprecation)).
 - `level=` names the level the test provides; `artifact=` a mapping of artifact
   identity keys.
-- Markers accumulate: a test gets the ids of every `rr`/`requirements` marker on
-  it, its class and its module (`pytestmark`), without duplicates.
-- For the level, `rr` markers are considered before `requirements` markers and,
-  within each, the nearest (function, then class, then module) that names a
-  level wins.
+- **The nearest scope wins.** Only the nearest scope that names an id is
+  recorded, in this order: a `pytest.param(..., marks=...)` mark; the test
+  function (its markers, a conftest's `item.add_marker`, `@rr.verifies`); its
+  class (a subclass's own declaration before its base class's); the module's
+  `pytestmark`, then a package's. A nearer id *replaces* a farther one: a
+  module-level `pytestmark = pytest.mark.rr("REQ-10")` is a default that a
+  test's own marker overrides, never an id added to it. (0.2 recorded the ids
+  of every scope.)
+- **Sibling base classes are one scope.** A class that declares no id gets
+  the ids of every base class that no nearer class overrides, together:
+  `class TestD(MixA, MixB)` with `MixA` naming `REQ-1` and `MixB` naming
+  `REQ-2` records both, warns (RR-E101), and is quarantined. It is never
+  resolved by MRO order. A base reached along two paths (a diamond) counts
+  once, and a base that another contributing base subclasses is overridden
+  by it.
+- The nearest marker naming a level wins (`rr` and `requirements` markers alike),
+  and artifact keys resolve nearest-first.
+- Every case also records `rr.file`, the test file relative to the workspace.
+- A raw `record_property("requirement", ...)` (or `"requirements"`) bypasses
+  these rules: the plugin drops the property and fails the test with
+  **RR-E102**. Declare the id with the marker.
 - `unittest.TestCase` methods collected by pytest honour `@rr.verifies(...)`
   (below); the decorator's level applies only when no marker names one.
 
@@ -132,9 +150,17 @@ if __name__ == "__main__":
 ```
 
 `rr.verifies(id, level="", artifact=None)` records the trace on the function
-or class, and a method's own level wins over its class's. Extra ids, or stacked
-decorators naming different ids, are deprecated: every id is still recorded,
-with a warning at the decorated definition ([details](#multi-id-deprecation)).
+or class. The nearest declaration wins: a method's decorator replaces its
+class's, and a subclass's replaces its base class's (a level or artifact key
+the nearer declaration does not set is still inherited). As under pytest,
+sibling base classes that no nearer class overrides are one scope: two naming
+different ids record both, so the case is quarantined, with a warning at the
+class definition when its first test starts. A `setUpClass` /
+`setUpModule` error and a failing subtest carry the same single id as their
+test, and every case records `rr.file`. Extra ids, or stacked decorators
+naming different ids, are deprecated: every id is still recorded (so the case
+is quarantined), with a warning at the decorated definition
+([details](#multi-id-deprecation)).
 `rr.unittest_main()` replaces `unittest.main()`: it runs the module's tests and
 writes JUnit to `$XML_OUTPUT_FILE`, so a plain Bazel `py_test` with
 `@rules_requirements//python` in its `deps` needs nothing else. Outside Bazel, pass `--junit-xml`:
@@ -171,10 +197,13 @@ googletest writes JUnit to `$XML_OUTPUT_FILE` under
 `bazel test`, so a plain `cc_test` needs no wrapper; elsewhere run the binary
 with `--gtest_output=xml:results.xml`.
 
-`RecordProperty` keeps one value per key, so the ids of a test (call it once,
-with one id) are accumulated
-and recorded as one comma-separated `requirements` property. The helpers are
-also available as functions — `rules_requirements::Verifies({...})`,
+The id is recorded as the test's `requirement` property (0.2 wrote
+`requirements`; both are read). Call it once, with one id: several ids, or
+several calls naming different ids, are deprecated — `RecordProperty` keeps one
+value per key, so they are recorded as one comma list, which is quarantined.
+`RR_VERIFIES` in `SetUpTestSuite`, an `Environment` or `main` is still recorded
+on the suite, but no test case inherits a suite-level requirement. The helpers
+are also available as functions — `rules_requirements::Verifies({...})`,
 `Level(...)`, `Artifact(key, value)`.
 
 (rr-case-h)=
@@ -335,8 +364,10 @@ rules_requirements = { git = "https://github.com/Studio-Fug/rules_requirements" 
 
 libtest has no stable machine-readable output, so the macro records traces out
 of band: each call appends one JSON line — the test's name, taken from the
-thread libtest runs it on, plus the ids and level — to the file named by
-`$RR_TRACE_FILE`. Without that variable the macro does nothing, so plain
+thread libtest runs it on, plus the id (`"requirement":"REQ-1"`) and level — to
+the file named by `$RR_TRACE_FILE`. A deprecated call naming several ids writes
+0.2's list form (`"requirements":[...]`, still read), and two calls naming
+different ids write two lines: either way the case is quarantined. Without that variable the macro does nothing, so plain
 `cargo test` is unaffected. The wrapper sets the variable, runs the tests,
 parses libtest's standard output and writes JUnit with the traces attached:
 
@@ -346,8 +377,9 @@ parses libtest's standard output and writes JUnit with the traces attached:
 - elsewhere, `rr wrap --junit-xml rust.xml -- <test binary or command>` (see
   below).
 
-A trace recorded on a thread the test spawns itself carries that thread's name
-and is not attributed to the test; call the macro from the test's own thread.
+A trace recorded on a thread the test spawns itself carries that thread's name,
+matches no test and is dropped (with a warning); call the macro from the test's
+own thread.
 
 (node-test)=
 ## node:test
@@ -502,8 +534,12 @@ finally:
 - `requirement` is **one** id, or `None`. A string that is not one id — a comma
   or whitespace inside it, or empty — raises `ValueError` (RR-E104). The
   pre-0.2 list form (`report.case("x", ["REQ-13", "REQ-21"])`, or the
-  `requirements=` keyword) still records every id it holds, verbatim, and warns
-  when it names more than one.
+  `requirements=` keyword) still records every id it holds, verbatim, with a
+  `DeprecationWarning` (a `MultipleRequirementsWarning` when it names more than
+  one: the case is then quarantined).
+- `cases` is a read-only tuple of frozen cases (`case.requirement`, and
+  `case.requirements`, a read-only alias of the declared ids): a case cannot
+  be removed or re-attributed once recorded. Record another case instead.
 - `not_reached(names, reason, classname="", *, tags=None)` records planned cases
   a device failure kept from running, each as its own failed case
   `not reached: <reason>`; `tags` maps a name to the one id it verifies.
@@ -605,13 +641,11 @@ without the plan. `is_infrastructure` defaults to claiming nothing else: pass
 the harness's own classifier (reservation errors, ssh's own exit 255...).
 
 ```{note}
-**v0.2 behaviour on rig trouble.** In 0.2 a skipped case does not stop a
-requirement from reading VERIFIED, so on rig trouble the plan also withdraws
-the tag of every *passed* check whose requirement is also the tag of a check
-that never ran. A partial run therefore leaves such a requirement neither
-VERIFIED nor FAILED. From 0.3, where a requirement is verified only when every
-case in its verification set passed, the skipped checks do this by themselves
-and the withdrawal goes away; the verdict is the same.
+**Rig trouble and partial runs.** A requirement is verified only when every
+case in its verification set passed, so after rig trouble the skipped checks
+leave a requirement that also has passed checks INCOMPLETE: neither VERIFIED
+nor FAILED. The passed checks keep their tags. (0.2, without verification
+sets, withdrew the tags of those passed checks instead; 0.3 dropped that.)
 ```
 
 ## Shell harnesses: `rr case`
@@ -671,6 +705,14 @@ wrapper writes. If no test results can be parsed — the binary crashed before
 running tests, say — the wrapper records one synthetic case carrying the exit
 code and the tail of the output, so the failure is visible in the report.
 
+If the command exits non-zero although every reported test passed (a
+sanitizer, a crash after the last test), an `exit-status` error case is added.
+It declares **no** requirement — not the ids the run traced — and is
+target-scope (`rr.scope=target`): it taints every case claimed on the target,
+so each requirement fails through its own cases. A test that traced and then
+died without reporting a result is recorded as an error carrying its own
+declared id. `rr_evidence`'s `test.exit.xml` works the same way.
+
 With `--format junit` the runner's report is copied to the output as it is.
 `--level` becomes the default level of its suites (a case's own `level` wins).
 If the runner exits non-zero although no case in its report failed, the same
@@ -683,29 +725,29 @@ nothing, so the run still leaves evidence.
 (multi-id-deprecation)=
 ## Deprecated: several ids per test case
 
-A test case verifies at most one requirement. In 0.2 every hook still accepts
-the older multi-id forms and records every id, exactly as before, but warns:
+A test case verifies at most one requirement. In 0.3 every hook still accepts
+the older multi-id forms and records every id, but warns:
 the Python hooks with
 {py:class}`~rules_requirements.hooks.ids.MultipleRequirementsWarning` (a
 `DeprecationWarning`), the others with an RR-E101 line on stderr:
 
 | Hook | Deprecated form | Warns |
 | ---- | --------------- | ----- |
-| pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
-| unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids | at the decorated definition |
+| pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, sibling base classes naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
+| unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids; sibling base classes naming different ids | at the decorated definition; for sibling bases, at the class definition when its first test starts (escalated to an error, printed to stderr, so the run goes on) |
 | `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
-| googletest | `RR_VERIFIES("A", "B")`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
-| Rust | `rr::verifies!("A", "B")`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |
+| googletest | `RR_VERIFIES("A", "B")`, `RR_VERIFIES("A B")` or `"A,B"`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
+| Rust | `rr::verifies!("A", "B")`, `rr::verifies!("A B")` or `"A,B"`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |
 
-Ids that accumulate across scopes — a module-level `pytestmark` plus a
-function's own marker, a `pytest.param` mark plus the function's marker, a
-class decorator plus a method decorator, or a subclass's `@rr.verifies` plus
-its base class's — are not a multi-id declaration and do not warn in 0.2: from
-0.3 the nearest one wins.
+Ids at several scopes — a module-level `pytestmark` plus a function's own
+marker, a `pytest.param` mark plus the function's marker, a class decorator
+plus a method decorator, or a subclass's `@rr.verifies` plus its base class's —
+are not a multi-id declaration and do not warn: the nearest one wins, and only
+its id is recorded.
 
-From 0.3, a case whose evidence names several ids counts for no requirement
-(and every requirement it names reads INVALID); 0.4 rejects multi-id
-declarations outright. Split such a test into one test per requirement, or
+A case whose evidence names several ids is quarantined: it counts for no
+requirement, and every requirement it names reads INVALID. 0.4 rejects
+multi-id declarations outright. Split such a test into one test per requirement, or
 keep the one id it really verifies. To find every remaining use, turn the
 warning into an error: `pytest -W error::DeprecationWarning`, or
 `python -W error::DeprecationWarning` for a script. Under pytest a marker
@@ -719,4 +761,6 @@ The hooks name the problem with a stable code:
 | Code | Meaning |
 | ---- | ------- |
 | RR-E101 | One case names more than one id. |
+| RR-E102 | A raw `requirement` property bypassed the single-id API (pytest `record_property`). |
+| RR-E103 | `RR_VERIFIES` was called outside a running test (0.4). |
 | RR-E104 | Malformed id: a comma, whitespace, or empty. |

@@ -15,9 +15,12 @@
 //! }
 //! ```
 //!
-//! A test case verifies at most one requirement: several ids in one test (in
-//! one call, or over several calls) are still all recorded in 0.2, but
-//! deprecated; `rr wrap` warns about them on stderr (RR-E101).
+//! The id is a declared tag: which requirement the case verifies is decided by
+//! attribution. A test case verifies at most one requirement: several ids in
+//! one test (in one call, over several calls, or in one string separated by
+//! commas or whitespace) are deprecated; they are all
+//! recorded, so attribution quarantines the case and it counts for none of
+//! them, and `rr wrap` warns about them on stderr (RR-E101).
 //!
 //! libtest has no stable machine-readable output, so traces are recorded out of
 //! band: each call appends one JSON line to the file named by `$RR_TRACE_FILE`,
@@ -30,7 +33,7 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 
-/// Record that the running test verifies the given entity ids.
+/// Declare the ONE entity id the running test verifies (several are deprecated).
 #[macro_export]
 macro_rules! verifies {
     ($($id:expr),+ $(,)?) => {
@@ -58,13 +61,18 @@ fn escape(s: &str) -> String {
 }
 
 /// The JSON trace line for one call (exposed for testing).
+///
+/// One id is written as `"requirement":"<id>"`. Several (a deprecated call)
+/// keep the list form `"requirements":[...]`, which ingest still reads and
+/// quarantines.
 pub fn trace_line(test: &str, ids: &[&str], level: &str) -> String {
-    let ids: Vec<String> = ids.iter().map(|i| format!("\"{}\"", escape(i))).collect();
-    let mut line = format!(
-        "{{\"test\":\"{}\",\"requirements\":[{}]",
-        escape(test),
-        ids.join(",")
-    );
+    let mut line = format!("{{\"test\":\"{}\"", escape(test));
+    if let [id] = ids {
+        line.push_str(&format!(",\"requirement\":\"{}\"", escape(id)));
+    } else {
+        let ids: Vec<String> = ids.iter().map(|i| format!("\"{}\"", escape(i))).collect();
+        line.push_str(&format!(",\"requirements\":[{}]", ids.join(",")));
+    }
     if !level.is_empty() {
         line.push_str(&format!(",\"level\":\"{}\"", escape(level)));
     }

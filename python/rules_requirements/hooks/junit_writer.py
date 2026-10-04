@@ -13,8 +13,14 @@ test-framework suites::
     report.write(os.environ.get("XML_OUTPUT_FILE", "bench_e2e.xml"))
 
 Each case names at most one requirement: a test case verifies at most one
-requirement. The pre-0.2 list form (``report.case("x", ["REQ-13", "REQ-21"])``)
-still records every id, with a :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`.
+requirement. The id is a declared tag; which requirement the case verifies is
+decided by attribution. The pre-0.2 list form
+(``report.case("x", ["REQ-13", "REQ-21"])``) still records every id, with a
+:class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`, so
+attribution quarantines the case and it counts for none of them.
+
+Recorded cases are final: :attr:`JUnitWriter.cases` is a read-only tuple of
+frozen cases, so a harness cannot re-attribute a case after recording it.
 
 The ``artifact`` identity is stamped on every case (``artifact.<key>``
 properties) so the report can mark evidence from an older build as stale, and
@@ -31,10 +37,12 @@ import re
 import stat
 import sys
 import time
+import warnings
 from collections.abc import Iterable as _Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator, Mapping, Optional, Union
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
+from typing import Any, Iterable, Iterator, List, Mapping, Optional, Tuple, Union
 from xml.etree import ElementTree as ET
 
 from rules_requirements.hooks.ids import check_id, split_ids, warn_multiple
@@ -48,23 +56,45 @@ FILE_PROPERTY = "rr.file"
 Requirement = Union[str, Iterable[str], None]
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Case:
+    """One recorded case. Frozen: once recorded, nothing re-attributes it.
+
+    ``declared`` holds the ids the case declares: one, or none; several only
+    for a deprecated multi-id case, which attribution quarantines.
+    """
+
     name: str
-    requirements: list[str]
+    declared: Tuple[str, ...] = ()
     status: str = "passed"
     message: str = ""
     duration: float = 0.0
     level: str = ""
-    artifact: dict[str, str] = field(default_factory=dict)
+    artifact: Mapping[str, str] = field(default_factory=dict)
     classname: str = ""
     file: str = ""
-    properties: dict[str, str] = field(default_factory=dict)  # e.g. rr.synthetic, rr.scope
+    properties: Mapping[str, str] = field(default_factory=dict)  # e.g. rr.synthetic, rr.scope
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "declared", tuple(self.declared))
+        object.__setattr__(self, "artifact", MappingProxyType(dict(self.artifact)))
+        object.__setattr__(self, "properties", MappingProxyType(dict(self.properties)))
+
+    def __reduce__(self) -> Tuple[Any, Tuple[Any, ...]]:
+        # A mappingproxy neither pickles nor deep-copies: rebuild the case
+        # from plain dicts (``__post_init__`` makes them read-only again).
+        values = (getattr(self, f.name) for f in fields(self))
+        return (type(self), tuple(dict(v) if isinstance(v, MappingProxyType) else v for v in values))
 
     @property
     def requirement(self) -> str | None:
-        """The id this case verifies (the first, for a deprecated multi-id case)."""
-        return self.requirements[0] if self.requirements else None
+        """The id this case declares (the first, for a deprecated multi-id case)."""
+        return self.declared[0] if self.declared else None
+
+    @property
+    def requirements(self) -> Tuple[str, ...]:
+        """Read-only alias of :attr:`declared` (0.2's mutable list)."""
+        return self.declared
 
 
 # Characters XML 1.0 cannot represent (ANSI escapes in serial logs, NULs from
@@ -121,11 +151,14 @@ def source_file(path: str) -> str:
 def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: int) -> list[str]:
     """The ids to record for one case, from ``requirement=`` or the legacy list.
 
-    One id string is checked (RR-E104), and an empty or blank one is no id;
-    any other iterable (a list, tuple,
-    set, generator...) is the deprecated form, recorded verbatim, with a
-    warning when it names several ids. ``stacklevel`` is that of the warning
-    as seen from the caller of ``_resolve_ids`` (2: the caller's caller).
+    One id string is checked (RR-E104), and an empty or blank one is no id.
+    Any other iterable (a list, tuple, set, generator...), as ``requirement``
+    or in the ``requirements=`` keyword, is the deprecated form: recorded
+    verbatim, with a :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`
+    when it names several ids (attribution then quarantines the case), and a
+    plain :class:`DeprecationWarning` when it names one or none.
+    ``stacklevel`` is that of the warning as seen from the caller of
+    ``_resolve_ids`` (2: the caller's caller).
     """
     if requirement is not None and requirements is not None:
         raise TypeError(f"{subject}: pass requirement= or the deprecated requirements=, not both")
@@ -142,6 +175,15 @@ def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: 
     ids = split_ids(values)
     if len(ids) > 1:
         warn_multiple(subject, ids, stacklevel=stacklevel + 1)
+    else:
+        warnings.warn(
+            f"rr: {subject}: a list of requirement ids is deprecated; pass the ONE id as a string "
+            f"(requirement={ids[0]!r})"
+            if ids
+            else f"rr: {subject}: an empty requirement list is deprecated; pass requirement=None",
+            DeprecationWarning,
+            stacklevel=stacklevel + 1,
+        )
     return [str(v) for v in values]
 
 
@@ -158,12 +200,18 @@ class JUnitWriter:
     classname: str = ""
     default_level: str = ""
     artifact: dict[str, str] = field(default_factory=dict)
-    cases: list[_Case] = field(default_factory=list)
     file: Optional[str] = None
+    _cases: List[_Case] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.file is None:
             self.file = source_file(sys.argv[0] if sys.argv and sys.argv[0] not in ("", "-", "-c") else "")
+
+    @property
+    def cases(self) -> Tuple[_Case, ...]:
+        """The recorded cases, read-only: a recorded case cannot be removed,
+        replaced or re-attributed afterwards (record a new case instead)."""
+        return tuple(self._cases)
 
     def add(
         self,
@@ -183,9 +231,10 @@ class JUnitWriter:
 
         ``requirement`` is the one id the case verifies (or ``None``). A list
         or tuple there, or in the deprecated ``requirements=`` keyword, still
-        records every id it holds, with a
+        records every id it holds, with a deprecation warning (a
         :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning` when
-        it names several. ``file`` overrides the writer's source file.
+        it names several: the case is then quarantined). ``file`` overrides
+        the writer's source file.
         """
         # the warning points at the caller of add()
         ids = _resolve_ids(requirement, requirements, f"JUnitWriter case {name!r}", stacklevel=2)
@@ -215,7 +264,7 @@ class JUnitWriter:
             raise ValueError(f"status must be one of {_STATUSES}, got {status!r}")
         case = _Case(
             name=name,
-            requirements=list(ids),
+            declared=tuple(ids),
             status=status,
             message=message,
             duration=duration,
@@ -225,7 +274,7 @@ class JUnitWriter:
             file=(self.file or "") if file is None else file,
             properties=dict(properties or {}),
         )
-        self.cases.append(case)
+        self._cases.append(case)
         return case
 
     @contextmanager
@@ -294,22 +343,23 @@ class JUnitWriter:
 
     def to_element(self) -> ET.Element:
         x = xml_safe
+        cases = self._cases
         root = ET.Element("testsuites")
         suite = ET.SubElement(
             root,
             "testsuite",
             name=x(self.suite),
-            tests=str(len(self.cases)),
-            failures=str(sum(c.status == "failed" for c in self.cases)),
-            errors=str(sum(c.status == "error" for c in self.cases)),
-            skipped=str(sum(c.status == "skipped" for c in self.cases)),
-            time=f"{sum(c.duration for c in self.cases):.3f}",
+            tests=str(len(cases)),
+            failures=str(sum(c.status == "failed" for c in cases)),
+            errors=str(sum(c.status == "error" for c in cases)),
+            skipped=str(sum(c.status == "skipped" for c in cases)),
+            time=f"{sum(c.duration for c in cases):.3f}",
         )
-        for c in self.cases:
+        for c in cases:
             tc = ET.SubElement(suite, "testcase", classname=x(c.classname), name=x(c.name), time=f"{c.duration:.3f}")
-            if c.requirements or c.level or c.artifact or c.file or c.properties:
+            if c.declared or c.level or c.artifact or c.file or c.properties:
                 props = ET.SubElement(tc, "properties")
-                for rid in c.requirements:
+                for rid in c.declared:
                     ET.SubElement(props, "property", name="requirement", value=x(rid))
                 if c.level:
                     ET.SubElement(props, "property", name="level", value=x(c.level))

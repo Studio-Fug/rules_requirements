@@ -149,7 +149,9 @@ def test_end_to_end_evidence_after_the_codemod(tmp_path, monkeypatch):
         (root / f.path).write_text(f.new_text, encoding="utf-8")
     after = run_tests()
     tag_contested = sorted(str(u.row.key) for u in after.contested if len(u.tags) > 1)
-    assert len(before) == 16
+    # 16 in 0.2; from 0.3 the method's @rr.verifies replaces its class's (nearest wins),
+    # so test_legacy's test_rejects_old_garbage declares REQ-2 alone and is not contested.
+    assert len(before) == 15
     assert tag_contested == [
         "//app/tests:unit_test#app.tests.test_modes::test_modes[fast]",
         "//app/tests:unit_test#app.tests.test_modes::test_modes[slow]",

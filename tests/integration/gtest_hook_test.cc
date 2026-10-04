@@ -7,6 +7,9 @@ TEST(GtestHook, VerifiesIsTraced) {
   EXPECT_EQ(3 * 3, 9);
 }
 
+// Quarantine case: two ids in one test are deprecated but still all recorded
+// (declared_ids_check asserts both reach the evidence), so attribution
+// quarantines the case and it verifies neither requirement.
 TEST(GtestHook, IdsAccumulateAcrossCalls) {
   RR_VERIFIES("REQ-3");
   RR_VERIFIES("REQ-1");

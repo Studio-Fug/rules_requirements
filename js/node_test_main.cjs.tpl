@@ -126,7 +126,8 @@ function caseProps(c, diags, test) {
   const artifact = [];
   for (const [key, value] of diags) {
     if (key === "requirement") {
-      for (const id of value.split(",").map((v) => v.trim())) if (id && !ids.includes(id)) ids.push(id);
+      // Commas or whitespace separate ids, as in every rules_requirements hook.
+      for (const id of value.split(/[\s,]+/)) if (id && !ids.includes(id)) ids.push(id);
     } else if (key === "level") level = value;
     else artifact.push([key, value]);
   }

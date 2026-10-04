@@ -481,12 +481,16 @@ def test_several_ids_are_all_written_with_a_warning(run_fixture):
             test("names a list", (t) => {
               t.diagnostic("rr.requirement=REQ-3, REQ-4");
             });
+            test("names a spaced list", (t) => {
+              t.diagnostic("rr.requirement=REQ-5 REQ-6");
+            });
             """,
         )
     )
     assert r.code == 0
     # Never a silent pick: ingest sees every id (and the stderr says why not).
-    assert [c.requirements for c in r.cases] == [("REQ-1", "REQ-2"), ("REQ-3", "REQ-4")]
+    assert [c.requirements for c in r.cases] == [("REQ-1", "REQ-2"), ("REQ-3", "REQ-4"), ("REQ-5", "REQ-6")]
+    assert "multi::names a spaced list names REQ-5, REQ-6;" in r.stderr
     assert "multi::names two names REQ-1, REQ-2; a test case verifies at most one requirement [RR-E101]" in r.stderr
     props = ET.parse(r.xml).getroot().findall(".//testcase[@name='names two']/properties/property[@name='requirement']")
     assert [p.get("value") for p in props] == ["REQ-1", "REQ-2"]

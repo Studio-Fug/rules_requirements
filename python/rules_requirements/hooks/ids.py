@@ -1,15 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """One test case, one requirement: id checks shared by every hook.
 
-A test case counts toward at most one requirement. Hooks that still accept
-several ids per case (the pre-0.2 list forms) keep recording all of them in
-0.2, but warn with :class:`MultipleRequirementsWarning`; the single-id APIs
-reject anything that is not exactly one well-formed id.
+A test case counts toward at most one requirement. The hooks only ever
+*declare* ids: which requirement a case verifies is decided by attribution
+alone, never by a hook. Hooks that still accept several ids per case (the
+pre-0.2 list forms) keep recording all of them in 0.3, with a
+:class:`MultipleRequirementsWarning`; the evidence then names several ids, so
+attribution quarantines the case and it counts for none of them. The
+single-id APIs reject anything that is not exactly one well-formed id.
 
 Error codes printed by the hooks:
 
 ======== ==========================================================
 RR-E101  One case names more than one id.
+RR-E102  A raw ``requirement`` property bypassed the single-id API.
+RR-E103  ``RR_VERIFIES`` was called outside a running test.
 RR-E104  Malformed id: a comma, whitespace, or empty.
 ======== ==========================================================
 """
@@ -18,21 +23,24 @@ from __future__ import annotations
 
 import re
 import warnings
-from typing import Any
+from typing import Any, Callable
 
 from rules_requirements.util import dedupe
 
 E_MULTIPLE = "RR-E101"
+E_RAW_PROPERTY = "RR-E102"
+E_OUTSIDE_TEST = "RR-E103"
 E_MALFORMED = "RR-E104"
 
-_SEPARATORS = re.compile(r"[,\s]+")  # what makes a string not ONE id
-_COMMA = re.compile(r"\s*,\s*")  # what separates the ids of a string the hooks record
+_SEPARATORS = re.compile(r"[,\s]+")  # what separates ids, so what makes a string not ONE id
 
 
 class MultipleRequirementsWarning(DeprecationWarning):
-    """A test case declares more than one requirement id (deprecated in 0.2).
+    """A test case declares more than one requirement id (deprecated since 0.2).
 
-    The ids are still recorded as before. Filter on this class to silence or
+    The ids are still all recorded, and attribution quarantines the case (from
+    0.3): it verifies none of them, and every requirement it names reads
+    INVALID. Filter on this class to silence or
     escalate the deprecation, e.g. ``-W error::rules_requirements.hooks.ids.MultipleRequirementsWarning``.
     """
 
@@ -40,16 +48,57 @@ class MultipleRequirementsWarning(DeprecationWarning):
 def split_ids(value: Any) -> list[str]:
     """Every distinct id in ``value``: a string, or a list, tuple or set of them.
 
-    A string is split on commas only, as the hooks and the JUnit reader have
-    always split it, and each part is stripped; empty parts are dropped.
-    Whitespace inside a part does not separate ids: ``"REQ-1 REQ-2"`` is the
-    one (malformed) id ``"REQ-1 REQ-2"``, which matches no requirement.
+    A string is split on commas and whitespace, as ingest splits a declared
+    ``requirement`` value from 0.3: ``"REQ-1 REQ-2"`` names two ids (before
+    0.3 it was read as one malformed id). Empty parts are dropped.
     """
     if isinstance(value, (list, tuple, set, frozenset)):
         parts = [p for v in value for p in split_ids(v)]
     else:
-        parts = [p for p in _COMMA.split(str(value).strip()) if p]
+        parts = [p for p in _SEPARATORS.split(str(value).strip()) if p]
     return dedupe(parts)
+
+
+def inherited_ids(cls: Any, own_ids: Callable[[Any], list[str]]) -> list[tuple[Any, list[str]]]:
+    """The ``(class, ids)`` declarations ``cls`` gets, nearest first: ONE scope.
+
+    ``own_ids(klass)`` gives the ids ``klass`` declares itself (not inherited).
+    A class that declares an id has that id: its bases' are replaced, nearest
+    wins. A class that declares none gets those of every direct base, each
+    resolved the same way, so two bases that no nearer class overrides form a
+    single scope: if they name different ids the class names both (a
+    multi-id declaration, quarantined downstream), and never just the first
+    one in the MRO. A class reached along several paths (a diamond) counts
+    once, and a class that is a base of another contributing class is
+    overridden by it (``class C(Sub, Base)`` with ``Sub(Base)``: ``Sub``'s).
+    """
+    memo: dict[int, list[tuple[Any, list[str]]]] = {}
+
+    def walk(klass: Any) -> list[tuple[Any, list[str]]]:
+        key = id(klass)
+        if key not in memo:
+            memo[key] = []  # a guard; class graphs are acyclic
+            own = own_ids(klass)
+            found: list[tuple[Any, list[str]]] = [(klass, own)] if own else []
+            if not own:
+                for base in getattr(klass, "__bases__", ()) or ():
+                    found.extend(pair for pair in walk(base) if all(pair[0] is not f[0] for f in found))
+            memo[key] = found
+        return memo[key]
+
+    found = walk(cls)
+    return [
+        (klass, ids)
+        for klass, ids in found
+        if not any(other is not klass and _is_subclass(other, klass) for other, _ in found)
+    ]
+
+
+def _is_subclass(a: Any, b: Any) -> bool:
+    try:
+        return issubclass(a, b)
+    except TypeError:
+        return False
 
 
 def check_id(value: Any, where: str = "requirement") -> str:
@@ -77,8 +126,9 @@ def multiple_warning(subject: str, ids: list[str]) -> MultipleRequirementsWarnin
     """The warning for ``subject`` declaring several ``ids`` for one test case."""
     return MultipleRequirementsWarning(
         f"rr: {subject} names {', '.join(ids)}; a test case verifies at most one requirement "
-        f"[{E_MULTIPLE}]. Every id is still recorded for now, but multi-id declarations are deprecated: "
-        "from 0.3 such a case counts for no requirement, and 0.4 rejects it. Split the test, or keep one id."
+        f"[{E_MULTIPLE}]. Multi-id declarations are deprecated: every id is still recorded, so the case is "
+        "quarantined and counts for none of them (each reads INVALID), and 0.4 rejects it. "
+        "Split the test, or keep one id."
     )
 
 

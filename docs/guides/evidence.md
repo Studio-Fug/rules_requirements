@@ -42,9 +42,10 @@ skipped case is therefore not passing whole-target evidence — the skipped part
 may be exactly the hardware its `verified_by` level claims (an absent DUT). A
 binary that exits non-zero although every case in its report passed (a
 sanitizer, a crash after writing the report) gets an extra `exit-status` error
-case carrying every requirement id the run traced, so those requirements read
-FAILED — from `rr_evidence` and from `rr wrap`, for libtest output and for a
-runner's own JUnit (`--format junit`) alike.
+case — from `rr_evidence` and from `rr wrap`, for libtest output and for a
+runner's own JUnit (`--format junit`) alike. It declares no requirement (0.2
+copied every id the run traced onto it); it is target-scope, so it taints the
+cases claimed on its target instead.
 
 **A test case verifies at most one requirement.** Ingest only records what the
 evidence declares; it never decides ownership. Every `requirement` /
@@ -54,7 +55,7 @@ trace line, a node diagnostic — is split on commas and whitespace, and an
 declaring more than one distinct id keeps all of them: attribution then
 quarantines it (`multi-tag`), so it counts for no requirement and every id it
 names reads INVALID. The hooks that can write such evidence warn
-({ref}`multi-id-deprecation`).
+({ref}`multi-id-deprecation`), and 0.4 rejects it.
 
 <!-- rr:interim multi-tag quarantine pending -->
 ```{warning}

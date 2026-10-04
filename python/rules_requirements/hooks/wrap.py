@@ -13,6 +13,11 @@ chosen format, merges the traces, writes JUnit to ``$XML_OUTPUT_FILE`` (or
 ``--junit-xml``), and exits with the binary's exit code — so the wrapper never
 turns a failing test green or a passing one red.
 
+The ``exit-status`` error case a non-zero exit adds when no reported test
+failed declares no requirement: it is a target-scope result
+(``rr.scope=target``) that taints every case claimed on the target. A test
+that traced and then died without a result keeps its own declared id.
+
 ``--format junit`` is for runners that write JUnit themselves, to a fixed path
 (``--junit-in``): the wrapper copies that file to the output and adds the same
 ``exit-status`` error case when the runner exits non-zero although no case in
@@ -33,11 +38,11 @@ import sys
 import tempfile
 from xml.etree import ElementTree as ET
 
-from rules_requirements.hooks.ids import multiple_warning
+from rules_requirements.hooks.ids import multiple_warning, split_ids
 from rules_requirements.hooks.junit_writer import JUnitWriter, _merge, _read_root
 from rules_requirements.ingest import TestCase
 from rules_requirements.ingest.junit import SYNTHETIC, TARGET_SCOPE, JUnitIngestor
-from rules_requirements.ingest.libtest import merge_trace, parse_libtest
+from rules_requirements.ingest.libtest import merge_trace, parse_libtest, trace_ids
 
 FORMATS = ("libtest", "junit")
 
@@ -69,8 +74,10 @@ def _traced(trace: str) -> dict[str, list[str]]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(rec, dict):
+            continue
         ids = out.setdefault(str(rec.get("test", "")), [])
-        ids.extend(i for i in rec.get("requirements", []) if i not in ids)
+        ids.extend(i for i in split_ids(trace_ids(rec)) if i not in ids)
     out.pop("", None)
     return out
 
@@ -131,13 +138,13 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
         trace = ""
     merge_trace(cases, trace)
     reported = {f"{c.classname}::{c.name}" if c.classname else c.name for c in cases}
-    unattributed: list[str] = []
     for test, ids in _traced(trace).items():
         if test in reported:
             continue
         if proc.returncode != 0 and _TEST_PATH.match(test):
             # A test that recorded traces but never reported a result was
-            # running when the binary died (abort, stack overflow).
+            # running when the binary died (abort, stack overflow): its own
+            # declared id, and no other test's.
             module, _, leaf = test.rpartition("::")
             cases.append(
                 TestCase(
@@ -151,14 +158,14 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             )
         else:
             # rr::verifies! from a spawned thread or async task (its thread is
-            # not named after the test): the ids cannot be attributed.
-            unattributed.extend(ids)
+            # not named after the test): the ids belong to no case, so they
+            # are dropped.
             print(
-                f"rr wrap: warning: traces from thread {test!r} match no test; "
+                f"rr wrap: warning: traces from thread {test!r} match no test and are dropped; "
                 "call rr::verifies! on the test's own thread",
                 file=sys.stderr,
             )
-    exit_case = _exit_status(cases, unattributed, proc.returncode, text, args.target)
+    exit_case = _exit_status(cases, proc.returncode, text, args.target)
     if exit_case is not None:
         cases.append(exit_case)
 
@@ -166,7 +173,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     for c in cases:
         writer._append(
             c.name,
-            c.requirements,
+            split_ids(list(c.declared)),  # "REQ-1 REQ-2" names two ids, as for every hook
             status=c.status,
             message=c.message,
             level=c.level,
@@ -187,36 +194,37 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     return proc.returncode
 
 
-def _exit_status(
-    cases: list[TestCase], unattributed: list[str], returncode: int, text: str, target: str
-) -> TestCase | None:
+def _exit_status(cases: list[TestCase], returncode: int, text: str, target: str) -> TestCase | None:
     """The ``exit-status`` error case for a run that exited non-zero although
-    no reported test failed, else None."""
+    no reported test failed, else None.
+
+    Every reported test passed, yet the binary failed: the run is suspect.
+    The case declares NO requirement (it is no test case, and naming the ids
+    the run traced would make it a case of several requirements); it is
+    target-scope (``rr.scope=target``), which taints every case claimed on
+    the target, so each requirement fails through its own cases.
+    """
     if returncode == 0 or any(c.is_failure for c in cases):
         return None
-    # Every reported test passed, yet the binary failed: the run is suspect,
-    # so the failure carries every id it traced.
-    ids = [i for c in cases for i in c.requirements] + unattributed
     return TestCase(
         name="exit-status",
         status="error",
-        requirements=tuple(dict.fromkeys(ids)),
         message=f"test binary exited with {returncode} although no reported test failed\n" + text[-2000:],
         target=target,
-        # about the whole run, not a test case of it: migration never asks an
-        # owner to attribute it (its ids keep 0.2 verdicts as they were)
         properties=dict(TARGET_SCOPE),
     )
 
 
 def _warn_multi_id(cases: list[TestCase]) -> None:
     """RR-E101 on stderr for each case that records two or more ids
-    (``rr::verifies!`` called with different ids in one test)."""
+    (``rr::verifies!`` called with different ids in one test, or with one
+    string naming several: ``"REQ-1 REQ-2"``, ``"REQ-1,REQ-2"``)."""
     for c in cases:
-        if c.name == "exit-status" or len(c.requirements) < 2:
+        ids = split_ids(list(c.declared))
+        if c.name == "exit-status" or len(ids) < 2:
             continue
         test = f"{c.classname}::{c.name}" if c.classname else c.name
-        text = str(multiple_warning(test, list(c.requirements)))
+        text = str(multiple_warning(test, ids))
         print(text.replace("rr: ", "rr wrap: warning: ", 1), file=sys.stderr)
 
 
@@ -239,7 +247,7 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
         return
     if not out:
         return
-    exit_case = _exit_status(list(JUnitIngestor().ingest(junit_in)), [], returncode, text, target)
+    exit_case = _exit_status(list(JUnitIngestor().ingest(junit_in)), returncode, text, target)
     root: ET.Element | None = None
     try:
         root = _read_root(junit_in)
@@ -275,13 +283,7 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
             if not any(p.get("name") == "level" for p in props.findall("property")):
                 ET.SubElement(props, "property", name="level", value=level)
     if exit_case is not None:
-        writer._append(
-            exit_case.name,
-            exit_case.requirements,
-            exit_case.status,
-            exit_case.message,
-            properties=exit_case.properties,
-        )
+        writer._append(exit_case.name, (), exit_case.status, exit_case.message, properties=exit_case.properties)
         root = _merge(root, writer.to_element())
     tree = ET.ElementTree(root)
     tree.write(out, encoding="utf-8", xml_declaration=True)

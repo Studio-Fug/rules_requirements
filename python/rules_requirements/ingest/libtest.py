@@ -151,11 +151,12 @@ def trace_ids(rec: dict[str, Any]) -> list[str]:
 def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
     """Apply ``rr::verifies!`` trace lines to the matching cases.
 
-    Each line is JSON ``{"test": "<module::name>", "requirement": "PR-4",
+    Each line is JSON ``{"test": "<module::name>", "requirement": "<id>",
     "level": "...", "artifact": {...}}``; ``test`` is the libtest thread name,
     which is the test's full path. The 0.2 list form (``"requirements":
     [...]``) is still read. Every id becomes a declared tag of the case, so a
-    list of two, or two lines with different ids, is a ``multi-tag`` case.
+    list of two, two lines for one test with different ids (two calls), or a
+    whitespace- or comma-separated id is a ``multi-tag`` case.
     """
     by_name = {(f"{c.classname}::{c.name}" if c.classname else c.name): c for c in cases}
     for line in trace_text.splitlines():
