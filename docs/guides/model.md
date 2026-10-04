@@ -389,3 +389,10 @@ in VS Code:
 The schema describes the default vocabulary: if you change `severities`,
 `likelihoods` or `levels`, it still accepts any string there, and
 `rr validate` checks the values against your configuration.
+
+For claims it accepts what the loader accepts: target labels follow the same
+rules as `bad-target` (`//p:` and `@r//p/...` are rejected, `@r` and `//p` are
+labels), and the 0.2 claim forms — a bare label, `{target}`, `{target,
+level}` — are accepted but marked `deprecated`, as `bare-target-reference`
+warns. `schema/verification_lock.schema.json` describes the
+verification-set lock the same way.

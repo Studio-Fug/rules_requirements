@@ -131,6 +131,13 @@ def test_attribution_defaults():
         assert hard not in cfg.DEFAULT_RULES and c.rule(hard) == "error"
 
 
+def test_hard_errors_stay_errors_even_when_a_config_object_says_off():
+    # parse_config refuses such keys; a Config built in Python must not get around that
+    c = Config(rules={hard: "off" for hard in cfg.HARD_ERRORS})
+    assert {c.rule(hard) for hard in cfg.HARD_ERRORS} == {"error"}
+    assert Config(rules={"glob-selector": "error"}).rule("glob-selector") == "error"  # ordinary rules do follow
+
+
 @pytest.mark.parametrize(
     "raw, fragment",
     [

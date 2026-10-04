@@ -198,3 +198,40 @@ def test_lock_schema_agrees_with_the_lock_reader():
             validator.validate(yaml.safe_load(bad))
         with pytest.raises(lock.LockError):
             lock.parse_lock(bad)
+
+
+def test_schema_forbids_configuring_exactly_the_hard_errors_and_quarantines():
+    from rules_requirements import config as cfg
+
+    rules = _schema()["oneOf"][0]["properties"]["config"]["properties"]["rules"]
+    assert set(rules["propertyNames"]["not"]["enum"]) == set(cfg.HARD_ERRORS) | set(cfg.QUARANTINE_CODES)
+
+
+def _label_ok(schema, label):
+    doc = {"requirements": [{"id": "REQ-1", "title": "t", "verified_by": [label, {"target": label, "cases": ["x"]}]}]}
+    return jsonschema.Draft202012Validator(schema).is_valid(doc)
+
+
+def test_schema_and_loader_agree_on_labels():
+    from test_labels import BAD_LABELS, GOOD_LABELS
+
+    from rules_requirements.labels import try_normalize
+
+    schema = _schema()
+    labels = [good for good, _ in GOOD_LABELS] + [want for _, want in GOOD_LABELS] + list(BAD_LABELS)
+    disagree = [
+        (label, try_normalize(label) is not None)
+        for label in labels
+        if _label_ok(schema, label) != (try_normalize(label) is not None)
+    ]
+    assert disagree == []  # (label, what the loader says)
+    # the lock schema's target keys use the same pattern
+    lock_targets = _lock_schema()["properties"]["cases"]["propertyNames"]["pattern"]
+    assert lock_targets == schema["$defs"]["label"]["pattern"]
+
+
+def test_lock_schema_rejects_padded_case_paths():
+    validator = jsonschema.Draft202012Validator(_lock_schema())
+    validator.validate(yaml.safe_load(LOCK))
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(yaml.safe_load(LOCK.replace('"[target]"', '" [target]"')))
