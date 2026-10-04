@@ -74,12 +74,6 @@
           "target": "//tests/integration:gtest_hook_test"
         },
         {
-          "name": "NextSuite::OnlyItsOwnSuiteIds",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//tests/integration:gtest_hook_test"
-        },
-        {
           "name": "tests.integration.test_pytest_hook::test_marker_is_traced",
           "status": "passed",
           "level": "simulation",
@@ -139,12 +133,6 @@
           "name": "GtestHook::VerifiesIsTraced",
           "status": "passed",
           "level": "sil",
-          "target": "//tests/integration:gtest_hook_test"
-        },
-        {
-          "name": "SuiteLevel::InheritsSuiteIds",
-          "status": "passed",
-          "level": "simulation",
           "target": "//tests/integration:gtest_hook_test"
         }
       ],
