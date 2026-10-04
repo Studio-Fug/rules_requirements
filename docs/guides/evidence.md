@@ -40,9 +40,10 @@ runner's own JUnit (`--format junit`) alike. It declares no requirement (0.2
 copied every id the run traced onto it); it is target-scope, so it taints the
 cases claimed on its target instead.
 
-A test case should name one requirement; evidence naming several per case is
-still read in 0.2, as several ids, but the hooks that write it warn
-({ref}`multi-id-deprecation`).
+A test case verifies at most one requirement. Evidence naming several ids on
+one case is still read in 0.3, but the case is quarantined: it counts for
+none of them, and every requirement it names reads INVALID. The hooks that
+write such evidence warn ({ref}`multi-id-deprecation`), and 0.4 rejects it.
 
 ## Built-in ingestors
 
