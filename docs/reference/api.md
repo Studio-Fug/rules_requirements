@@ -18,13 +18,22 @@ with open("report.html", "w", encoding="utf-8") as fh:
 
 ```{eval-rst}
 .. automodule:: rules_requirements.model
-   :members: Model, UserNeed, Requirement, Risk, Mitigation, TestMethod, Entity, Note, VerifiedBy, Location, load_model, read_model, parse_documents, model_files
+   :members: Model, UserNeed, Requirement, Risk, Mitigation, TestMethod, Entity, Note, VerifiedBy, Claim, Location, load_model, read_model, parse_documents, model_files, claim_items
 
 .. automodule:: rules_requirements.config
    :members: Config, Level, parse_config
 
 .. automodule:: rules_requirements.validate
    :members: validate, Issue, ValidationError
+
+.. automodule:: rules_requirements.case_selectors
+   :members: matches, witness, overlaps, tokens, check, is_literal, literal_path, escape, BadSelector
+
+.. automodule:: rules_requirements.labels
+   :members: normalize_label, try_normalize, is_pseudo, read_known_targets, BadTarget
+
+.. automodule:: rules_requirements.lock
+   :members: Lock, LockEntry, LockError, parse_lock, load_lock
 ```
 
 ## Evidence

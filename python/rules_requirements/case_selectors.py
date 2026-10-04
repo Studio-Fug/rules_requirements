@@ -103,8 +103,8 @@ def escape(path: str) -> str:
 def matches(pattern: str, path: str) -> bool:
     """Whether ``pattern`` matches the whole of ``path``.
 
-    Greedy matching with backtracking to the last star only: O(|pattern| *
-    |path|) in the worst case, never exponential.
+    Greedy matching with backtracking to the last star only: O(len(pattern) *
+    len(path)) in the worst case, never exponential.
     """
     toks = tokens(pattern)
     n, m = len(toks), len(path)
@@ -131,7 +131,7 @@ def witness(p: str, q: str) -> str | None:
     """A case path both selectors match, or ``None`` if no path can match both.
 
     Exact for this grammar: a dynamic programme over (position in ``p``,
-    position in ``q``), O(|p| * |q|). The witness only uses characters the
+    position in ``q``), O(len(p) * len(q)). The witness only uses characters the
     selectors spell out, and is a shortest one.
     """
     a, b = tokens(p), tokens(q)

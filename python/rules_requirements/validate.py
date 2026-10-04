@@ -5,12 +5,12 @@ Every finding is an :class:`Issue` with a stable ``code`` so tooling (CI, the
 web editor, agents) can filter and link to documentation. Shape and reference
 problems are always errors; coverage findings follow ``config.rules``.
 
-:meth:`_Validator.check_claims` is the static half of "a test case verifies at
-most one requirement": claims of two entities that can select one case are a
+The claim checks are the static half of "a test case verifies at most one
+requirement": claims of two entities that can select one case are a
 ``shared-case`` error with a concrete witness case, and so are claims on two
 targets declared to run the same test code (``same-code-multiple-owners``).
-Neither can be configured off. :meth:`_Validator.check_lock` checks the
-verification-set lock against the claims.
+Neither can be configured off. The verification-set lock (``config.sets_lock``)
+is checked against the claims too.
 """
 
 from __future__ import annotations
