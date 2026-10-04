@@ -86,6 +86,7 @@ guides/outputs
 guides/bazel
 guides/integration
 guides/web-editor
+guides/migrating-to-per-case
 ```
 
 ```{toctree}

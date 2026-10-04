@@ -121,10 +121,11 @@ def _generate() -> None:
     nodes, edges = graph.build(model, statuses)
     _write(os.path.join(out, "thermostat-graph.svg"), graph.to_svg(nodes, edges, link_prefix="#"))
 
-    # Serve the model schema at its $id.
+    # Serve the schemas (model, attribution worksheet) at their $id.
     schema_dir = os.path.join(out, "extra", "schema")
     os.makedirs(schema_dir, exist_ok=True)
-    shutil.copy(os.path.join(ROOT, "schema", "rules_requirements.schema.json"), schema_dir)
+    for name in ("rules_requirements.schema.json", "worksheet.schema.json"):
+        shutil.copy(os.path.join(ROOT, "schema", name), schema_dir)
 
 
 # At import time: html_extra_path is validated before any build event fires.

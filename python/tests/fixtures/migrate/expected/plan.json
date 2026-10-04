@@ -1,0 +1,260 @@
+{
+  "schema": "rules_requirements/attribution-worksheet/v1",
+  "inputs": {
+    "model": [
+      "requirements"
+    ],
+    "evidence": [
+      "evidence"
+    ]
+  },
+  "summary": {
+    "units": 18,
+    "attributed": 18,
+    "contested_units": 16,
+    "shared_targets": 1,
+    "decided": 0,
+    "open": 16
+  },
+  "targets": [
+    {
+      "target": "//app/tests:smoke_test",
+      "claimed_by": [
+        "REQ-6"
+      ],
+      "shared": false,
+      "cases": 2,
+      "per_case_output": true,
+      "uncontested": {
+        "REQ-6": 1
+      }
+    },
+    {
+      "target": "//web:clock_test",
+      "claimed_by": [
+        "REQ-4",
+        "REQ-5"
+      ],
+      "shared": true,
+      "cases": 1,
+      "per_case_output": false
+    }
+  ],
+  "groups": [
+    {
+      "target": "//app/tests:smoke_test",
+      "group": "app.tests.test_smoke",
+      "counts_toward": [
+        "REQ-3",
+        "REQ-6"
+      ],
+      "tags": [
+        "REQ-3"
+      ],
+      "target_claims": [
+        "REQ-6"
+      ],
+      "proposed": "REQ-3",
+      "reason": "the case's own tag is more specific than the whole-target verified_by of REQ-6",
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_smoke::test_boots",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_config",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "proposed": "REQ-2",
+      "reason": "REQ-2 refines REQ-1, whose verdict rolls up from it",
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_config::test_parses_minimal_file",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_config::test_rejects_garbage[]",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_config::test_rejects_garbage[]]",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_config::test_rejects_garbage[{]",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_config::test_rejects_missing_key",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_config.TestRoundTrip",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "proposed": "REQ-2",
+      "reason": "REQ-2 refines REQ-1, whose verdict rolls up from it",
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_config.TestRoundTrip::test_dump_then_load",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_legacy.LegacyTest",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3"
+      ],
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_legacy.LegacyTest::test_reads_old_format",
+          "status": "passed",
+          "counts_toward": [
+            "REQ-1",
+            "REQ-3"
+          ]
+        },
+        {
+          "path": "app.tests.test_legacy.LegacyTest::test_rejects_old_garbage",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_link",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-3"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-3"
+      ],
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_link::test_backs_off_exponentially",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_link::test_reconnects_after_drop",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_modes",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-3"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-3"
+      ],
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_modes::test_modes[fast]",
+          "status": "passed"
+        },
+        {
+          "path": "app.tests.test_modes::test_modes[slow]",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//app/tests:unit_test",
+      "group": "app.tests.test_obsolete",
+      "counts_toward": [
+        "REQ-4",
+        "REQ-5"
+      ],
+      "tags": [
+        "REQ-4",
+        "REQ-5"
+      ],
+      "owner": "?",
+      "cases": [
+        {
+          "path": "app.tests.test_obsolete::test_helper_shape",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//cc:codec_test",
+      "group": "Codec",
+      "counts_toward": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "tags": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "proposed": "REQ-2",
+      "reason": "REQ-2 refines REQ-1, whose verdict rolls up from it",
+      "owner": "?",
+      "cases": [
+        {
+          "path": "Codec::RoundTrip",
+          "status": "passed"
+        }
+      ]
+    },
+    {
+      "target": "//web:clock_test",
+      "group": "",
+      "counts_toward": [
+        "REQ-4",
+        "REQ-5"
+      ],
+      "target_claims": [
+        "REQ-4",
+        "REQ-5"
+      ],
+      "owner": "?",
+      "cases": [
+        {
+          "path": "[target]",
+          "status": "passed"
+        }
+      ]
+    }
+  ]
+}

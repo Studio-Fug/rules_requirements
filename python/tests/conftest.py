@@ -13,6 +13,10 @@ if _PKG_ROOT not in sys.path:
 
 from rules_requirements.model import read_model  # noqa: E402
 
+# Source trees that tests copy and rewrite (e.g. `rr migrate apply`); their
+# test_*.py files are data, not tests of this package.
+collect_ignore = ["fixtures"]
+
 MODEL = """
 project:
   name: Thermostat

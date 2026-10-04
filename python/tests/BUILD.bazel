@@ -21,10 +21,16 @@ rr_py_test(
         "//js:verifies.cjs",
         "//rr/private:node.bzl",
         "//tests/node:fixtures",
-    ],
-    env = {"RR_CASE_FIXTURE": "$(rootpath :rr_case_fixture)"},
+        # test_migrate.py, test_schema.py: the worksheet schema and fixtures.
+        "//:schema/worksheet.schema.json",
+    ] + glob(["fixtures/**"]),
+    env = {
+        "RR_CASE_FIXTURE": "$(rootpath :rr_case_fixture)",
+        "RR_REQUIRE_BLACK": "1",  # black-layout tests fail, not skip, without black
+    },
     imports = ["."],  # tests import their shared helpers from conftest
     deps = [
+        requirement("black"),
         requirement("pytest"),
         requirement("jsonschema"),
     ],

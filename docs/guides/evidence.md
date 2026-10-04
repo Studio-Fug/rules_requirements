@@ -20,6 +20,7 @@ records:
 | `message` | Failure or skip message. |
 | `duration` | Seconds. |
 | `target` | The build label the evidence belongs to, when known. |
+| `suite` | The enclosing JUnit `<testsuite>` name, when there is one. |
 | `source` | The file it was read from. |
 | `properties` | Any other properties, verbatim — among them `rr.file`, the source file of the test code, which `JUnitWriter`, `CheckPlan` and `rr case --file` write ({ref}`junit-properties`). |
 
@@ -83,6 +84,14 @@ pass a glob that selects the final results:
 `--evidence "$(bazel info bazel-testlogs)/**/test.xml"`.
 ```
 
+**Targets without a report.** When a test writes no JUnit of its own (a plain
+script, a `js_test`), Bazel's `generate-xml.sh` writes one: a `<testsuite>`
+holding one `<testcase>` with the suite's name, `status="run"` and a
+`<system-out>` that starts with "Generated test.log". The ingestor recognises
+that fingerprint and marks the case `rr.synthetic=true` (a property our own
+writers also set when they have nothing per-case to report): it says how the
+whole target ended, not that any particular test passed.
+
 An unreadable report (malformed XML) is not skipped: it becomes one `error`
 case for its target, so a crashed or corrupted run shows up as a failure rather
 than vanishing.
@@ -121,6 +130,59 @@ output as its message — and merges traces from a sidecar
 `<stem>.rrtrace.jsonl` file next to it (the format `rr::verifies!` writes). It
 is mainly used inside `rr wrap` ({doc}`hooks`); the ingestor itself handles
 saved captures named `*.libtest.txt`.
+
+(case-keys)=
+
+## Case keys
+
+Each test case has a stable identity, its *case key*
+({py:class}`~rules_requirements.case_keys.CaseKey`): the target that ran it and
+its path within that target, written `<target>#<path>`:
+
+```text
+//pi/server:server_test#pi.server.tests.test_proto_wire::test_client_roundtrip[configure]
+//web:clocksync_test#clocksync::bestSample keeps the min-RTT sample
+//web:flashEnv_test#[target]
+```
+
+- **Target**: the label recovered from the `bazel-testlogs` path, or the
+  wrapper's `--target`, or a record's `target:`. Evidence that cannot be pinned
+  to a label gets a pseudo-target: `record:<file stem>` for records without
+  `target:`, `suite:<testsuite name>` for JUnit outside a `bazel-testlogs`
+  tree.
+- **Path**: `<classname>::<name>` (just `<name>` without a classname), Unicode
+  NFC, with surrounding whitespace stripped. An `[rr:ID]` tag inside a name is
+  removed, so re-tagging a test never renames its case. A target that only
+  produced Bazel's generated report has one case, `[target]`.
+- **Not identity**: retries (`test_attempts/attempt_N.xml`), repetitions
+  (`run_k_of_n`), shards (`shard_i_of_n`, or `shard_i_of_n_run_k_of_m` for a
+  sharded test run several times) and a second evidence root. They are
+  folded into one result per key: the final attempt decides, with an earlier
+  failure under a final pass marked *flaky*; across runs and roots the worst
+  status wins; one key in two shards (or twice in one report) is marked
+  *duplicate*. A key seen only in an earlier attempt of a run that has a
+  final report (typically the `[target]` result of an attempt that crashed)
+  is not a case: its failure marks that run's passing cases *flaky*.
+- A case whose classname and name are both empty gets the path `[unnamed]`.
+
+`rr cases` prints every key in a set of evidence, with its status, the ids its
+evidence declares, flags (`synthetic`, `target_scope`, `flaky`, `duplicate`)
+and the test source when known (the `rr.file` property). It needs no model:
+
+```console
+$ rr cases --evidence bazel-testlogs --target //pi/server:server_test
+//pi/server:server_test#pi.server.tests.test_handler::test_configure_renegotiates_mid_capture	passed	PR-11,PR-13	-	-
+...
+$ rr cases --evidence bazel-testlogs --json > cases.json
+```
+
+In the tab-separated output, a tab, newline or backslash inside a field is
+written `\t`, `\n` or `\\`; the JSON output keeps names as they are. An
+`--evidence` path that holds no evidence file is a warning, and no evidence at
+all is an error (exit status 2).
+
+Copy keys from here rather than guessing them. The keys do not change any
+verdict today; they are what {doc}`migrating-to-per-case` assigns owners to.
 
 ## Writing an ingestor
 

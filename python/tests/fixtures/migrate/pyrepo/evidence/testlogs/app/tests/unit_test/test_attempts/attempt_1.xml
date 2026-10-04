@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites name="pytest tests">
+<testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="0.001">
+<testcase classname="app.tests.test_link" name="test_reconnects_after_drop" time="0.001">
+<properties>
+<property name="requirement" value="REQ-3" />
+<property name="requirement" value="REQ-1" />
+<property name="level" value="sil" />
+</properties>
+<failure message="link still down">AssertionError</failure>
+</testcase>
+</testsuite>
+</testsuites>

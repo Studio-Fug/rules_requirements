@@ -62,6 +62,12 @@ $ bazel run //tests/integration:rr_case_report_md_golden_test.update
 
 (and the same targets in `examples/thermostat`).
 
+`python/tests/fixtures/migrate/` is a small source tree for `rr migrate`: test
+sources with multi-id tags, their evidence, a decided worksheet, and under
+`expected/` the worksheet renderings and the rewritten sources the tests
+compare against. Regenerate those with
+`RR_UPDATE_FIXTURES=1 python -m pytest python/tests/test_migrate.py python/tests/test_tag_codemod.py`.
+
 ## Presubmit checks
 
 ```console
