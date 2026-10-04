@@ -22,7 +22,7 @@ _PROGRAM = r"""
 
 int main() {
   testing::TestInfo two{"Interlock", "CutsHeaterAtLimit"}, again{"Interlock", "SameIdTwice"},
-      calls{"Interlock", "TwoCalls"};
+      calls{"Interlock", "TwoCalls"}, spaced{"Interlock", "Spaced"}, padded{"Interlock", "Padded"};
   testing::UnitTest* unit = testing::UnitTest::GetInstance();
   unit->info = &two;
   RR_VERIFIES("REQ-4", "REQ-5");
@@ -33,6 +33,10 @@ int main() {
   RR_VERIFIES("REQ-2");
   RR_VERIFIES("REQ-3");
   RR_VERIFIES("REQ-6");
+  unit->info = &spaced;  // a whitespace-separated string names two ids, as for the Python hooks
+  RR_VERIFIES("REQ-7 REQ-8");
+  unit->info = &padded;  // padding around ONE id is not a second id
+  RR_VERIFIES(" REQ-9\t");
   return 0;
 }
 """
@@ -63,9 +67,12 @@ def test_several_ids_on_one_test_warn_once_and_are_all_recorded(tmp_path):
         "requirement=REQ-2",
         "requirement=REQ-2,REQ-3",
         "requirement=REQ-2,REQ-3,REQ-6",
+        "requirement=REQ-7,REQ-8",
+        "requirement=REQ-9",
     ]
     warnings = run.stderr.splitlines()
-    assert len(warnings) == 2, run.stderr  # once per test, when it gains a second id
+    assert len(warnings) == 3, run.stderr  # once per test, when it gains a second id
     assert warnings[0].startswith("rr_gtest: warning: Interlock.CutsHeaterAtLimit names REQ-4, REQ-5;")
     assert warnings[1].startswith("rr_gtest: warning: Interlock.TwoCalls names REQ-2, REQ-3;")
+    assert warnings[2].startswith("rr_gtest: warning: Interlock.Spaced names REQ-7, REQ-8;")
     assert all("[RR-E101]" in w for w in warnings)

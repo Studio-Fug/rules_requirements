@@ -20,7 +20,8 @@
 // by attribution.
 //
 // A test case verifies at most one requirement. Several ids on one test (in
-// one call, or over several calls) are deprecated: they warn on stderr
+// one call, over several calls, or in one string separated by commas or
+// whitespace) are deprecated: they warn on stderr
 // [RR-E101] and are all recorded, as a comma list (RecordProperty keeps one
 // value per key), so attribution quarantines the case and it counts for none
 // of them. RR_VERIFIES in SetUpTestSuite, an Environment or main is still
@@ -58,12 +59,15 @@ inline std::string& CurrentIds() {
 }  // namespace internal
 
 namespace internal {
-// The distinct ids of a comma list, in first-seen order.
+// The distinct ids of a list separated by commas or whitespace (as every
+// rules_requirements hook splits one: "REQ-1 REQ-2" names two ids), in
+// first-seen order.
 inline std::vector<std::string> Distinct(const std::string& list) {
+  static const char kSeparators[] = ", \t\n\r\f\v";
   std::vector<std::string> out;
   std::string::size_type start = 0;
   while (!list.empty() && start <= list.size()) {
-    std::string::size_type end = list.find(',', start);
+    std::string::size_type end = list.find_first_of(kSeparators, start);
     if (end == std::string::npos) end = list.size();
     const std::string id = list.substr(start, end - start);
     bool seen = id.empty();

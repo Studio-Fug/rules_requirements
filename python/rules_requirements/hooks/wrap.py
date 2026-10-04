@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     for c in cases:
         writer._append(
             c.name,
-            c.requirements,
+            split_ids(list(c.requirements)),  # "REQ-1 REQ-2" names two ids, as for every hook
             status=c.status,
             message=c.message,
             level=c.level,
@@ -217,12 +217,14 @@ def _exit_status(cases: list[TestCase], returncode: int, text: str, target: str)
 
 def _warn_multi_id(cases: list[TestCase]) -> None:
     """RR-E101 on stderr for each case that records two or more ids
-    (``rr::verifies!`` called with different ids in one test)."""
+    (``rr::verifies!`` called with different ids in one test, or with one
+    string naming several: ``"REQ-1 REQ-2"``, ``"REQ-1,REQ-2"``)."""
     for c in cases:
-        if c.name == "exit-status" or len(c.requirements) < 2:
+        ids = split_ids(list(c.requirements))
+        if c.name == "exit-status" or len(ids) < 2:
             continue
         test = f"{c.classname}::{c.name}" if c.classname else c.name
-        text = str(multiple_warning(test, list(c.requirements)))
+        text = str(multiple_warning(test, ids))
         print(text.replace("rr: ", "rr wrap: warning: ", 1), file=sys.stderr)
 
 

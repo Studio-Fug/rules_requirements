@@ -17,7 +17,8 @@
 //!
 //! The id is a declared tag: which requirement the case verifies is decided by
 //! attribution. A test case verifies at most one requirement: several ids in
-//! one test (in one call, or over several calls) are deprecated; they are all
+//! one test (in one call, over several calls, or in one string separated by
+//! commas or whitespace) are deprecated; they are all
 //! recorded, so attribution quarantines the case and it counts for none of
 //! them, and `rr wrap` warns about them on stderr (RR-E101).
 //!

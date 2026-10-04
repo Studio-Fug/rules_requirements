@@ -736,8 +736,8 @@ the Python hooks with
 | pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, sibling base classes naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
 | unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids; sibling base classes naming different ids | at the decorated definition; for sibling bases, at the class definition when its first test starts (escalated to an error, printed to stderr, so the run goes on) |
 | `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
-| googletest | `RR_VERIFIES("A", "B")`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
-| Rust | `rr::verifies!("A", "B")`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |
+| googletest | `RR_VERIFIES("A", "B")`, `RR_VERIFIES("A B")` or `"A,B"`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
+| Rust | `rr::verifies!("A", "B")`, `rr::verifies!("A B")` or `"A,B"`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |
 
 Ids at several scopes — a module-level `pytestmark` plus a function's own
 marker, a `pytest.param` mark plus the function's marker, a class decorator

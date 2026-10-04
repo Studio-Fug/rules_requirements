@@ -483,6 +483,33 @@ def test_wrap_libtest(tmp_path, monkeypatch):
     assert cases["bad"].level == "simulation"
 
 
+WHITESPACE_LIBTEST = r"""
+import json, os, sys
+with open(os.environ["RR_TRACE_FILE"], "a") as fh:
+    fh.write(json.dumps({"test": "tests::spaced", "requirement": "REQ-1 REQ-2"}) + "\n")
+    fh.write(json.dumps({"test": "tests::single", "requirement": "REQ-3"}) + "\n")
+print("running 2 tests")
+print("test tests::spaced ... ok")
+print("test tests::single ... ok")
+print("test result: ok. 2 passed; 0 failed")
+"""
+
+
+def test_wrap_warns_on_a_whitespace_separated_id(tmp_path, monkeypatch, capsys):
+    """rr::verifies!("REQ-1 REQ-2") names two ids (as the Python hooks and
+    0.3 ingest read it): RR-E101, like any other multi-id declaration."""
+    fake = tmp_path / "fake_test"
+    fake.write_text("#!" + sys.executable + "\n" + WHITESPACE_LIBTEST)
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    assert wrap.main(["--junit-xml", str(tmp_path / "w.xml"), "--", str(fake)]) == 0
+    err = capsys.readouterr().err
+    assert "tests::spaced names REQ-1, REQ-2; a test case verifies at most one requirement [RR-E101]" in err
+    assert "tests::single" not in err
+    cases = {c.name: c.requirements for c in ingest.collect([str(tmp_path / "w.xml")]).cases}
+    assert cases == {"spaced": ("REQ-1", "REQ-2"), "single": ("REQ-3",)}  # both written: quarantined
+
+
 def test_wrap_crash_records_synthetic_case(tmp_path, monkeypatch):
     crash = tmp_path / "crash"
     crash.write_text("#!/bin/sh\necho segfault\nexit 139\n")
