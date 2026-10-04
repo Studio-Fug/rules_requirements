@@ -6,7 +6,7 @@ from rules_requirements import ingest
 from rules_requirements.hooks.checkplan import CheckPlan, HarnessError
 from rules_requirements.hooks.junit_writer import JUnitWriter
 from rules_requirements.model import read_model
-from rules_requirements.trace import FAILED, VERIFIED, build_matrix
+from rules_requirements.trace import FAILED, INCOMPLETE, VERIFIED, build_matrix
 
 STEPS = {
     "flash_boot": ("ble_advertising",),
@@ -279,11 +279,6 @@ def test_verdicts_through_the_report(tmp_path):
     assert verdicts(tmp_path / "device", report) == dict.fromkeys(("REQ-13", "REQ-23", "REQ-35"), FAILED)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="0.3 verification sets (attribution, stage 2) make a set with a skipped member INCOMPLETE; "
-    "until then the passed checks, whose tags CheckPlan no longer withdraws, read VERIFIED",
-)
 def test_rig_trouble_verdicts_are_neither_verified_nor_failed(tmp_path):
     report, plan = plan_for()
     with pytest.raises(RigError):
@@ -292,6 +287,10 @@ def test_rig_trouble_verdicts_are_neither_verified_nor_failed(tmp_path):
     # neither VERIFIED nor FAILED where a check never ran; REQ-35's one check passed
     assert rig["REQ-35"] == VERIFIED
     assert rig["REQ-13"] not in (VERIFIED, FAILED) and rig["REQ-23"] not in (VERIFIED, FAILED)
+    # 0.3 verification sets: a passed check next to a skipped one is INCOMPLETE
+    # (CheckPlan no longer withdraws tags), and the rig case, owned by nobody,
+    # fails nothing.
+    assert rig["REQ-13"] == INCOMPLETE and rig["REQ-23"] == INCOMPLETE
 
 
 def test_a_result_recorded_inside_its_own_check_block_is_the_only_case():

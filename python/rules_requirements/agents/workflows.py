@@ -395,14 +395,22 @@ def linked_tests(ctx: Context, req_id: str, max_tests: int = 8) -> list[tuple[st
         code = ctx.snippet(ref.path, ref.line)
         if code:
             out.append((f"{ref.symbol or 'test'} ({ref.path}:{ref.line})", code))
-    for case in ctx.matrix.evidence.for_id(req_id):
-        loc = ctx.locate_case(case)
+    # The cases the requirement owns (its verification set), never the raw
+    # tags: a quarantined case is no test of it.
+    attribution = ctx.matrix.attribution
+    for member in attribution.members_of(req_id) if attribution is not None else ():
+        if not member.owned or member.result is None:
+            continue
+        res = member.result
+        loc: tuple[str, int] | None = (res.file, res.line) if res.file and res.line else None
+        if loc is None and res.cases:
+            loc = ctx.locate_case(res.cases[0])
         if loc is None or loc in seen:
             continue
         seen.add(loc)
         code = ctx.snippet(*loc)
         if code:
-            out.append((f"{case.full_name} ({loc[0]}:{loc[1]}, last result: {case.status})", code))
+            out.append((f"{member.key} ({loc[0]}:{loc[1]}, last result: {member.state})", code))
     return out[:max_tests]
 
 

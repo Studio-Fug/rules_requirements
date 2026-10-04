@@ -13,12 +13,14 @@
     "requirements_partial": 0,
     "requirements_failed": 1,
     "requirements_unverified": 0,
+    "requirements_incomplete": 0,
+    "requirements_invalid": 0,
     "risks": 0,
     "risks_mitigated": 0,
     "mitigations": 0,
     "mitigations_verified": 0,
     "test_cases": 4,
-    "gaps": 1
+    "gaps": 2
   },
   "levels": [
     {
@@ -135,6 +137,12 @@
       "message": "failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement",
       "route": "autonomous",
       "demanded_level": "simulation"
+    },
+    {
+      "kind": "unpinned-sets",
+      "entity": "",
+      "message": "membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3; lock them with `rr sets lock --write`",
+      "route": "autonomous"
     }
   ]
 }

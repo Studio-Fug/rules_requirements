@@ -317,13 +317,13 @@ def test_unittest_main_discover_and_module(tmp_path, monkeypatch):
     )
     xml = tmp_path / "d.xml"
     assert rr_unittest.main(argv=["--discover", str(pkg), "--junit-xml", str(xml), "-q"]) == 0
-    assert ingest.collect([str(xml)]).for_id("REQ-1")[0].name == "test_a"
+    assert next(c for c in ingest.collect([str(xml)]).cases if "REQ-1" in c.declared).name == "test_a"
     xml2 = tmp_path / "m.xml"
     proc = subprocess.run(
         [sys.executable, str(pkg / "test_mod.py")], env=_env(XML_OUTPUT_FILE=str(xml2)), capture_output=True, text=True
     )
     assert proc.returncode == 0, proc.stderr
-    assert ingest.collect([str(xml2)]).for_id("REQ-1")
+    assert [c for c in ingest.collect([str(xml2)]).cases if "REQ-1" in c.declared]
 
 
 def test_unittest_subtests_and_fixture_errors(tmp_path):
@@ -1545,7 +1545,7 @@ def test_pytest_suite_property_requirement_reaches_no_case(tmp_path):
     }
     assert all(c.status == "passed" for c in cases.values())
     ev = ingest.collect([str(tmp_path / "out.xml")])
-    assert ev.for_id("REQ-X") == []
+    assert [c for c in ev.cases if "REQ-X" in c.declared] == []
     assert [(i.code, i.ids) for i in ev.issues] == [("suite-level-requirement", ("REQ-X",))]
     assert "not inherited" in str(ev.issues[0])
 

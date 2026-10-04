@@ -35,12 +35,14 @@ report).
 directories (walked recursively, following symlinks) and globs (`**` allowed).
 Each file goes to the first registered ingestor that recognises it; files no
 ingestor recognises — the `test.log` next to each `test.xml` in
-`bazel-testlogs`, for example — are skipped. The result also rolls cases up per
-target for [`verified_by`](../concepts.md#evidence) traces, the most severe
-status winning: `error` > `failed` > `skipped` > `passed`. A target with any
-skipped case is therefore not passing whole-target evidence — the skipped part
-may be exactly the hardware its `verified_by` level claims (an absent DUT). A
-binary that exits non-zero although every case in its report passed (a
+`bazel-testlogs`, for example — are skipped. `Evidence.target_status` still
+rolls cases up per target (the most severe status winning: `error` > `failed`
+> `skipped` > `passed`), but no verdict reads it: a whole-target claim expands
+to the target's cases, each one a member of the claiming entity's
+{ref}`verification set <evidence>`, and a skipped one leaves the set
+INCOMPLETE — the skipped part may be exactly the hardware the claim's level
+stands for (an absent DUT). A binary that exits non-zero although every case
+in its report passed (a
 sanitizer, a crash after writing the report) gets an extra `exit-status` error
 case — from `rr_evidence` and from `rr wrap`, for libtest output and for a
 runner's own JUnit (`--format junit`) alike. It declares no requirement (0.2
@@ -56,15 +58,6 @@ declaring more than one distinct id keeps all of them: attribution then
 quarantines it (`multi-tag`), so it counts for no requirement and every id it
 names reads INVALID. The hooks that can write such evidence warn
 ({ref}`multi-id-deprecation`), and 0.4 rejects it.
-
-<!-- rr:interim multi-tag quarantine pending -->
-```{warning}
-Interim development tree: ingest already records every declared id, but
-attribution and the verdicts that read only attribution are not in this tree
-yet, so the verdict engine here still counts a case once for each id it
-declares. Do not release or deploy it on its own; 0.3.0 ships all of them
-together.
-```
 
 ## Built-in ingestors
 

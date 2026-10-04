@@ -1,13 +1,13 @@
 # Thermostat
 
-**2/2** user needs validated · **7/7** requirements verified (0 under-verified, 0 failed, 0 unverified) · **2/2** risks mitigated · 17 test cases · 0 gaps
+**1/2** user needs validated · **5/7** requirements verified (0 under-verified, 0 failed, 2 invalid, 0 incomplete, 0 unverified) · **1/2** risks mitigated · 17 test cases · 4 gaps
 
 ## User needs — validation
 
 | ID | Need | Requirements | Status |
 |---|---|---|---|
 | UN-1 | Keep the room at a comfortable temperature | REQ-1, REQ-2 | ✅ VALIDATED |
-| UN-2 | Set the target temperature in Celsius or Fahrenheit | REQ-3, REQ-4, REQ-7 | ✅ VALIDATED |
+| UN-2 | Set the target temperature in Celsius or Fahrenheit | REQ-3, REQ-4, REQ-7 | ❌ FAILED |
 
 ## Requirements — verification
 
@@ -15,25 +15,25 @@
 |---|---|---|---|---|---|
 | REQ-1 | Heat when the room is below the setpoint band | satisfies UN-1 | simulation | ✓ tests.test_controller::test_heats_below_band [simulation] | ✅ VERIFIED |
 | REQ-2 | Stop heating above the band; hold state inside it | satisfies UN-1 | simulation | ✓ tests.test_controller::test_stops_above_band_and_holds_inside_it [simulation] | ✅ VERIFIED |
-| REQ-3 | Parse setpoints in °C and °F | satisfies UN-2; implements MIT-2 | simulation | ✓ tests::parses_celsius_and_fahrenheit [simulation]<br>✓ tests::requires_a_unit [simulation] | ✅ VERIFIED |
-| REQ-4 | Reject setpoints outside 5-30 °C | satisfies UN-2; implements MIT-2 | simulation | ✓ tests.test_controller::test_accepts_range_limits [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[30.1] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[4.9] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[80.0] [simulation]<br>✓ tests::rejects_out_of_range [simulation]<br>✓ tests::requires_a_unit [simulation] | ✅ VERIFIED |
+| REQ-3 | Parse setpoints in °C and °F | satisfies UN-2; implements MIT-2 | simulation | ✓ tests::parses_celsius_and_fahrenheit [simulation] | ❌ INVALID |
+| REQ-4 | Reject setpoints outside 5-30 °C | satisfies UN-2; implements MIT-2 | simulation | ✓ tests.test_controller::test_accepts_range_limits [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[30.1] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[4.9] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[80.0] [simulation]<br>✓ tests::rejects_out_of_range [simulation] | ❌ INVALID |
 | REQ-5 | Independent over-temperature cutoff | implements MIT-1 | sil | ✓ Interlock::NanReadingTrips [sil]<br>✓ Interlock::StaysTrippedUntilBelowReset [sil]<br>✓ Interlock::TripsAtLimit [sil] | ✅ VERIFIED |
 | REQ-6 | Fail safe on an invalid sensor reading | implements MIT-1 | simulation | ✓ tests.test_controller::test_invalid_reading_turns_heater_off[-41.0] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[85.1] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[nan] [simulation] | ✅ VERIFIED |
-| REQ-7 | Show the setpoint with its unit | satisfies UN-2 | inspection | ✓ inspection.TM-2::panel-shows-setpoint-unit [inspection]<br>✓ display_test.DisplayTest::test_setpoint_shows_unit [simulation] | ✅ VERIFIED |
+| REQ-7 | Show the setpoint with its unit | satisfies UN-2 | inspection | ✓ display_test.DisplayTest::test_setpoint_shows_unit [simulation]<br>✓ inspection.TM-2::panel-shows-setpoint-unit [inspection] | ✅ VERIFIED |
 
 ## Risks — control
 
 | ID | Risk | Severity × likelihood | Mitigations | Status |
 |---|---|---|---|---|
 | RISK-1 | Room overheats | high × possible → high × rare | MIT-1 | ✅ MITIGATED |
-| RISK-2 | Implausible setpoint accepted | medium × likely → medium × unlikely | MIT-2 | ✅ MITIGATED |
+| RISK-2 | Implausible setpoint accepted | medium × likely → medium × unlikely | MIT-2 | ❌ FAILED |
 
 ## Mitigations — risk control measures
 
 | ID | Mitigation | Type | Mitigates | Implemented by | Status |
 |---|---|---|---|---|---|
 | MIT-1 | Independent over-temperature protection | protective | RISK-1 | REQ-5, REQ-6 | ✅ VERIFIED |
-| MIT-2 | Validate setpoints at entry | inherent | RISK-2 | REQ-3, REQ-4 | ✅ VERIFIED |
+| MIT-2 | Validate setpoints at entry | inherent | RISK-2 | REQ-3, REQ-4 | ❌ FAILED |
 
 ## Test methods
 
@@ -61,5 +61,14 @@
 | Module | Status |
 |---|---|
 | interlock | ✅ VERIFIED |
-| setpoint | ✅ VERIFIED |
-| thermostat | ✅ VERIFIED |
+| setpoint | ❌ FAILED |
+| thermostat | ❌ FAILED |
+
+## Gaps
+
+| Kind | Entity | Route | Detail |
+|---|---|---|---|
+| multi-tag | //:setpoint_test#tests::requires_a_unit | autonomous | //:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one |
+| invalid | REQ-3 | autonomous | quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner |
+| invalid | REQ-4 | autonomous | quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner |
+| unpinned-sets |  | autonomous | membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3, REQ-4, REQ-5, REQ-6, REQ-7; lock them with `rr sets lock --write` |

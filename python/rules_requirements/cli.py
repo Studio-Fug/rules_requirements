@@ -29,7 +29,7 @@ from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
 from rules_requirements.labels import read_known_targets
 from rules_requirements.model import Model, read_model
-from rules_requirements.trace import FAILED, UNVERIFIED, build_matrix
+from rules_requirements.trace import FAILED, INCOMPLETE, INVALID, UNVERIFIED, build_matrix
 from rules_requirements.util import natural_key
 from rules_requirements.validate import validate
 
@@ -215,16 +215,20 @@ def cmd_report(args: argparse.Namespace) -> int:
         f"validation: {c['user_needs_validated']}/{c['user_needs']} needs | "
         f"verification: {c['requirements_verified']}/{c['requirements']} requirements "
         f"({c['requirements_failed']} failed, {c['requirements_unverified']} unverified, "
-        f"{c['requirements_under_verified']} under-verified) | "
+        f"{c['requirements_under_verified']} under-verified, {c['requirements_invalid']} invalid, "
+        f"{c['requirements_incomplete']} incomplete) | "
         f"risks: {c['risks_mitigated']}/{c['risks']} mitigated | gaps: {c['gaps']}",
         file=sys.stderr,
     )
     reqs = matrix.of_kind("requirement")
     # Any FAILED verdict gates: a failing validation test on a need, or a
     # failing effectiveness test on a mitigation, counts as much as a
-    # requirement's.
+    # requirement's. INVALID (a quarantined case names it) counts as failed,
+    # INCOMPLETE as unverified.
     failed = sorted((v.id for v in matrix.verdicts.values() if v.status == FAILED), key=natural_key)
+    invalid = sorted((v.id for v in matrix.verdicts.values() if v.status == INVALID), key=natural_key)
     unverified = [v.id for v in reqs if v.status == UNVERIFIED]
+    incomplete = [v.id for v in reqs if v.status == INCOMPLETE]
     current = _kv(args.current_build)
     if current:
         keys = {k for cs in evidence.cases for k in cs.artifact}
@@ -239,16 +243,24 @@ def cmd_report(args: argparse.Namespace) -> int:
     violations = matrix.pyramid_violations()
     if failed:
         print("FAILED: " + ", ".join(failed), file=sys.stderr)
+    if invalid:
+        print("INVALID: " + ", ".join(invalid), file=sys.stderr)
+    # A quarantined case counts for nobody: say so loudly (one line per case).
+    for q in matrix.attribution.quarantined if matrix.attribution is not None else ():
+        print(f"ATTRIBUTION ERROR: {q.code}: {q.detail}", file=sys.stderr)
     if violations and args.pyramid_policy != "off":
         print(f"cost-pyramid {args.pyramid_policy}: " + ", ".join(violations), file=sys.stderr)
     if matrix.unknown_evidence:
         print("evidence references undefined ids: " + ", ".join(matrix.unknown_evidence), file=sys.stderr)
 
     rc = 0
-    if args.fail_on in ("failed", "unverified", "gaps") and failed:
+    if args.fail_on in ("failed", "unverified", "gaps") and (failed or invalid):
         rc = 1
     if args.fail_on in ("unverified", "gaps") and unverified:
         print("UNVERIFIED: " + ", ".join(unverified), file=sys.stderr)
+        rc = 1
+    if args.fail_on in ("unverified", "gaps") and incomplete:
+        print("INCOMPLETE: " + ", ".join(incomplete), file=sys.stderr)
         rc = 1
     if args.fail_on == "gaps" and matrix.gaps:
         rc = 1

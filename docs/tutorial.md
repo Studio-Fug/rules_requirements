@@ -161,7 +161,9 @@ $ bazel test //...
 //:report_md_golden_test                                                 PASSED
 //:setpoint_test                                                         PASSED
 $ bazel build //:report
-evidence: 5 file(s), 17 test case(s) | validation: 2/2 needs | verification: 7/7 requirements (0 failed, 0 unverified, 0 under-verified) | risks: 2/2 mitigated | gaps: 0
+evidence: 5 file(s), 17 test case(s) | validation: 1/2 needs | verification: 5/7 requirements (0 failed, 0 unverified, 0 under-verified, 2 invalid, 0 incomplete) | risks: 1/2 mitigated | gaps: 4
+INVALID: REQ-3, REQ-4
+ATTRIBUTION ERROR: multi-tag: //:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one
 ```
 
 `//:report` runs the four test targets inside a build action (`rr_evidence`),
@@ -170,7 +172,11 @@ adds the inspection record, scans the sources for annotations and renders
 
 ## 7. The report
 
-This is the example's golden Markdown report, exactly as checked in:
+This is the example's golden Markdown report, exactly as checked in. REQ-3 and
+REQ-4 read **INVALID**: the Rust test `tests::requires_a_unit` calls
+`rr::verifies!("REQ-3", "REQ-4")`, and a test case verifies at most one
+requirement, so the case is quarantined — it counts for neither, and both read
+INVALID until it names one (see {ref}`evidence`):
 
 ```{include} ../examples/thermostat/report.golden.md
 :heading-offset: 2

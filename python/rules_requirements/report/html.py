@@ -15,7 +15,9 @@ _CLASS = {
     "MITIGATED": "ok",
     "UNDER-VERIFIED": "amber",
     "PARTIAL": "warn",
+    "INCOMPLETE": "warn",
     "FAILED": "fail",
+    "INVALID": "fail",
 }
 
 

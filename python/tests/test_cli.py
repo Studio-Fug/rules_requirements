@@ -529,3 +529,19 @@ def test_migrate_apply_ignores_unrelated_python_modules(capsys, tmp_path):
     assert "tools/codec.py" not in out + err
     assert "not a Python test (its evidence names fw/codec_test.cc)" in out + err
     assert "would rewrite app/tests/test_config.py" in out + err
+
+
+def test_report_gates_on_invalid_and_incomplete(capsys, model_path, tmp_path):
+    """0.3: a quarantined case makes the ids it names INVALID, which --fail-on
+    failed counts; an INCOMPLETE set counts as unverified."""
+    logs = tmp_path / "bazel-testlogs"
+    junit(logs, "p/t/test.xml", [("both", "passed", ["REQ-1", "REQ-2"], ""), ("skip", "skipped", ["REQ-3"], "")])
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
+    assert rc == 1 and "INVALID: REQ-1, REQ-2" in err
+    assert "ATTRIBUTION ERROR: multi-tag: //p:t#suite::both declares REQ-1, REQ-2;" in err
+    assert "(0 failed, 0 unverified, 0 under-verified, 2 invalid, 1 incomplete)" in err
+    junit(logs, "p/t/test.xml", [("one", "passed", ["REQ-1"], ""), ("skip", "skipped", ["REQ-3"], "")])
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
+    assert rc == 0 and "ATTRIBUTION ERROR" not in err
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "unverified")
+    assert rc == 1 and "INCOMPLETE: REQ-3" in err

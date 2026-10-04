@@ -8,19 +8,21 @@
   },
   "summary": {
     "user_needs": 2,
-    "user_needs_validated": 2,
+    "user_needs_validated": 1,
     "requirements": 7,
-    "requirements_verified": 7,
+    "requirements_verified": 5,
     "requirements_under_verified": 0,
     "requirements_partial": 0,
     "requirements_failed": 0,
     "requirements_unverified": 0,
+    "requirements_incomplete": 0,
+    "requirements_invalid": 2,
     "risks": 2,
-    "risks_mitigated": 2,
+    "risks_mitigated": 1,
     "mitigations": 2,
-    "mitigations_verified": 2,
+    "mitigations_verified": 1,
     "test_cases": 17,
-    "gaps": 0
+    "gaps": 4
   },
   "levels": [
     {
@@ -62,7 +64,7 @@
     {
       "id": "UN-2",
       "title": "Set the target temperature in Celsius or Fahrenheit",
-      "status": "VALIDATED",
+      "status": "FAILED",
       "description": "Occupants enter a target like \"21.5C\" or \"70F\" on the wall panel and can read back what they set.",
       "requirements": [
         "REQ-3",
@@ -171,7 +173,7 @@
     {
       "id": "REQ-3",
       "title": "Parse setpoints in \u00b0C and \u00b0F",
-      "status": "VERIFIED",
+      "status": "INVALID",
       "description": "The panel shall accept \"<number>C\" and \"<number>F\" (case-insensitive, optional whitespace) and convert to \u00b0C.",
       "evidence": [
         {
@@ -179,16 +181,10 @@
           "status": "passed",
           "level": "simulation",
           "target": "//:setpoint_test"
-        },
-        {
-          "name": "tests::requires_a_unit",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//:setpoint_test"
         }
       ],
       "demanded_level": "simulation",
-      "provided_level": "simulation",
+      "provided_level": null,
       "satisfies": [
         "UN-2"
       ],
@@ -237,7 +233,7 @@
     {
       "id": "REQ-4",
       "title": "Reject setpoints outside 5-30 \u00b0C",
-      "status": "VERIFIED",
+      "status": "INVALID",
       "description": "The panel shall reject any setpoint that converts to below 5 \u00b0C or above 30 \u00b0C.",
       "category": "safety",
       "evidence": [
@@ -270,16 +266,10 @@
           "status": "passed",
           "level": "simulation",
           "target": "//:setpoint_test"
-        },
-        {
-          "name": "tests::requires_a_unit",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//:setpoint_test"
         }
       ],
       "demanded_level": "simulation",
-      "provided_level": "simulation",
+      "provided_level": null,
       "satisfies": [
         "UN-2"
       ],
@@ -500,15 +490,16 @@
       "description": "The panel shall display the active setpoint with its unit, e.g. \"21.5 \u00b0C\".",
       "evidence": [
         {
-          "name": "inspection.TM-2::panel-shows-setpoint-unit",
-          "status": "passed",
-          "level": "inspection"
-        },
-        {
           "name": "display_test.DisplayTest::test_setpoint_shows_unit",
           "status": "passed",
           "level": "simulation",
           "target": "//:display_test"
+        },
+        {
+          "name": "inspection.TM-2::panel-shows-setpoint-unit",
+          "status": "passed",
+          "level": "inspection",
+          "target": "record:panel_inspection"
         }
       ],
       "demanded_level": "inspection",
@@ -567,7 +558,7 @@
     {
       "id": "MIT-2",
       "title": "Validate setpoints at entry",
-      "status": "VERIFIED",
+      "status": "FAILED",
       "description": "Require an explicit unit and a bounded range for every setpoint.",
       "type": "inherent",
       "mitigates": [
@@ -603,7 +594,7 @@
     {
       "id": "RISK-2",
       "title": "Implausible setpoint accepted",
-      "status": "MITIGATED",
+      "status": "FAILED",
       "hazard": "Setpoint far above comfort range",
       "hazardous_situation": "\"80\" meant as \u00b0F is taken as \u00b0C, or a typo like \"250C\", and the controller drives the room towards it.",
       "harm": "Heat stress",
@@ -640,11 +631,38 @@
   ],
   "modules": {
     "interlock": "VERIFIED",
-    "setpoint": "VERIFIED",
-    "thermostat": "VERIFIED"
+    "setpoint": "FAILED",
+    "thermostat": "FAILED"
   },
   "high_open_risks": [],
   "pyramid_violations": [],
   "unknown_evidence": {},
-  "gaps": []
+  "gaps": [
+    {
+      "kind": "multi-tag",
+      "entity": "//:setpoint_test#tests::requires_a_unit",
+      "message": "//:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one",
+      "route": "autonomous"
+    },
+    {
+      "kind": "invalid",
+      "entity": "REQ-3",
+      "message": "quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner",
+      "route": "autonomous",
+      "demanded_level": "simulation"
+    },
+    {
+      "kind": "invalid",
+      "entity": "REQ-4",
+      "message": "quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner",
+      "route": "autonomous",
+      "demanded_level": "simulation"
+    },
+    {
+      "kind": "unpinned-sets",
+      "entity": "",
+      "message": "membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3, REQ-4, REQ-5, REQ-6, REQ-7; lock them with `rr sets lock --write`",
+      "route": "autonomous"
+    }
+  ]
 }

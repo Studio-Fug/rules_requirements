@@ -8,17 +8,19 @@
     "user_needs": 1,
     "user_needs_validated": 0,
     "requirements": 6,
-    "requirements_verified": 4,
+    "requirements_verified": 1,
     "requirements_under_verified": 1,
     "requirements_partial": 0,
     "requirements_failed": 1,
     "requirements_unverified": 0,
+    "requirements_incomplete": 0,
+    "requirements_invalid": 3,
     "risks": 1,
-    "risks_mitigated": 1,
+    "risks_mitigated": 0,
     "mitigations": 1,
-    "mitigations_verified": 1,
+    "mitigations_verified": 0,
     "test_cases": 13,
-    "gaps": 2
+    "gaps": 9
   },
   "levels": [
     {
@@ -65,29 +67,17 @@
     {
       "id": "REQ-1",
       "title": "pytest markers are traced",
-      "status": "VERIFIED",
+      "status": "INVALID",
       "evidence": [
-        {
-          "name": "GtestHook::IdsAccumulateAcrossCalls",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//tests/integration:gtest_hook_test"
-        },
         {
           "name": "tests.integration.test_pytest_hook::test_marker_is_traced",
           "status": "passed",
           "level": "simulation",
           "target": "//tests/integration:pytest_hook_test"
-        },
-        {
-          "name": "rust_hook_test::multiple_ids",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//tests/integration:rust_hook_test"
         }
       ],
       "demanded_level": "simulation",
-      "provided_level": "simulation",
+      "provided_level": null,
       "satisfies": [
         "UN-1"
       ],
@@ -121,14 +111,8 @@
     {
       "id": "REQ-3",
       "title": "googletest RR_VERIFIES is traced",
-      "status": "VERIFIED",
+      "status": "INVALID",
       "evidence": [
-        {
-          "name": "GtestHook::IdsAccumulateAcrossCalls",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//tests/integration:gtest_hook_test"
-        },
         {
           "name": "GtestHook::VerifiesIsTraced",
           "status": "passed",
@@ -137,7 +121,7 @@
         }
       ],
       "demanded_level": "sil",
-      "provided_level": "sil",
+      "provided_level": null,
       "satisfies": [
         "UN-1"
       ],
@@ -150,14 +134,8 @@
     {
       "id": "REQ-4",
       "title": "Rust rr::verifies! is traced",
-      "status": "VERIFIED",
+      "status": "INVALID",
       "evidence": [
-        {
-          "name": "rust_hook_test::multiple_ids",
-          "status": "passed",
-          "level": "simulation",
-          "target": "//tests/integration:rust_hook_test"
-        },
         {
           "name": "rust_hook_test::verifies_is_traced",
           "status": "passed",
@@ -166,7 +144,7 @@
         }
       ],
       "demanded_level": "sil",
-      "provided_level": "sil",
+      "provided_level": null,
       "satisfies": [
         "UN-1"
       ],
@@ -223,7 +201,7 @@
     {
       "id": "MIT-1",
       "title": "Golden report over all hooks",
-      "status": "VERIFIED",
+      "status": "FAILED",
       "type": "protective",
       "mitigates": [
         "RISK-1"
@@ -240,7 +218,7 @@
     {
       "id": "RISK-1",
       "title": "A hook silently drops traces, so the report over-claims coverage",
-      "status": "MITIGATED",
+      "status": "FAILED",
       "severity": "high",
       "likelihood": "possible",
       "residual_severity": null,
@@ -263,10 +241,45 @@
     }
   ],
   "modules": {},
-  "high_open_risks": [],
+  "high_open_risks": [
+    "RISK-1"
+  ],
   "pyramid_violations": [],
   "unknown_evidence": {},
   "gaps": [
+    {
+      "kind": "multi-tag",
+      "entity": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls",
+      "message": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls declares REQ-3, REQ-1; a test case verifies at most one requirement, so it verifies none of them until its evidence names one",
+      "route": "autonomous"
+    },
+    {
+      "kind": "multi-tag",
+      "entity": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids",
+      "message": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids declares REQ-4, REQ-1; a test case verifies at most one requirement, so it verifies none of them until its evidence names one",
+      "route": "autonomous"
+    },
+    {
+      "kind": "invalid",
+      "entity": "REQ-1",
+      "message": "quarantined case(s) name it: //tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls (multi-tag), //tests/integration:rust_hook_test#rust_hook_test::multiple_ids (multi-tag); it verifies nothing through them until each has one owner",
+      "route": "autonomous",
+      "demanded_level": "simulation"
+    },
+    {
+      "kind": "invalid",
+      "entity": "REQ-3",
+      "message": "quarantined case(s) name it: //tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls (multi-tag); it verifies nothing through them until each has one owner",
+      "route": "autonomous",
+      "demanded_level": "sil"
+    },
+    {
+      "kind": "invalid",
+      "entity": "REQ-4",
+      "message": "quarantined case(s) name it: //tests/integration:rust_hook_test#rust_hook_test::multiple_ids (multi-tag); it verifies nothing through them until each has one owner",
+      "route": "autonomous",
+      "demanded_level": "sil"
+    },
     {
       "kind": "failed",
       "entity": "REQ-5",
@@ -281,6 +294,18 @@
       "route": "human-gate",
       "demanded_level": "hil",
       "provided_level": "simulation"
+    },
+    {
+      "kind": "unpinned-sets",
+      "entity": "",
+      "message": "membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3, REQ-4, REQ-5, REQ-6; lock them with `rr sets lock --write`",
+      "route": "autonomous"
+    },
+    {
+      "kind": "high-risk-open",
+      "entity": "RISK-1",
+      "message": "high risk; mitigation is FAILED",
+      "route": "human-gate"
     }
   ]
 }

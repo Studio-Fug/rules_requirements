@@ -12,7 +12,16 @@ evidence = ingest.collect(["bazel-testlogs/**/test.xml"])
 matrix = build_matrix(model, evidence, current_build={"dut_git_sha": "abc123"})
 with open("report.html", "w", encoding="utf-8") as fh:
     fh.write(report.render_html(matrix))
+
+# Who owns each case, and each entity's verification set:
+owner = matrix.attribution.owner  # CaseKey -> one entity id
+for member in matrix.attribution.members_of("REQ-1"):
+    print(member.key, member.state, member.via)
 ```
+
+`build_matrix` always runs {py:func}`rules_requirements.attribution.attribute`,
+the one function that decides which entity a test case verifies; verdicts read
+nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
 
 ## Model
 
@@ -76,7 +85,7 @@ with open("report.html", "w", encoding="utf-8") as fh:
 
 ```{eval-rst}
 .. automodule:: rules_requirements.trace
-   :members: build_matrix, Matrix, Verdict, EvidenceRef, Gap, classify, is_stale, route_for, find_gaps
+   :members: build_matrix, Matrix, Verdict, SetVerdict, verdict_from_members, EvidenceRef, Gap, classify, route_for, find_gaps
 
 .. automodule:: rules_requirements.annotations
    :members: Reference, extract, scan, candidate_files, unknown_references, is_test_path

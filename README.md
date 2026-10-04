@@ -177,11 +177,13 @@ include only model files, and the server is local-only by default (see the
 
 | Status           | Applies to  | Meaning                                                     |
 | ---------------- | ----------- | ----------------------------------------------------------- |
-| `VERIFIED`       | REQ, MIT    | passing evidence at or above the demanded rigor             |
-| `UNDER-VERIFIED` | REQ         | passing evidence, but below the demand — or only stale      |
+| `VERIFIED`       | REQ, MIT    | its whole verification set passed, at or above the demanded rigor |
+| `UNDER-VERIFIED` | REQ         | the set passed, but below the demand, stale, or only on a retry |
+| `INCOMPLETE`     | REQ         | part of the set is missing, did not run or was skipped      |
+| `INVALID`        | REQ, UN, MIT | a quarantined test case names it: a case verifies at most one requirement |
 | `PARTIAL`        | REQ, UN, MIT, RISK | some of what it rolls up is verified                 |
 | `FAILED`         | all         | a test for it (or for something it rolls up) failed         |
-| `UNVERIFIED`     | REQ, MIT    | no evidence                                                 |
+| `UNVERIFIED`     | REQ, MIT    | no evidence, or none of it ran                              |
 | `VALIDATED` / `UNVALIDATED` | UN | every satisfying requirement verified / none        |
 | `MITIGATED` / `OPEN` | RISK   | every mitigation verified / none                            |
 

@@ -180,7 +180,7 @@ def test_collect_walks_dirs_and_skips_unknown(tmp_path):
     ev = ingest.collect([str(tmp_path / "logs"), "", str(tmp_path / "missing")])
     assert len(ev.files) == 2
     assert len(ev.skipped_files) == 2
-    assert [c.name for c in ev.for_id("REQ-1")] == ["x", "y"]
+    assert [c.name for c in ev.cases if "REQ-1" in c.declared] == ["x", "y"]
     globbed = ingest.collect([str(tmp_path / "logs" / "**" / "test.xml")])
     assert len(globbed.cases) == 3
     assert next(ingest.iter_cases(globbed)).name == "x"
@@ -241,7 +241,7 @@ def test_libtest_ingestor_reads_sidecar(tmp_path):
     path = write(tmp_path, "run.libtest.txt", LIBTEST)
     write(tmp_path, "run.rrtrace.jsonl", json.dumps({"test": "top_level", "requirements": ["REQ-7"]}) + "\n")
     ev = ingest.collect([path])
-    assert [c.name for c in ev.for_id("REQ-7")] == ["top_level"]
+    assert [c.name for c in ev.cases if "REQ-7" in c.declared] == ["top_level"]
     alone = write(tmp_path, "solo/x.libtest", LIBTEST)
     assert len(ingest.collect([alone]).cases) == 5
 
@@ -298,7 +298,7 @@ def test_custom_ingestor_registration(tmp_path):
     try:
         ev = ingest.collect([path])
         assert [(c.name, c.status) for c in ev.cases] == [("adds", "passed"), ("subtracts", "failed")]
-        assert ev.for_id("REQ-1")[0].name == "adds"
+        assert next(c for c in ev.cases if "REQ-1" in c.declared).name == "adds"
         only = ingest.collect([path], only=["junit"])
         assert only.cases == []
     finally:
@@ -588,7 +588,9 @@ def test_suite_level_requirements_are_not_inherited(tmp_path):
         )
     ]
     assert "[suite-level-requirement]" in str(ev.issues[0]) and "not inherited" in str(ev.issues[0])
-    assert ev.for_id("REQ-1") == [] and ev.for_id("REQ-4") == [own]
+    assert [c for c in ev.cases if "REQ-1" in c.declared] == [] and [c for c in ev.cases if "REQ-4" in c.declared] == [
+        own
+    ]
 
 
 def test_nested_testcases_become_a_scope(tmp_path):

@@ -3,22 +3,18 @@
 
 Since ingest records every declared id (B2), a case can name two ids through
 paths v0.2 never read: ``requirement="REQ-1 REQ-2"`` (whitespace) and an
-``[rr:ID]`` name tag next to a property. Only attribution (B3) and a verdict
-engine that reads nothing but attribution (B4) turn such a case into a
-``multi-tag`` quarantine. Until both have landed, the v0.2 engine in trace.py
-still counts that case once for each id: the intermediate tree must never be
-released, tagged or shipped on its own.
+``[rr:ID]`` name tag next to a property. Attribution (B3) turns such a case
+into a ``multi-tag`` quarantine, and the verdicts (B4) read nothing but
+attribution, so the case counts for neither id and both read INVALID.
 
-These tests make that mechanical:
+These tests keep it that way:
 
 * ``test_multi_tag_cases_verify_no_requirement`` is the milestone regression
-  test, with exactly the review's input. It is a strict xfail while trace.py
-  has no INVALID status, and a plain test once it has one, so B4 cannot land
-  without making it pass (and cannot forget to drop the marker).
+  test, with exactly the review's input (a strict xfail until B4 landed).
 * ``test_no_release_without_quarantine`` fails as soon as the package claims
   0.3.0 (or later) while trace.py cannot quarantine.
 * ``test_evidence_guide_says_so_while_pending`` keeps the evidence guide
-  honest: it carries the interim note exactly while quarantine is pending.
+  honest: it carried an interim note exactly while quarantine was pending.
 """
 
 import os
@@ -61,14 +57,19 @@ def test_ingest_keeps_both_ids_of_each_case(matrix):
     assert [r.declared for r in index_cases(ev).values()] == [("REQ-1", "REQ-2"), ("REQ-1", "REQ-2")]
 
 
-@pytest.mark.xfail(PENDING, strict=True, reason="multi-tag quarantine lands with attribution (M2 B3+B4)")
 def test_multi_tag_cases_verify_no_requirement(matrix):
     mx, _ = matrix
+    assert not PENDING, "trace.py has no INVALID status: multi-tag cases would count for every id they name"
     for rid in ("REQ-1", "REQ-2"):
         verdict = mx.verdicts[rid]
         assert verdict.status == INVALID, (rid, verdict.status)
         # Neither case counts as passing evidence of either requirement.
         assert not [e for e in verdict.evidence if e.status == "passed"], (rid, verdict.evidence)
+        assert [m.state for m in verdict.members] == ["quarantined", "quarantined"], verdict.members
+    # Both cases are quarantined multi-tags that own nothing.
+    att = mx.attribution
+    assert [(q.code, q.entities) for q in att.quarantined] == [("multi-tag", ("REQ-1", "REQ-2"))] * 2
+    assert dict(att.owner) == {}
 
 
 def _version(text):

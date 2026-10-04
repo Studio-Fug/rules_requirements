@@ -128,6 +128,11 @@ def _ids(value: Any) -> tuple[str, ...]:
 
 _ID_FIELDS = frozenset(("declared", "suite_declared"))
 
+_FOR_ID_WARNING = (
+    "Evidence.for_id is deprecated: it returns the cases that declare an id (tags), which is not the set "
+    "of cases the entity owns; use build_matrix(...).attribution.members_of(entity_id)"
+)
+
 _ALIAS_WARNING = (
     "TestCase.requirements is deprecated: use TestCase.declared. A case's declared ids are tags, "
     "not owners; rules_requirements.attribution decides which requirement a case verifies"
@@ -386,7 +391,7 @@ class Evidence:
     cases: list[TestCase] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)  # nothing understood them
-    target_status: dict[str, str] = field(default_factory=dict)
+    target_status: dict[str, str] = field(default_factory=dict)  # kept for readers; no verdict reads it
     issues: list[IngestIssue] = field(default_factory=list)
 
     def add(self, case: TestCase) -> None:
@@ -407,7 +412,13 @@ class Evidence:
                 self.issues.append(issue)
 
     def for_id(self, entity_id: str) -> list[TestCase]:
-        """Cases whose evidence *declares* ``entity_id`` — tags, not ownership."""
+        """Cases whose evidence *declares* ``entity_id`` — tags, not ownership.
+
+        Deprecated: no verdict reads it. The cases an entity owns are its
+        members in :meth:`rules_requirements.attribution.Attribution.members_of`
+        (``build_matrix(...).attribution``).
+        """
+        warnings.warn(_FOR_ID_WARNING, DeprecationWarning, stacklevel=2)
         return [c for c in self.cases if entity_id in c.declared]
 
 

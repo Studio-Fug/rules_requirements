@@ -28,11 +28,16 @@ The command prints a one-line summary to standard error and exits with:
 | Exit | When |
 | ---- | ---- |
 | `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds. |
-| `1` | `--fail-on failed` and a requirement is FAILED; `--fail-on unverified` and one is FAILED or UNVERIFIED; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
+| `1` | `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
 | `2` | The model is invalid, or an `--out` extension is unknown. |
 
 `--fail-on` defaults to `none`: the report describes the state of the product,
 and whether that state should fail a pipeline is a separate decision.
+
+Each quarantined test case — one whose evidence names several ids, that two
+entities claim, or whose test code two entities own — prints one
+`ATTRIBUTION ERROR: <code>: <detail>` line to standard error, and every entity
+it names reads INVALID ({ref}`evidence`).
 
 ## JSON (`rules_requirements/report/v1`)
 
@@ -45,7 +50,7 @@ a golden file and reviewed as a diff. Top-level keys:
 | `schema` | `"rules_requirements/report/v1"` |
 | `title` | `--title`, else the project's `name`, else `"Requirements traceability"` |
 | `project` | The model's `project:` metadata |
-| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases`, `gaps` |
+| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases`, `gaps` |
 | `levels` | The configured levels: `{name, rank}` (`rank` is `null` for unordered levels) |
 | `user_needs`, `requirements`, `mitigations`, `risks`, `test_methods` | One object per entity (below) |
 | `modules` | `{module: status}` rollup |
@@ -55,10 +60,14 @@ a golden file and reviewed as a diff. Top-level keys:
 | `gaps` | The gap queue (below) |
 
 Every entity object has `id`, `title` and `status`, plus `description`,
-`open_notes` (`[{kind, text}]`) and `evidence` when present. An `evidence` entry
-is `{name, status, level}` with, when applicable, `target` (the build label),
-`kind: "target"` (whole-target `verified_by` evidence), `stale: true`, and
-`message` (the first line, at most 300 characters, of a failure).
+`open_notes` (`[{kind, text}]`) and `evidence` when present. `evidence` lists the
+cases the entity owns (the owned members of its
+{ref}`verification set <evidence>`): each entry is
+`{name, status, level}` — the case path, its member state, its level — with,
+when applicable, `target` (the build label or pseudo-target), `stale: true`,
+and `message` (the first line, at most 300 characters, of a failure). Since 0.3
+a whole-target claim lists the target's cases, so `kind: "target"` entries no
+longer occur, and a quarantined case is listed for no entity.
 
 | Section | Additional keys |
 | ------- | --------------- |

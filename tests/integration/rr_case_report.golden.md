@@ -1,6 +1,6 @@
 # rules_requirements rr_case.h integration
 
-**0/1** user needs validated · **2/3** requirements verified (0 under-verified, 1 failed, 0 unverified) · **0/0** risks mitigated · 4 test cases · 1 gaps
+**0/1** user needs validated · **2/3** requirements verified (0 under-verified, 1 failed, 0 invalid, 0 incomplete, 0 unverified) · **0/0** risks mitigated · 4 test cases · 2 gaps
 
 ## User needs — validation
 
@@ -21,3 +21,4 @@
 | Kind | Entity | Route | Detail |
 |---|---|---|---|
 | failed | REQ-2 | autonomous | failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement |
+| unpinned-sets |  | autonomous | membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3; lock them with `rr sets lock --write` |

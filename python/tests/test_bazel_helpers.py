@@ -56,7 +56,7 @@ def test_run_tests(tmp_path, monkeypatch, capsys):
         "@ext+//x:silent_pass": "passed",
         "//pkg:hang": "failed",
     }
-    assert ev.for_id("REQ-1")[0].target == "//pkg:writes"
+    assert next(c for c in ev.cases if "REQ-1" in c.declared).target == "//pkg:writes"
     assert "TIMEOUT" in (out / "pkg" / "hang" / "test.log").read_text()
     assert "FAILED (exit 3)" in capsys.readouterr().err
 

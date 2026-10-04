@@ -159,7 +159,9 @@ _ICON = {
     "MITIGATED": "✅",
     "UNDER-VERIFIED": "🟠",
     "PARTIAL": "🟡",
+    "INCOMPLETE": "🟡",
     "FAILED": "❌",
+    "INVALID": "❌",
     "UNVERIFIED": "⚪",
     "UNVALIDATED": "⚪",
     "OPEN": "⚪",
@@ -182,6 +184,7 @@ def render_markdown(matrix: Matrix, title: str = "") -> str:
         f"**{s['user_needs_validated']}/{s['user_needs']}** user needs validated · "
         f"**{s['requirements_verified']}/{s['requirements']}** requirements verified "
         f"({s['requirements_under_verified']} under-verified, {s['requirements_failed']} failed, "
+        f"{s['requirements_invalid']} invalid, {s['requirements_incomplete']} incomplete, "
         f"{s['requirements_unverified']} unverified) · "
         f"**{s['risks_mitigated']}/{s['risks']}** risks mitigated · "
         f"{s['test_cases']} test cases · {s['gaps']} gaps"
