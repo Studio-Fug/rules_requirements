@@ -34,6 +34,11 @@ from rules_requirements.ingest.libtest import merge_trace, parse_libtest
         # rr_evidence's output tree (<name>/testlogs) and a copy of it.
         ("bazel-out/k8-fastbuild/bin/r/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
         ("ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
+        # An ancestor directory merely named testlogs, above a real rr_evidence
+        # testlogs tree and with no recognised bazel root: the innermost
+        # testlogs wins (origin/main's behaviour), not the leftmost one.
+        ("/tmp/testlogs/proj/bazel-bin/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
+        ("bazel-out/k8-fastbuild/bin/x/testlogs/ev/testlogs/hitl/flash_test/test.xml", "//hitl:flash_test"),
     ],
 )
 def test_target_from_path(path, label):

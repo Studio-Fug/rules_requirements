@@ -57,7 +57,9 @@ _RUN_LEVELS = ("test.outputs", "test_attempts")
 # own (bazel-out/<cfg>/testlogs). Matched leftmost, so a package that has a
 # directory named testlogs is still a package.
 _TESTLOGS_ROOT = re.compile(r"(?:^|/)(?:bazel-testlogs|bazel-out/[^/]+/testlogs)/")
-# Any other testlogs directory (rr_evidence's output, <name>/testlogs).
+# Any other testlogs directory (rr_evidence's output, <name>/testlogs). With no
+# recognised bazel root present, the *innermost* (rightmost) one is the root, so
+# an ancestor directory merely named testlogs does not swallow the package.
 _TESTLOGS_DIR = re.compile(r"(?:^|/)testlogs/")
 
 
@@ -70,7 +72,11 @@ def target_from_path(path: str) -> str:
     ``test_attempts/attempt_1.xml``). Returns "" outside a testlogs tree.
     """
     norm = path.replace("\\", "/")
-    m = _TESTLOGS_ROOT.search(norm) or _TESTLOGS_DIR.search(norm)
+    m = _TESTLOGS_ROOT.search(norm)
+    if m is None:
+        # No recognised bazel root: the innermost testlogs/ is the root.
+        generic = list(_TESTLOGS_DIR.finditer(norm))
+        m = generic[-1] if generic else None
     if m is None:
         return ""
     parts = norm[m.end() :].split("/")
