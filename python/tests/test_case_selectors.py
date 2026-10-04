@@ -163,9 +163,9 @@ def test_escape_round_trips():
 @pytest.mark.parametrize(
     "bad, why",
     [
-        ("café", "not in Unicode NFC"),  # NFD: 'e' + combining acute
-        ("m::café*", "not in Unicode NFC"),
-        ("Å", "not in Unicode NFC"),  # ANGSTROM SIGN, NFC is U+00C5
+        ("\u0065\u0301t\u0065\u0301", "not in Unicode NFC"),  # NFD: 'e' + combining acute
+        ("m::\u0065\u0301t\u0065\u0301*", "not in Unicode NFC"),
+        ("\u212b", "not in Unicode NFC"),  # ANGSTROM SIGN, NFC is U+00C5
         ("m::probe [rr:PR-1]", "name tag"),
         ("m::probe [rr:PR-1] ok", "name tag"),
         ("*probe [rr:PR-1]", "name tag"),
@@ -177,7 +177,7 @@ def test_selectors_that_could_never_match_a_canonical_case_path(bad, why):
 
 
 def test_canonical_selectors_with_brackets_are_fine():
-    cs.check("m::café")  # NFC
+    cs.check("m::\u00e9t\u00e9")  # NFC
     cs.check("suite [rr:PR-1]::*")  # a classname keeps its tag; only names lose theirs
     cs.check("suite [rr:PR-1]::leaf")
     cs.check("m::probe [rr:PR-1]*")  # the tag may be followed by more of the name

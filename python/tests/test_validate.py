@@ -323,7 +323,7 @@ def test_a_malformed_item_claims_the_whole_target(tmp_path, item):
 
 
 def test_non_nfc_selectors_are_bad_selectors_not_a_second_case(tmp_path):
-    nfd, nfc = "m::caf\u0065\u0301", "m::caf\u00e9"
+    nfd, nfc = "m::\u0065\u0301t\u0065\u0301", "m::\u00e9t\u00e9"
     issues = issues_for(
         tmp_path, reqs(f'[{{target: //a:t, cases: ["{nfd}"]}}]', f'[{{target: //a:t, cases: ["{nfc}"]}}]')
     )
@@ -442,7 +442,7 @@ def test_a_consistent_lock_is_valid(tmp_path):
         ("[1, 2]\n", "one YAML mapping"),
         (LOCK_HEAD + "  //web:a_test: {a: REQ-1}\nextra: 1\n", "unknown key 'extra'"),
         (LOCK_HEAD + "  //web:a_test:\n    ? [x, y]\n    : REQ-1\n", "found unhashable key"),
-        (LOCK_HEAD + '  //web:a_test:\n    "a::caf\\u0065\\u0301": REQ-1\n', "not a canonical case path"),
+        (LOCK_HEAD + '  //web:a_test:\n    "a::\\u0065\\u0301t\\u0065\\u0301": REQ-1\n', "not a canonical case path"),
         (LOCK_HEAD + '  //web:a_test:\n    " a::one": REQ-1\n    "a::one": REQ-2\n', "not a canonical case path"),
     ],
 )
