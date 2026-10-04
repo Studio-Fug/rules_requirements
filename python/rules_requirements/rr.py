@@ -41,7 +41,15 @@ def verifies(*ids: Any, level: str = "", artifact: dict[str, str] | None = None)
         prev = getattr(obj, "__rr__", None) or {}
         new = _ids(ids)
         named = split_ids(new)
-        before = split_ids(list(prev.get("ids", [])))
+        # Only the object's own declaration (a stacked decorator) is the same
+        # scope: a subclass's ids are nearer than its base class's, not added
+        # to them. Inherited ids are still recorded, as in 0.1.
+        try:
+            own = vars(obj).get("__rr__") or {}
+        except TypeError:  # no __dict__
+            own = prev
+        own_ids = list(own.get("own_ids", own.get("ids", [])))
+        before = split_ids(own_ids)
         subject = f"rr.verifies on {getattr(obj, '__qualname__', obj)!r}"
         if len(named) > 1:
             warn_multiple(subject, named)
@@ -49,6 +57,7 @@ def verifies(*ids: Any, level: str = "", artifact: dict[str, str] | None = None)
             warn_multiple(f"{subject} (stacked decorators)", before + named)
         obj.__rr__ = {  # type: ignore[attr-defined]
             "ids": list(prev.get("ids", [])) + new,
+            "own_ids": own_ids + new,  # without a base class's (for the checks above)
             "level": (level or prev.get("level", "")).lower(),
             "artifact": {**(prev.get("artifact") or {}), **(artifact or {})},
         }

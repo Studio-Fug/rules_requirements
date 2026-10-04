@@ -34,15 +34,33 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
   skips it. Tests reached only through a symlink, or collected only in
   another environment, are outside the check.
 - `rr --version`.
+- `rr scan` recognises `RR_CASE(name, "ID")` as a verifies annotation.
+- Ingest: the public `TestCase.suite` field; Bazel's generated result, and our
+  writers' whole-target results, are marked `rr.synthetic=true` (one
+  `[target]` case), their exit-status errors `rr.scope=target`; a testcase's
+  `file` attribute fills `rr.file`.
+- Public modules `rules_requirements.case_keys` and
+  `rules_requirements.hooks.ids`; the worksheet schema
+  (`schema/worksheet.schema.json`), published with the docs.
 
 ### Changed
 
 - `rr_evidence` keeps tests in the action's process group; its timeout sends
   `SIGTERM`, then `SIGKILL`, and never waits on a pipe an escaped process holds.
+- `JUnitWriter`: a bare id string is one id (0.1.0 split it into characters);
+  `""` is still no requirement.
+- unittest: a test whose subtest failed also gets a failed case of its own.
 
 ### Fixed
 
-- `rr_wrapped_test` accepts a `py_binary` as `test` under Bazel 7.
+- `rr_wrapped_test` accepts a `py_binary` as `test` under Bazel 7, and still
+  accepts a checked-in script or a genrule output, as 0.1.0 did.
+- Labels of targets named `run_*` / `shard_*` / `attempt_*`, or in a package
+  with a `testlogs` directory, are recovered correctly from `bazel-testlogs`.
+- The pytest runner pins `--rootdir` to the runfiles tree under Bazel.
+- `rr::RunCases` called twice in one binary keeps both suites in the JUnit.
+- `rr migrate apply` resolves cases only to pytest test modules, and never a
+  non-Python case to a Python file.
 - `rr wrap --junit-xml ... -- CMD` and `rr wrap --help` work (the CLI
   rejected options before the command).
 
@@ -50,7 +68,8 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
 
 - Several requirement ids for one test case (pytest markers, `@rr.verifies`,
   `JUnitWriter` lists): still recorded, now with a
-  `MultipleRequirementsWarning` (`DeprecationWarning`).
+  `MultipleRequirementsWarning` (`DeprecationWarning`); googletest
+  `RR_VERIFIES` and Rust `rr::verifies!` warn on stderr (RR-E101).
 
 ### Deferred to 0.3.0
 
@@ -60,7 +79,9 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
 ### Compatibility
 
 - Additive: no verdict, report or model change; the report goldens are
-  unchanged.
+  unchanged. The new warnings are `DeprecationWarning`s: a project with
+  `filterwarnings = error` gets its multi-id tests erroring, which reads as
+  FAILED evidence.
 - 0.3.0 will quarantine multi-id cases (they count for no requirement), make
   a target named by two requirements a model error, and add per-case selectors.
 

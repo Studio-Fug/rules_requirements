@@ -4,11 +4,20 @@
 //! ```
 //! #[test]
 //! fn cutoff_at_limit() {
-//!     rr::verifies!("REQ-4", "REQ-5");              // ids this test verifies
+//!     rr::verifies!("REQ-4");                       // the ONE requirement this test verifies
+//!     assert!(true);
+//! }
+//!
+//! #[test]
+//! fn cutoff_logged() {
 //!     rr::verifies!("REQ-6"; level = "sil");        // ...optionally with a level
 //!     assert!(true);
 //! }
 //! ```
+//!
+//! A test case verifies at most one requirement: several ids in one test (in
+//! one call, or over several calls) are still all recorded in 0.2, but
+//! deprecated; `rr wrap` warns about them on stderr (RR-E101).
 //!
 //! libtest has no stable machine-readable output, so traces are recorded out of
 //! band: each call appends one JSON line to the file named by `$RR_TRACE_FILE`,

@@ -180,3 +180,49 @@ def test_nonzero_exit_with_all_pass_report_is_an_error(tmp_path, monkeypatch):
     assert ev.target_status == {"//pkg:leaky": "error", "//pkg:envcheck": "passed"}
     (exit_case,) = [c for c in ev.cases if c.name == "exit-status"]
     assert "exited with 23" in exit_case.message and exit_case.requirements == ("REQ-2",)
+
+
+def test_no_junit_result_is_the_targets_single_case(tmp_path, monkeypatch):
+    """rr_evidence's case for a test that wrote no JUnit is the same
+    [target] case as Bazel's generated test.xml for that target: one key."""
+    from conftest import write
+
+    from rules_requirements.case_keys import SYNTHETIC_PATH, CaseKey, index_cases
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    _exe(tmp_path / "bin" / "flash_test", "print('flashed')\n")
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(["run-tests", "--out", str(out), "--test", "//hitl:flash_test=bin/flash_test=_main"])
+    write(
+        tmp_path,
+        "bazel-testlogs/hitl/flash_test/test.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
+        '<testsuite name="hitl/flash_test" tests="1" failures="0" errors="0">\n'
+        '<testcase name="hitl/flash_test" status="run" duration="0" time="0"></testcase>\n'
+        "<system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n"
+        "<![CDATA[flashed]]>\n</system-out>\n</testsuite>\n</testsuites>\n",
+    )
+    rows = index_cases(ingest.collect([str(tmp_path / "bazel-testlogs"), str(out)]))
+    assert list(rows) == [CaseKey("//hitl:flash_test", SYNTHETIC_PATH)]
+    assert rows[CaseKey("//hitl:flash_test", SYNTHETIC_PATH)].status == "passed"
+
+
+def test_exit_status_case_is_target_scope(tmp_path, monkeypatch):
+    from rules_requirements.case_keys import index_cases
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    _exe(
+        tmp_path / "bin" / "leaky",
+        "import os, sys\n"
+        "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite><testcase name=\"ok\"><properties>"
+        '<property name="requirement" value="REQ-2"/></properties></testcase></testsuite>\')\n'
+        "sys.exit(23)\n",
+    )
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(["run-tests", "--out", str(out), "--test", "//pkg:leaky=bin/leaky=_main"])
+    rows = {k.path: r for k, r in index_cases(ingest.collect([str(out)])).items()}
+    assert rows["//pkg:leaky::exit-status"].target_scope
+    assert rows["//pkg:leaky::exit-status"].declared == ("REQ-2",)  # 0.2 verdicts unchanged
+    assert not rows["ok"].target_scope

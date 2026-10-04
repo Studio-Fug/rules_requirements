@@ -25,6 +25,7 @@ import time
 from typing import Any
 
 from rules_requirements.hooks.junit_writer import JUnitWriter
+from rules_requirements.ingest.junit import SYNTHETIC, TARGET_SCOPE
 
 
 def _label_dir(label: str) -> str:
@@ -163,18 +164,20 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
                 list(dict.fromkeys(ids)),
                 "error",
                 f"test binary exited with {code} although its report shows no failure\n{log[-4000:]}",
+                properties=TARGET_SCOPE,  # about the run, not a case of it
             )
             w.write(os.path.join(logdir, "test.exit.xml"))
         if not os.path.exists(xml) or os.path.getsize(xml) == 0:
             # Like Bazel: a test that writes no JUnit gets one synthetic case.
             w = JUnitWriter(label, classname=label, file="")
             status = "passed" if code == 0 else "failed"
-            w.add(
+            w._append(
                 label.rsplit(":", 1)[-1],
                 (),
                 status,
                 "" if code == 0 else f"exit code {code}\n{log[-4000:]}",
                 time.monotonic() - start,
+                properties=SYNTHETIC,  # the target's [target] case, as Bazel's own would be
             )
             w.write(xml)
         shutil.rmtree(tmp, ignore_errors=True)

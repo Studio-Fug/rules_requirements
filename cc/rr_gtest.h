@@ -5,7 +5,7 @@
 //   #include "rr_gtest.h"   // Bazel: deps = ["@rules_requirements//cc:gtest"]
 //
 //   TEST(Interlock, CutsHeaterAtLimit) {
-//     RR_VERIFIES("REQ-4", "REQ-5");   // entity ids this test verifies
+//     RR_VERIFIES("REQ-4");            // the ONE requirement this test verifies
 //     RR_LEVEL("sil");                  // optional: rigor this test provides
 //     RR_ARTIFACT("firmware_build_id", kBuildId);  // optional: for staleness
 //     ...
@@ -16,14 +16,17 @@
 // case — as <property> elements in current releases, as attributes in older
 // ones; the rules_requirements JUnit ingestor reads both. RecordProperty keeps
 // one value per key, so the ids are recorded as a comma-separated
-// "requirements" property. `RR_VERIFIES` may be called more than once; ids
-// accumulate.
+// "requirements" property. A test case verifies at most one requirement:
+// several ids on one test (in one call, or over several calls) are still all
+// recorded in 0.2, but deprecated, and warn on stderr [RR-E101].
 
 #ifndef RULES_REQUIREMENTS_RR_GTEST_H_
 #define RULES_REQUIREMENTS_RR_GTEST_H_
 
+#include <cstdio>
 #include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -48,13 +51,45 @@ inline std::string& CurrentIds() {
 }
 }  // namespace internal
 
+namespace internal {
+// The distinct ids of a comma list, in first-seen order.
+inline std::vector<std::string> Distinct(const std::string& list) {
+  std::vector<std::string> out;
+  std::string::size_type start = 0;
+  while (!list.empty() && start <= list.size()) {
+    std::string::size_type end = list.find(',', start);
+    if (end == std::string::npos) end = list.size();
+    const std::string id = list.substr(start, end - start);
+    bool seen = id.empty();
+    for (const std::string& o : out) seen = seen || o == id;
+    if (!seen) out.push_back(id);
+    start = end + 1;
+  }
+  return out;
+}
+}  // namespace internal
+
 // Records `ids` as verified by the currently running test.
 inline void Verifies(std::initializer_list<const char*> ids) {
   std::string& all = internal::CurrentIds();
+  const std::vector<std::string>::size_type before = internal::Distinct(all).size();
   for (const char* id : ids) {
     if (id == nullptr || *id == '\0') continue;
     if (!all.empty()) all += ",";
     all += id;
+  }
+  const std::vector<std::string> named = internal::Distinct(all);
+  if (before < 2 && named.size() >= 2) {
+    const ::testing::TestInfo* info = ::testing::UnitTest::GetInstance()->current_test_info();
+    const std::string test =
+        info != nullptr ? std::string(info->test_suite_name()) + "." + info->name() : std::string("(no test)");
+    std::string names;
+    for (const std::string& id : named) names += (names.empty() ? "" : ", ") + id;
+    std::fprintf(stderr,
+                 "rr_gtest: warning: %s names %s; a test case verifies at most one requirement [RR-E101]. "
+                 "Every id is still recorded for now, but multi-id declarations are deprecated: from 0.3 such a "
+                 "case counts for no requirement, and 0.4 rejects it. Split the test, or keep one id.\n",
+                 test.c_str(), names.c_str());
   }
   ::testing::Test::RecordProperty("requirements", all);
 }

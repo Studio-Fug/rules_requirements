@@ -150,3 +150,20 @@ jobs:
           python -m venv /tmp/wheel && /tmp/wheel/bin/pip install dist/*.whl
           /tmp/wheel/bin/rr validate tests/integration/model.yaml
           /tmp/wheel/bin/python -c "import rules_requirements._vendor.yaml, rules_requirements.hooks.pytest_plugin"
+          /tmp/wheel/bin/rr --version | grep -q "0.2.0"
+          XML_OUTPUT_FILE=/tmp/c.xml /tmp/wheel/bin/rr case --name x --requirement REQ-1
+          grep -q 'value="REQ-1"' /tmp/c.xml
+          /tmp/wheel/bin/rr cases --evidence python/tests/fixtures/migrate/pyrepo/evidence
+          /tmp/wheel/bin/rr migrate plan --model python/tests/fixtures/migrate/pyrepo/requirements \
+            --evidence python/tests/fixtures/migrate/pyrepo/evidence --out /tmp/p.rrplan
+          test -s /tmp/p.rrplan
+      - name: Smoke-test migrate apply (and its collection check) from the wheel
+        run: |
+          /tmp/wheel/bin/pip install pytest
+          cp -r python/tests/fixtures/migrate/pyrepo /tmp/pyrepo
+          cd /tmp/pyrepo
+          # exits 1: the fixture has a file the codemod refuses on purpose
+          /tmp/wheel/bin/rr migrate apply decided.rrplan --stage tags --dry-run --partial > /tmp/apply.log 2>&1 || true
+          cat /tmp/apply.log
+          grep -q "would rewrite app/tests/test_config.py" /tmp/apply.log
+          ! grep -q -e "Pass --no-collect-check" -e "collection check refused" /tmp/apply.log

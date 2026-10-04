@@ -386,7 +386,7 @@ def test_reporter_correlates_a_diagnostic_only_with_its_own_case(tmp_path, event
 @needs_reporters
 def test_reporter_correlates_a_diagnostic_with_its_case(tmp_path):
     rows = _reporter_rows(tmp_path, _case() + [_diag()])
-    assert [(r["kind"], r.get("case")) for r in rows] == [("case", None), ("diag", 0)]
+    assert [(r["kind"], r.get("case")) for r in rows] == [("start", None), ("case", None), ("diag", 0), ("end", None)]
 
 
 @needs_reporters
@@ -688,3 +688,62 @@ def test_the_node_ci_asks_for_is_there():
     if not want:
         pytest.skip("RR_NODE_MIN is not set")
     assert int(want) <= _MAJOR, f"{_NODE!r} is Node {_MAJOR or 'unknown'}, CI wants >= {want}"
+
+
+@needs_reporters
+def test_a_clean_exit_before_reporting_ends_is_a_target_scope_error(run_fixture):
+    """process.exit(0) in a test drops it, every later test and maybe earlier
+    ones from the report: the run must not read as passing."""
+    r = run_fixture(
+        (
+            "exits_early",
+            """
+            const { test } = require("node:test");
+            test("first", () => {});
+            test("bails", async () => {
+              await new Promise((resolve) => setTimeout(resolve, 200));
+              process.exit(0);
+            });
+            test("never", () => {
+              throw new Error("never runs");
+            });
+            """,
+        )
+    )
+    assert r.code == 0
+    incomplete = [c for c in r.cases if c.name == "<incomplete>"]
+    assert len(incomplete) == 1 and incomplete[0].status == "error"
+    assert incomplete[0].properties["rr.scope"] == "target"
+    assert "before node:test finished reporting" in incomplete[0].message
+    assert "never" not in [c.name for c in r.cases]
+
+
+@needs_reporters
+def test_a_complete_run_is_not_incomplete(run_fixture):
+    for fixture in ("nesting", "zero_tests", "args"):
+        r = run_fixture(fixture)
+        assert "<incomplete>" not in [c.name for c in r.cases], fixture
+
+
+@needs_reporters
+def test_two_tests_reporting_as_one_case_key_warn(run_fixture):
+    r = run_fixture(
+        (
+            "collide",
+            """
+            const { describe, test } = require("node:test");
+            describe("parse > edge", () => {
+              test("empty", () => {});
+            });
+            describe("parse", () => {
+              describe("edge", () => {
+                test("empty", () => {});
+              });
+            });
+            """,
+        )
+    )
+    assert r.code == 0
+    assert r.paths() == ["collide > parse > edge::empty", "collide > parse > edge::empty"]
+    assert "both report as 'collide > parse > edge::empty' (one case key)" in r.stderr
+    assert "tests/node/collide.test.cjs:3:3 and tests/node/collide.test.cjs:7:5" in r.stderr

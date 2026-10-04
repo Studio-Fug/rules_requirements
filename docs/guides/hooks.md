@@ -157,7 +157,7 @@ the file.
 #include "rr_gtest.h"
 
 TEST(Interlock, TripsAtLimit) {
-  RR_VERIFIES("REQ-5");                          // ids; call again to add more
+  RR_VERIFIES("REQ-5");                          // the ONE id this test verifies
   RR_LEVEL("sil");                               // optional
   RR_ARTIFACT("firmware_build_id", kBuildId);    // optional, per key
   ...
@@ -313,9 +313,14 @@ case provides the model's `default_provided_level`.
 ```rust
 #[test]
 fn cutoff_at_limit() {
-    rr::verifies!("REQ-5");                       // ids
-    rr::verifies!("REQ-6"; level = "sil");        // ...with a level
+    rr::verifies!("REQ-5");                       // the ONE id this test verifies
     assert!(interlock::trips(35.0));
+}
+
+#[test]
+fn cutoff_is_logged() {
+    rr::verifies!("REQ-6"; level = "sil");        // ...with a level
+    assert!(interlock::logs_trip(35.0));
 }
 ```
 
@@ -433,6 +438,7 @@ anyway, every one is written (never a silent pick) and the test log carries an
 | `<stem>::<exit-status>` | node exited non-zero (or was killed) although no test failed — e.g. an unhandled rejection after the tests. |
 | `<stem>::<file>` | a root-level `after()` hook failed. Node 22 and newer still exit 0 here, so Bazel passes the target; the report does not. |
 | `<chain>::<hooks>` | a `describe` or a parent test failed outside its subtests (its own hook or body). |
+| `<stem>::<incomplete>` | node exited 0 after node:test started reporting but before it finished — `process.exit(0)` in a test, which drops that test and every later one from the report. (An exit before node:test reported anything cannot be told from a file without tests.) |
 
 The other root-level hooks fail tests instead: a failing root `before()` fails
 every top-level test with the hook's error, and every top-level `describe`
@@ -440,6 +446,9 @@ gets a `<hooks>` case carrying it (its tests are cancelled); a failing root
 `beforeEach()` / `afterEach()` fails every test it runs for.
 
 A file that registers no test at all writes an empty suite (`tests="0"`).
+Two tests that report as one case key — a `describe("a > b")` next to a
+`describe("a")` holding a `describe("b")`, or `::` inside a name — get an
+`rr_node_test: warning` in the test log naming both; rename one.
 Because these cases name no requirement, they fail every whole-target
 `verified_by` reference to the target, not the requirements its individual
 tests name.
@@ -522,6 +531,8 @@ most one requirement. {py:class}`~rules_requirements.hooks.checkplan.CheckPlan`
 records a run in those terms, including how it stopped:
 
 ```python
+import os
+
 from rules_requirements.hooks.checkplan import CheckPlan
 from rules_requirements.hooks.junit_writer import JUnitWriter
 
@@ -673,27 +684,35 @@ nothing, so the run still leaves evidence.
 ## Deprecated: several ids per test case
 
 A test case verifies at most one requirement. In 0.2 every hook still accepts
-the older multi-id forms and records every id, exactly as before, but warns
-with {py:class}`~rules_requirements.hooks.ids.MultipleRequirementsWarning` (a
-`DeprecationWarning`):
+the older multi-id forms and records every id, exactly as before, but warns:
+the Python hooks with
+{py:class}`~rules_requirements.hooks.ids.MultipleRequirementsWarning` (a
+`DeprecationWarning`), the others with an RR-E101 line on stderr:
 
 | Hook | Deprecated form | Warns |
 | ---- | --------------- | ----- |
-| pytest | a marker with several ids, or several markers at one scope naming different ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
+| pytest | a marker with several ids, several markers at one scope naming different ids, a marker and `@rr.verifies` on the same function or class naming different ids, or a `pytest.param` mark with several ids | once per declaring test (all its parameters), class or module, at the marker's line, when the first test it applies to sets up; listed in pytest's warnings summary |
 | unittest | `@rr.verifies("A", "B")`, `"A, B"`, or stacked decorators naming different ids | at the decorated definition |
 | `JUnitWriter` | a list, tuple or other iterable naming several ids, positionally or as `requirements=` | at the `add` / `case` call |
+| googletest | `RR_VERIFIES("A", "B")`, or several `RR_VERIFIES` calls in one test naming different ids | on stderr (in the test log), when the test gains its second id |
+| Rust | `rr::verifies!("A", "B")`, or several calls in one test naming different ids | `rr wrap` / `rr_rust_test`, on stderr, once per test |
 
 Ids that accumulate across scopes — a module-level `pytestmark` plus a
-function's own marker, or a class decorator plus a method decorator — are not
-a multi-id declaration and do not warn in 0.2.
+function's own marker, a `pytest.param` mark plus the function's marker, a
+class decorator plus a method decorator, or a subclass's `@rr.verifies` plus
+its base class's — are not a multi-id declaration and do not warn in 0.2: from
+0.3 the nearest one wins.
 
 From 0.3, a case whose evidence names several ids counts for no requirement
 (and every requirement it names reads INVALID); 0.4 rejects multi-id
 declarations outright. Split such a test into one test per requirement, or
 keep the one id it really verifies. To find every remaining use, turn the
-warning into an error: `pytest -W error::DeprecationWarning` (each declaration
-then errors the first test it applies to, at setup; the rest of the session
-runs), or `python -W error::DeprecationWarning` for a script.
+warning into an error: `pytest -W error::DeprecationWarning`, or
+`python -W error::DeprecationWarning` for a script. Under pytest a marker
+declaration then errors the first test it applies to, at setup, and the rest of
+the session runs; but `@rr.verifies` warns when it decorates, at import, and a
+`JUnitWriter` call made at import time warns there too, so an escalated
+warning from either is a collection error that interrupts the whole session.
 
 The hooks name the problem with a stable code:
 

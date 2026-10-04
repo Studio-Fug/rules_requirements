@@ -404,7 +404,12 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     root = _path(args.root) if args.root else _root()
     decided = migrate.decisions(doc)
     res = tag_codemod.apply_tags(
-        decided, root, only=args.only or (), unassigned=args.unassigned, line_length=args.line_length
+        decided,
+        root,
+        only=args.only or (),
+        unassigned=args.unassigned,
+        line_length=args.line_length,
+        files_of=migrate.case_files(doc),
     )
     writes = {f.path for f in res.to_write(partial=args.partial)}
     held = res.held_back(partial=args.partial)
@@ -507,7 +512,10 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
             "those, or pass --partial to write the files not linked to them",
             file=sys.stderr,
         )
-    print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
+    if args.dry_run:
+        print(f"{len(writes)} file(s) would be rewritten, {len(res.refused)} refused", file=sys.stderr)
+    else:
+        print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
     return 1 if res.blocked or check_refused else 0
 
 

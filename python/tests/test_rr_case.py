@@ -745,3 +745,40 @@ def test_the_headers_comment_prose_fits_100_columns():
     with open(os.path.join(_INCLUDE, "rr_case.h"), encoding="utf-8") as fh:
         long = [n for n, line in enumerate(fh, 1) if line.lstrip().startswith("//") and len(line.rstrip("\n")) > 100]
     assert long == [], f"cc/rr_case.h: comment lines over 100 columns: {long}"
+
+
+_TWO_CALLS = r"""
+#include "rr_case.h"
+
+RR_CASE(new_style, "REQ-1") { RR_CHECK(1 + 1 == 3); }
+
+static void legacy_a() {}
+static void legacy_b() {}
+
+int main(int argc, char** argv) {
+  const int a = rr::RunCases(argc, argv, "codec");
+  const int b = rr::RunCases(argc, argv, "codec_legacy", {{"legacy_a", legacy_a, "REQ-2"}, {"legacy_b", legacy_b}});
+  return a | b;
+}
+"""
+
+
+def test_a_second_run_cases_call_keeps_the_first_calls_suite(tmp_path):
+    """Two rr::RunCases calls in one binary: the JUnit holds both suites, so
+    the first call's failing case is not lost behind an all-green report."""
+    proc = _compile(tmp_path, _TWO_CALLS)
+    assert proc.returncode == 0, proc.stderr
+    proc, path = _run(str(tmp_path / "case_test"), tmp_path)
+    assert proc.returncode == 1 and "[  FAILED  ] codec::new_style" in proc.stdout
+    root = ET.parse(str(path)).getroot()
+    assert [s.get("name") for s in root.iter("testsuite")] == ["codec", "codec_legacy"]
+    assert (root.get("tests"), root.get("failures")) == ("3", "1")
+    cases = _cases(path)
+    assert (cases["new_style"][0], cases["new_style"][2]) == ("failure", "REQ-1")
+    assert cases["legacy_a"][:3] == ("passed", "", "REQ-2") and cases["legacy_b"][0] == "passed"
+    keys = {(c.classname, c.name): c.status for c in JUnitIngestor().ingest(str(path))}
+    assert keys == {
+        ("codec", "new_style"): "failed",
+        ("codec_legacy", "legacy_a"): "passed",
+        ("codec_legacy", "legacy_b"): "passed",
+    }

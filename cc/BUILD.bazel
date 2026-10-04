@@ -72,4 +72,5 @@ config_setting(
 exports_files([
     "BUILD.bazel",
     "rr_case.h",
+    "rr_gtest.h",
 ])

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
 from rules_requirements.ingest import STATUS_ORDER, Evidence, TestCase
-from rules_requirements.ingest.junit import SYNTHETIC_PROPERTY
+from rules_requirements.ingest.junit import ATTEMPT, SCOPE_PROPERTY, SHARD_RUN, SYNTHETIC_PROPERTY
 from rules_requirements.util import dedupe, natural_key
 
 SYNTHETIC_PATH = "[target]"
@@ -42,7 +42,6 @@ SYNTHETIC_PATH = "[target]"
 UNNAMED_PATH = "[unnamed]"
 """Path of a case whose classname and name are both empty (a key's path is never empty)."""
 
-SCOPE_PROPERTY = "rr.scope"  # "target": an exit-status/load error, never a member
 FILE_PROPERTY = "rr.file"  # test source, relative to the workspace
 
 RECORD_PREFIX = "record:"
@@ -191,11 +190,9 @@ class RunDims(NamedTuple):
     attempt: int = 0
 
 
-# Bazel's test output directories: "shard_1_of_4", "run_2_of_3", and, for a
-# sharded test run several times, the two in one component:
-# "shard_1_of_4_run_2_of_3" (TestActionBuilder).
-_SHARD_RUN = re.compile(r"^(?:shard_(\d+)_of_(\d+)(?:_run_(\d+)_of_(\d+))?|run_(\d+)_of_(\d+))$")
-_ATTEMPT = re.compile(r"^attempt_(\d+)\.xml$")
+# Bazel's shard/run directories and attempt files (shared with target_from_path).
+_SHARD_RUN = SHARD_RUN
+_ATTEMPT = ATTEMPT
 
 
 def _shard_run(part: str) -> RunDims | None:
@@ -283,7 +280,8 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
     * **Runs** (``--runs_per_test``) and **evidence roots**: the worst
       status wins — every repetition must pass.
     * **Shards**: their cases are unioned; one key in two shards (or twice in
-      one report) is a ``duplicate``, folded worst-of.
+      one report) is a ``duplicate``, folded worst-of — except a whole-run
+      result (``[target]``, ``rr.scope=target``), which every shard has.
 
     Declared ids are the union over every observation. No ownership is
     decided here.
@@ -336,7 +334,11 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
             statuses.append(status)
             duplicate = duplicate or len(final) > 1
         shards = {s for (_, _, _, s) in slots if s}
-        duplicate = duplicate or len(shards) > 1
+        whole_run = key.synthetic or any(is_target_scope(c) for c, _ in seen)
+        # Each shard of a target that writes no JUnit gets its own [target]
+        # result (and each may have its own exit-status): one per shard is
+        # expected there, folded worst-of, not a duplicate case.
+        duplicate = duplicate or (len(shards) > 1 and not whole_run)
         status = _worst(statuses)
         worst = next((c for c, _ in seen if c.status == status), seen[0][0])
         rows[key] = CaseRow(

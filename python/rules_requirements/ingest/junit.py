@@ -14,6 +14,7 @@ target label is recovered from that path so ``verified_by`` target traces work.
 
 from __future__ import annotations
 
+import re
 from typing import Iterable
 from xml.etree import ElementTree as ET
 
@@ -44,29 +45,38 @@ _STANDARD_ATTRS = {
 _TRACE_ATTRS = ("requirement", "requirements", "level")
 
 
+# Bazel's test output directories: "shard_1_of_4", "run_2_of_3", and, for a
+# sharded test run several times, the two in one component:
+# "shard_1_of_4_run_2_of_3" (TestActionBuilder). Only these exact shapes are
+# run levels: a target named run_tests or shard_test is a target.
+SHARD_RUN = re.compile(r"^(?:shard_(\d+)_of_(\d+)(?:_run_(\d+)_of_(\d+))?|run_(\d+)_of_(\d+))$")
+ATTEMPT = re.compile(r"^attempt_(\d+)\.xml$")
+_RUN_LEVELS = ("test.outputs", "test_attempts")
+
+# The root of a testlogs tree: the convenience symlink, or the output tree's
+# own (bazel-out/<cfg>/testlogs). Matched leftmost, so a package that has a
+# directory named testlogs is still a package.
+_TESTLOGS_ROOT = re.compile(r"(?:^|/)(?:bazel-testlogs|bazel-out/[^/]+/testlogs)/")
+# Any other testlogs directory (rr_evidence's output, <name>/testlogs).
+_TESTLOGS_DIR = re.compile(r"(?:^|/)testlogs/")
+
+
 def target_from_path(path: str) -> str:
     """``.../bazel-testlogs/pkg/sub/name/test.xml`` -> ``//pkg/sub:name``.
 
     Also handles the resolved form (``bazel-out/<cfg>/testlogs/...``), the
     external-repo form (``testlogs/external/<repo>/pkg/name``) and sharded /
     retried runs (``.../name/shard_1_of_4/test.xml``, ``run_2_of_3``,
-    ``attempt_1.xml``). Returns "" outside a testlogs tree.
+    ``test_attempts/attempt_1.xml``). Returns "" outside a testlogs tree.
     """
     norm = path.replace("\\", "/")
-    idx, marker = -1, ""
-    for m in ("bazel-testlogs/", "/testlogs/"):
-        idx = norm.rfind(m)
-        if idx != -1:
-            marker = m
-            break
-    if idx == -1:
+    m = _TESTLOGS_ROOT.search(norm) or _TESTLOGS_DIR.search(norm)
+    if m is None:
         return ""
-    parts = norm[idx + len(marker) :].split("/")
+    parts = norm[m.end() :].split("/")
     if parts and parts[-1].endswith(".xml"):
         parts.pop()
-    while parts and (
-        parts[-1].startswith(("shard_", "run_", "attempt_")) or parts[-1] in ("test.outputs", "test_attempts")
-    ):
+    while parts and (SHARD_RUN.match(parts[-1]) or parts[-1] in _RUN_LEVELS):
         parts.pop()
     repo = ""
     if len(parts) > 2 and parts[0] == "external":
@@ -78,7 +88,17 @@ def target_from_path(path: str) -> str:
     return f"{repo}//{pkg}:{name}"
 
 
+FILE_PROPERTY = "rr.file"
+"""The test source a case came from (our writers; else the ``file`` attribute)."""
+
 SYNTHETIC_PROPERTY = "rr.synthetic"
+"""``true``: the target's single whole-run result (no per-case output)."""
+
+SCOPE_PROPERTY = "rr.scope"
+"""``target``: a result about the whole target run (exit status, load error), not a test case."""
+
+SYNTHETIC = {SYNTHETIC_PROPERTY: "true"}
+TARGET_SCOPE = {SCOPE_PROPERTY: "target"}
 
 
 def is_bazel_generated(suite: ET.Element) -> bool:
@@ -173,4 +193,9 @@ class JUnitIngestor(Ingestor):
                     case.properties[SYNTHETIC_PROPERTY] = "true"
                 attrs = [(k, v) for k, v in child.attrib.items() if k in _TRACE_ATTRS]
                 extra = [(k, v) for k, v in child.attrib.items() if k not in _STANDARD_ATTRS and k not in _TRACE_ATTRS]
-                yield apply_properties(case, props + attrs + extra + _props(child))
+                case = apply_properties(case, props + attrs + extra + _props(child))
+                if child.get("file") and FILE_PROPERTY not in case.properties:
+                    # The standard attribute (rr_case.h, googletest, pytest's
+                    # xunit1) names the source when no rr.file property does.
+                    case.properties[FILE_PROPERTY] = child.get("file", "")
+                yield case

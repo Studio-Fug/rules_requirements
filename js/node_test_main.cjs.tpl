@@ -8,8 +8,9 @@
 // test green or a passing one red — a report it cannot write is a warning in
 // the log, not a verdict — and it passes SIGTERM / SIGINT / SIGHUP on to the
 // child, so the test process never outlives it. Failures that belong to no case (a load
-// error, a non-zero exit after passing tests, a failing root after() hook) become
-// target-scope error cases (property rr.scope=target).
+// error, a non-zero exit after passing tests, a failing root after() hook, a clean
+// exit before node:test finished reporting) become target-scope error cases
+// (property rr.scope=target).
 "use strict";
 
 const fs = require("node:fs");
@@ -167,11 +168,30 @@ function render(rows, run, test, plain) {
   let cases = 0;
   let failed = false;
   let scopes = 0;
+  let started = false;
+  let ended = false;
+  const where = new Map(); // classname::name -> where the first test reporting as it is defined
   for (const row of rows) {
     if (row.kind === "case") {
       cases++;
       failed = failed || row.status === "failed";
       out.push({ ...row, props: caseProps(row, diags.get(row.i) ?? [], test) });
+      // Two tests reporting as one case key ("a > b" as a describe name vs a
+      // nested describe; "::" in a name): say so, rather than merge silently.
+      const key = `${row.classname}::${row.name}`;
+      const at = `${workspacePath(row.file, test)}:${row.line ?? "?"}:${row.column ?? "?"}`;
+      const first = where.get(key);
+      if (first === undefined) where.set(key, at);
+      else if (first !== at) {
+        process.stderr.write(
+          `rr_node_test: warning: the tests at ${first} and ${at} both report as '${key}' (one case key): ` +
+            "rename one (' > ' or '::' in a describe or test name can collide)\n",
+        );
+      }
+    } else if (row.kind === "start") {
+      started = true;
+    } else if (row.kind === "end") {
+      ended = true;
     } else if (row.kind === "scope") {
       scopes++;
       out.push(scoped(row.classname, row.name, row.message, row.file, row.line));
@@ -195,6 +215,14 @@ function render(rows, run, test, plain) {
     out.push(scoped(stem, "<load>", `node ${how} before reporting any test (a load error?)${why}; see test.log`, test));
   } else if (run.code !== 0 && scopes === 0 && !failed) {
     out.push(scoped(stem, "<exit-status>", `node ${how} although no test failed${why}; see test.log`, test));
+  } else if (run.code === 0 && started && !ended) {
+    // A clean exit after node:test started reporting but before it finished
+    // (process.exit(0) in a test): the tests after it, and maybe some before,
+    // left no result. (An exit before the reporter ever ran looks like a file
+    // without tests: nothing tells them apart.)
+    out.push(
+      scoped(stem, "<incomplete>", `node exited 0 before node:test finished reporting (process.exit()?); see test.log`, test),
+    );
   }
   return out;
 }

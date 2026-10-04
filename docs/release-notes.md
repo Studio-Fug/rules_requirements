@@ -23,12 +23,16 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   `rr.requirement=` / `rr.level=` / `rr.artifact.<key>=` diagnostics. Every
   case carries `rr.file`, the file that defines the test. Failures outside any
   test (a load error, a non-zero exit with no failed test, a failing root
-  `after()`, a failing `describe` hook) become `error` cases with
-  `rr.scope=target`. Needs Node 20 or newer for per-case results; on Node 18,
+  `after()`, a failing `describe` hook, a clean exit before node:test finished
+  reporting) become `error` cases with `rr.scope=target`; two tests that report
+  as one case key get a warning in the log. Needs Node 20 or newer for per-case
+  results; on Node 18,
   or with `RR_NODE_TEST_PLAIN=1`, the file runs plainly and one result with
   `rr.synthetic=true` covers the target. rules_requirements does not depend on
-  rules_js (it is a dev dependency for its own fixtures); CI runs the runner on
-  Node 18, 20, 22 and 24.
+  rules_js (it is a dev dependency for its own fixtures): a consumer adds
+  `bazel_dep(name = "aspect_rules_js", version = "3.2.2")` (or newer), whose
+  default Node toolchain is enough. CI runs the runner on Node 18, 20, 22 and
+  24.
 - **`rr_case.h`** and **`@rules_requirements//cc:case`** ({ref}`rr-case-h`):
   one JUnit case per test function for plain-assert C/C++ tests, without
   googletest. `RR_CASE(name[, "REQ-1"])` defines a case, `RR_CHECK(expr)` is an
@@ -42,7 +46,9 @@ byte-identical (the thermostat and integration report goldens are unchanged).
   `--rr_junit=PATH`; `--rr_list` and `--rr_case=NAME` list cases and run one
   in-process for a debugger; `--test_filter` and sharding are honoured. A run
   killed mid-case still reports the cases that finished and names the one that
-  did not. Under `bazel coverage` on Linux, `//cc:case` links libgcov's
+  did not. `rr::RunCases` may be called more than once in one binary (new
+  `RR_CASE` cases next to a converted list): the JUnit holds every call's
+  suite. Under `bazel coverage` on Linux, `//cc:case` links libgcov's
   `__gcov_dump` and `__gcov_reset` so each child's counts are kept; a
   toolchain without a gcov runtime turns that off with
   `--@rules_requirements//cc:coverage_hooks=false`. LeakSanitizer leaks fail
@@ -141,11 +147,26 @@ byte-identical (the thermostat and integration report goldens are unchanged).
     collections, so tests reached only through a symlink are not checked
     either. Collectors skipped at collection time (`pytest.importorskip`) are
     listed in a warning.
-- A draft guide, docs/guides/migrating-to-per-case.md, walks through the
+- A draft guide, {doc}`guides/migrating-to-per-case`, walks through the
   steps: collect evidence, plan, decide, rewrite the tags, edit the model.
+- `rr migrate apply` resolves a case only to a module pytest collects
+  (`python_files`), and only to the source its evidence names (`rr.file`, as
+  the worksheet's case rows carry it) when it names one: a C++ or Rust case
+  whose path merely reads like a Python module, or a case of a record, is "not
+  a Python test" and left alone.
 - Ingest records the enclosing `<testsuite>` name as `TestCase.suite` (a new
   field after `properties`, so positional construction keeps working) and marks
-  Bazel's generated result `rr.synthetic=true`.
+  Bazel's generated result `rr.synthetic=true`. A `<testcase>`'s `file`
+  attribute (`rr_case.h`, googletest) is its source when no `rr.file`
+  property names one.
+- Our own writers mark their whole-target results the same way, so one target
+  has one case key whichever wrote it: `rr_evidence`'s result for a test that
+  wrote no JUnit and `rr wrap`'s for a run that left no case are
+  `rr.synthetic=true` (`[target]`); the `exit-status` case of `rr_evidence` and
+  `rr wrap` (both formats), and `rr wrap`'s error for a missing or non-JUnit
+  report, are `rr.scope=target`, so `rr migrate plan` lists them under
+  `target_scope` instead of asking an owner to decide them. Their ids, and so
+  0.2 verdicts, are unchanged.
 
 ### New: other
 
@@ -153,6 +174,16 @@ byte-identical (the thermostat and integration report goldens are unchanged).
 
 ### Changed
 
+- `JUnitWriter`: a bare id string is one id (`add("a", "REQ-12")`), where
+  0.1.0 split a string given as the list into characters (`R`, `E`, `Q`...);
+  an empty or blank string is still no requirement, as in 0.1.0.
+- `rr wrap --format libtest` prints an RR-E101 warning on stderr for each case
+  that records several ids (`rr::verifies!` with two ids, or two calls naming
+  different ids), and googletest's `RR_VERIFIES` does the same when a test
+  gains its second id. Every id is still recorded.
+- unittest (`rr.unittest_main`): a test whose subtest failed also gets a
+  failed case under its own key (unittest reports no outcome for it), so the
+  key reads failed, not missing.
 - `rr_evidence` runs each test in the action's process group, so a cancelled
   build or the action's own timeout reaches the test and everything it
   started. On its own timeout the test gets `SIGTERM`, then `SIGKILL` after a
@@ -163,7 +194,22 @@ byte-identical (the thermostat and integration report goldens are unchanged).
 
 - `rr_wrapped_test` with a `py_binary` (or any target building more than its
   executable) as `test` failed analysis under Bazel 7 ("expands to more than
-  one file"); the wrapper now runs the target's executable.
+  one file"); the wrapper now runs the target's executable, and, for a
+  checked-in script, a genrule output or a filegroup of one file (which have
+  none), that one file, as 0.1.0 did.
+- Labels from `bazel-testlogs` paths: a target whose name starts with `run_`,
+  `shard_` or `attempt_` (`//pkg:run_tests`) lost its name to its package
+  (`//:pkg`), and a package with a directory named `testlogs`
+  (`//x/testlogs:y_test`) lost everything above it. Only Bazel's own run
+  directories (`shard_1_of_4`, `run_2_of_3`, `test_attempts`) are skipped now,
+  and the leftmost testlogs root is used. Reports show the right label for
+  such targets, which changes their text.
+- The pytest runner (`rr_py_test`) passes `--rootdir` set to the runfiles
+  tree, so an ini file above it (the execroot's `pyproject.toml` in a local,
+  unsandboxed run) no longer puts `bazel-out/<cfg>/bin/...runfiles` into
+  every classname.
+- `rr migrate apply --dry-run` ends with "N file(s) would be rewritten", not
+  "N file(s) rewritten".
 - `rr wrap` rejected its own options when they came first, as documented
   (`rr wrap --junit-xml rust.xml -- ./test`, `rr wrap --help`: "unrecognized
   arguments"); only `python -m rules_requirements.hooks.wrap` and the Bazel
@@ -177,14 +223,22 @@ recorded, exactly as before, but the hooks warn with
 `DeprecationWarning` ({ref}`multi-id-deprecation`):
 
 - a pytest `rr` / `requirements` marker naming several ids (or several markers
-  at one scope naming different ids);
+  at one scope naming different ids, a marker and `@rr.verifies` on one
+  function or class naming different ids, or a `pytest.param` mark naming
+  several);
 - `@rr.verifies` with several ids, or stacked decorators naming different ids;
 - a `JUnitWriter` list, tuple or other iterable naming several ids,
   positionally or as `requirements=`. Lists of zero or one id are accepted
-  silently.
+  silently;
+- googletest `RR_VERIFIES` and Rust `rr::verifies!` naming several ids for one
+  test (in one call or several): an RR-E101 line on stderr, not a Python
+  warning.
 
-The pytest warning is raised as the first test a marker applies to sets up, so
-`-W error::DeprecationWarning` errors that test rather than the whole session.
+The pytest marker warning is raised as the first test a marker applies to sets
+up, so `-W error::DeprecationWarning` errors that test rather than the whole
+session. `@rr.verifies` warns when it decorates, at import, and a `JUnitWriter`
+call made at import warns there: escalated, either is a collection error that
+interrupts the session.
 
 From 0.3 a case naming several ids counts for no requirement; 0.4 rejects such
 declarations.

@@ -64,6 +64,25 @@ rr_wrapped_test(
     test = ":junit_runner",
 )
 
+# rr_wrapped_test's `test` may also be a checked-in script, or a genrule output
+# that is no executable target, as `$(rootpath test)` allowed in 0.1.0.
+rr_wrapped_test(
+    name = "wrapped_script_test",
+    test = "fake_libtest.sh",
+)
+
+genrule(
+    name = "gen_libtest",
+    srcs = ["fake_libtest.sh"],
+    outs = ["gen_libtest.sh"],
+    cmd = "cp $< $@ && chmod +x $@",
+)
+
+rr_wrapped_test(
+    name = "wrapped_genrule_test",
+    test = ":gen_libtest",
+)
+
 # junit_wrapped_test passes on the wrapper's exit status alone; this asserts on
 # what the wrapper writes for the same runner (cases, level, rr.file).
 py_test(

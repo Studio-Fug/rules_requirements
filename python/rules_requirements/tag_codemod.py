@@ -72,7 +72,7 @@ import tokenize
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Optional, Union
 
-from rules_requirements.case_keys import CaseKey
+from rules_requirements.case_keys import RECORD_PREFIX, CaseKey
 from rules_requirements.util import dedupe
 
 MARKER_NAMES = ("rr", "requirements")
@@ -2215,6 +2215,7 @@ def apply_tags(
     unassigned: str = "refuse",
     line_length: int = 88,
     names: Optional[TestNames] = None,
+    files_of: Optional[Mapping[CaseKey, str]] = None,
 ) -> ApplyResult:
     """Rewrite the Python tests under ``root`` per the worksheet's decisions
     (``CaseKey -> id | "none" | "?"``). Nothing is written; the caller writes
@@ -2226,7 +2227,13 @@ def apply_tags(
     Each decided case's attribution is then re-derived from the rewritten
     sources and compared with the worksheet (``mismatched``). ``names``: the
     test names pytest collects (default: as configured for pytest at
-    ``root``, see :func:`test_names`)."""
+    ``root``, see :func:`test_names`).
+
+    A case resolves only to a module pytest collects (``python_files``), and
+    only to the source its evidence names when ``files_of`` (``CaseKey ->
+    rr.file``, as the worksheet's case rows carry it) knows one: a C++ or
+    Rust case whose path merely reads like a Python module, or a case of a
+    record, is "not a Python test" and left alone."""
     result = ApplyResult()
     names = test_names(root) if names is None else names
     only = list(only)
@@ -2276,7 +2283,10 @@ def apply_tags(
 
     for rel in scanned:
         parse(rel, require_markers=True)
-    modules = [(rel, _module_parts(rel)) for rel in scanned]
+    # Only modules pytest collects tests from: a helper module (tools/codec.py)
+    # never holds the test a case path names.
+    modules = [(rel, _module_parts(rel)) for rel in scanned if names.test_module(rel)]
+    files_of = files_of or {}
 
     # Map each decided case to (file, test).
     targets: dict[str, dict[str, set[str]]] = {}  # file -> qualname -> decisions
@@ -2287,10 +2297,19 @@ def apply_tags(
             result.unresolved.append((key, "not a Python test case path"))
             continue
         parts, base = split
+        if key.target.startswith(RECORD_PREFIX):
+            result.unresolved.append((key, "not a Python test (a record)"))
+            continue
+        source = files_of.get(key, "")
+        if source and not source.endswith(".py"):
+            result.unresolved.append((key, f"not a Python test (its evidence names {source})"))
+            continue
         # Every scanned module the case path can name, by the length of the
         # module path matched; the longest match is the case's module.
         matches: list[tuple[int, str]] = []
         for rel, mod in modules:
+            if source and rel != source:
+                continue
             for k in range(len(mod)):
                 suffix = mod[k:]
                 if parts[: len(suffix)] == suffix:
@@ -2300,7 +2319,12 @@ def apply_tags(
             if only:
                 result.outside.append(key)
             else:
-                result.unresolved.append((key, "no Python source of this module was scanned (another language?)"))
+                why = (
+                    f"its evidence names {source}, which is not a scanned pytest test module"
+                    if source
+                    else "no Python source of this module was scanned (another language?)"
+                )
+                result.unresolved.append((key, why))
             continue
         best_len = max(n for n, _ in matches)
         unread = [rel for n, rel in matches if n == best_len and parse(rel, require_markers=False) is None]

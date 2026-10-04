@@ -33,9 +33,10 @@ import sys
 import tempfile
 from xml.etree import ElementTree as ET
 
+from rules_requirements.hooks.ids import multiple_warning
 from rules_requirements.hooks.junit_writer import JUnitWriter, _merge, _read_root
 from rules_requirements.ingest import TestCase
-from rules_requirements.ingest.junit import JUnitIngestor
+from rules_requirements.ingest.junit import SYNTHETIC, TARGET_SCOPE, JUnitIngestor
 from rules_requirements.ingest.libtest import merge_trace, parse_libtest
 
 FORMATS = ("libtest", "junit")
@@ -81,7 +82,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser.add_argument("--format", choices=FORMATS, default="libtest")
     parser.add_argument("--junit-xml", default="")
     parser.add_argument("--suite", default="")
-    parser.add_argument("--target", default="", help="label to stamp on every case")
+    parser.add_argument(
+        "--target",
+        default="",
+        help="the test's label: names the suite (default: its name) and the exit-status case; the "
+        "label of a case comes from where its report lies (bazel-testlogs/...), not from this",
+    )
     parser.add_argument("--level", default="", help="default level for cases without one")
     parser.add_argument(
         "--junit-in",
@@ -166,12 +172,16 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             level=c.level,
             artifact=c.artifact,
             classname=c.classname,
+            properties=c.properties,
         )
+    _warn_multi_id(cases)
     if not cases:
         # Nothing parseable (e.g. the binary crashed before running tests):
-        # record one synthetic case so the failure is visible in reports.
+        # record one synthetic case so the failure is visible in reports. It
+        # is the target's single whole-run result, as Bazel's generated
+        # test.xml would be.
         status = "passed" if proc.returncode == 0 else "error"
-        writer.add(writer.suite, None, status=status, message=f"exit code {proc.returncode}\n{text[-2000:]}")
+        writer._append(writer.suite, (), status, f"exit code {proc.returncode}\n{text[-2000:]}", properties=SYNTHETIC)
     if out:
         writer.write(out)
     return proc.returncode
@@ -193,7 +203,21 @@ def _exit_status(
         requirements=tuple(dict.fromkeys(ids)),
         message=f"test binary exited with {returncode} although no reported test failed\n" + text[-2000:],
         target=target,
+        # about the whole run, not a test case of it: migration never asks an
+        # owner to attribute it (its ids keep 0.2 verdicts as they were)
+        properties=dict(TARGET_SCOPE),
     )
+
+
+def _warn_multi_id(cases: list[TestCase]) -> None:
+    """RR-E101 on stderr for each case that records two or more ids
+    (``rr::verifies!`` called with different ids in one test)."""
+    for c in cases:
+        if c.name == "exit-status" or len(c.requirements) < 2:
+            continue
+        test = f"{c.classname}::{c.name}" if c.classname else c.name
+        text = str(multiple_warning(test, list(c.requirements)))
+        print(text.replace("rr: ", "rr wrap: warning: ", 1), file=sys.stderr)
 
 
 def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str, target: str, level: str) -> None:
@@ -203,7 +227,13 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
     if not os.path.exists(junit_in) or os.path.getsize(junit_in) == 0:
         # The runner wrote no report where it was expected to: whatever its
         # exit code, nothing it verified can be read.
-        writer.add(suite, None, status="error", message=f"no JUnit report at {junit_in} (exit code {returncode})")
+        writer._append(
+            suite,
+            (),
+            "error",
+            f"no JUnit report at {junit_in} (exit code {returncode})",
+            properties=TARGET_SCOPE,
+        )
         if out:
             writer.write(out)
         return
@@ -218,14 +248,16 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
     except ValueError as exc:
         # Well-formed, but not JUnit (ingestion would skip it): nothing it
         # verified can be read, which must not pass silently.
-        writer.add(suite, None, status="error", message=f"{exc} (exit code {returncode})")
+        writer._append(suite, (), "error", f"{exc} (exit code {returncode})", properties=TARGET_SCOPE)
         writer.write(out)
         return
     if root is not None and root.find(".//testcase") is None and exit_case is None:
         # A report without a single case, and a clean exit: one synthetic
         # case (as for a libtest binary that printed nothing) so the run
         # still leaves evidence.
-        writer.add(suite, None, status="passed", message=f"no test cases in {junit_in} (exit code {returncode})")
+        writer._append(
+            suite, (), "passed", f"no test cases in {junit_in} (exit code {returncode})", properties=SYNTHETIC
+        )
         writer.write(out)
         return
     if not level and exit_case is None:
@@ -243,7 +275,13 @@ def _copy_junit(junit_in: str, out: str, returncode: int, text: str, suite: str,
             if not any(p.get("name") == "level" for p in props.findall("property")):
                 ET.SubElement(props, "property", name="level", value=level)
     if exit_case is not None:
-        writer._append(exit_case.name, exit_case.requirements, exit_case.status, exit_case.message)
+        writer._append(
+            exit_case.name,
+            exit_case.requirements,
+            exit_case.status,
+            exit_case.message,
+            properties=exit_case.properties,
+        )
         root = _merge(root, writer.to_element())
     tree = ET.ElementTree(root)
     tree.write(out, encoding="utf-8", xml_declaration=True)

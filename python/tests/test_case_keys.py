@@ -254,3 +254,50 @@ def test_case_row_to_dict():
         "message": "boom",
         "sources": ["bazel-testlogs/p/t/test.xml"],
     }
+
+
+def test_targets_named_like_run_levels_keep_their_own_keys(tmp_path):
+    """//web:run_smoke_test and //web:run_full_test are two targets, not one //:web."""
+    _report(tmp_path, "bazel-testlogs/web/run_smoke_test/test.xml", [("boots", "passed", ["REQ-1"], "")])
+    _report(tmp_path, "bazel-testlogs/web/run_full_test/test.xml", [("boots", "failed", ["REQ-2"], "")])
+    rows = index_cases(ingest.collect([str(tmp_path)]))
+    assert set(rows) == {
+        CaseKey("//web:run_smoke_test", "suite::boots"),
+        CaseKey("//web:run_full_test", "suite::boots"),
+    }
+    assert not any(r.duplicate for r in rows.values())
+
+
+def test_each_shards_generated_result_is_not_a_duplicate(tmp_path):
+    """A sharded target that writes no JUnit: Bazel generates a [target]
+    result per shard; that is one case, folded worst-of, not a duplicate."""
+    t = "bazel-testlogs/app/sharded_smoke_test"
+    for shard, body in ((1, ""), (2, '<failure message="exit 1"/>')):
+        write(
+            tmp_path,
+            f"{t}/shard_{shard}_of_2/test.xml",
+            _BAZEL_GENERATED.format(
+                suite="app/sharded_smoke_test", case="app/sharded_smoke_test", out="Generated test.log", body=body
+            ),
+        )
+    (row,) = index_cases(ingest.collect([str(tmp_path)])).values()
+    assert row.key == CaseKey("//app:sharded_smoke_test", SYNTHETIC_PATH)
+    assert row.synthetic and not row.duplicate and row.status == "failed"
+
+
+def test_testcase_file_attribute_is_the_source_when_no_rr_file_says(tmp_path):
+    """rr_case.h and googletest write the source as the <testcase>'s file attribute."""
+    write(
+        tmp_path,
+        "bazel-testlogs/fw/codec_test/test.xml",
+        '<testsuites><testsuite name="codec">'
+        '<testcase classname="codec" name="round_trip" file="fw/codec_test.cc" line="3"/>'
+        '<testcase classname="codec" name="own" file="fw/codec_test.cc">'
+        '<properties><property name="rr.file" value="fw/other.cc"/></properties></testcase>'
+        '<testcase classname="codec" name="none"/>'
+        "</testsuite></testsuites>",
+    )
+    rows = {k.path: r for k, r in index_cases(ingest.collect([str(tmp_path)])).items()}
+    assert rows["codec::round_trip"].file == "fw/codec_test.cc"
+    assert rows["codec::own"].file == "fw/other.cc"
+    assert rows["codec::none"].file == ""

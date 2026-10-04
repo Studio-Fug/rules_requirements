@@ -59,6 +59,7 @@ class _Case:
     artifact: dict[str, str] = field(default_factory=dict)
     classname: str = ""
     file: str = ""
+    properties: dict[str, str] = field(default_factory=dict)  # e.g. rr.synthetic, rr.scope
 
     @property
     def requirement(self) -> str | None:
@@ -110,14 +111,18 @@ def source_file(path: str) -> str:
     if m:
         return m.group(1)
     root = os.environ.get("BUILD_WORKSPACE_DIRECTORY") or os.getcwd()
-    rel = os.path.relpath(norm, root).replace(os.sep, "/")
+    try:
+        rel = os.path.relpath(norm, root).replace(os.sep, "/")
+    except ValueError:  # Windows: another drive than the root's
+        return norm
     return norm if rel == ".." or rel.startswith("../") else rel
 
 
 def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: int) -> list[str]:
     """The ids to record for one case, from ``requirement=`` or the legacy list.
 
-    One id string is checked (RR-E104); any other iterable (a list, tuple,
+    One id string is checked (RR-E104), and an empty or blank one is no id;
+    any other iterable (a list, tuple,
     set, generator...) is the deprecated form, recorded verbatim, with a
     warning when it names several ids. ``stacklevel`` is that of the warning
     as seen from the caller of ``_resolve_ids`` (2: the caller's caller).
@@ -128,6 +133,8 @@ def _resolve_ids(requirement: Any, requirements: Any, subject: str, stacklevel: 
     if value is None:
         return []
     if isinstance(value, str):
+        if not value.strip():
+            return []  # "no requirement", as 0.1 read an empty string
         return [check_id(value, f"{subject}: requirement")]
     if isinstance(value, bytes) or not isinstance(value, _Iterable):
         raise TypeError(f"{subject}: requirement must be one id string, got {type(value).__name__}")
@@ -195,8 +202,15 @@ class JUnitWriter:
         artifact: Mapping[str, str] | None = None,
         classname: str = "",
         file: str | None = None,
+        *,
+        properties: Mapping[str, str] | None = None,
     ) -> _Case:
-        """Record a case with ``ids`` as given (for transcribing other hooks' evidence)."""
+        """Record a case with ``ids`` as given (for transcribing other hooks' evidence).
+
+        ``properties`` are written as they are, after the standard ones (our
+        own writers mark a whole-target result ``rr.synthetic=true`` or
+        ``rr.scope=target`` this way).
+        """
         if status not in _STATUSES:
             raise ValueError(f"status must be one of {_STATUSES}, got {status!r}")
         case = _Case(
@@ -209,6 +223,7 @@ class JUnitWriter:
             artifact={**self.artifact, **(artifact or {})},
             classname=classname or self.classname or self.suite,
             file=(self.file or "") if file is None else file,
+            properties=dict(properties or {}),
         )
         self.cases.append(case)
         return case
@@ -292,7 +307,7 @@ class JUnitWriter:
         )
         for c in self.cases:
             tc = ET.SubElement(suite, "testcase", classname=x(c.classname), name=x(c.name), time=f"{c.duration:.3f}")
-            if c.requirements or c.level or c.artifact or c.file:
+            if c.requirements or c.level or c.artifact or c.file or c.properties:
                 props = ET.SubElement(tc, "properties")
                 for rid in c.requirements:
                     ET.SubElement(props, "property", name="requirement", value=x(rid))
@@ -302,6 +317,8 @@ class JUnitWriter:
                     ET.SubElement(props, "property", name=x(f"artifact.{key}"), value=x(value))
                 if c.file:
                     ET.SubElement(props, "property", name=FILE_PROPERTY, value=x(c.file))
+                for key, value in c.properties.items():
+                    ET.SubElement(props, "property", name=x(key), value=x(value))
             if c.status in ("failed", "error"):
                 tag = "failure" if c.status == "failed" else "error"
                 ET.SubElement(tc, tag, message=x(_summary(c.message) or c.status)).text = x(c.message)

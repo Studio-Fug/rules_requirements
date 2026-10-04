@@ -11,6 +11,7 @@ fixtures/migrate/expected; regenerate them with RR_UPDATE_FIXTURES=1.
 import json
 import os
 import shutil
+import sys
 
 import pytest
 from conftest import write
@@ -294,3 +295,59 @@ def test_census_follows_today_semantics(tmp_path):
 def test_plan_paths_are_relative_below_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert migrate.plan_paths([str(tmp_path / "a"), "/elsewhere/b", "c"]) == ["a", "/elsewhere/b", "c"]
+
+
+def test_exit_status_taint_is_target_scope_not_a_decision(tmp_path, monkeypatch):
+    """rr wrap's exit-status case (libtest and --format junit) and
+    rr_evidence's are about the run: listed under target_scope, never a
+    group an owner must decide."""
+    from rules_requirements import bazel
+    from rules_requirements.hooks import wrap
+
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    ev = tmp_path / "ev"
+    junit_body = (
+        "<testsuite name='bench'><testcase classname='bench' name='a'><properties>"
+        "<property name='requirement' value='REQ-1'/></properties></testcase>"
+        "<testcase classname='bench' name='b'><properties>"
+        "<property name='requirement' value='REQ-2'/></properties></testcase></testsuite>"
+    )
+    runner = write(
+        tmp_path,
+        "bin/bench",
+        f"#!{sys.executable}\nimport os, sys\n"
+        f"open(os.environ.get('XML_OUTPUT_FILE') or {str(tmp_path / 'r.xml')!r}, 'w').write({junit_body!r})\n"
+        "sys.exit(3)\n",
+    )
+    os.chmod(runner, 0o755)
+    os.makedirs(ev / "bazel-testlogs" / "hw" / "bench_test")
+    wrap.main(
+        ["--format", "junit", "--junit-in", str(tmp_path / "r.xml"), "--target", "//hw:bench_test"]
+        + ["--junit-xml", str(ev / "bazel-testlogs" / "hw" / "bench_test" / "test.xml"), "--", runner]
+    )
+    libtest = write(
+        tmp_path,
+        "bin/parse",
+        f"#!{sys.executable}\nimport json, os\n"
+        "with open(os.environ['RR_TRACE_FILE'], 'a') as fh:\n"
+        "    fh.write(json.dumps({'test': 'parse::a', 'requirements': ['REQ-5']}) + '\\n')\n"
+        "    fh.write(json.dumps({'test': 'parse::b', 'requirements': ['REQ-6']}) + '\\n')\n"
+        "print('test parse::a ... ok')\nprint('test parse::b ... ok')\nraise SystemExit(101)\n",
+    )
+    os.chmod(libtest, 0o755)
+    os.makedirs(ev / "bazel-testlogs" / "rs" / "parse_test")
+    wrap.main(["--junit-xml", str(ev / "bazel-testlogs" / "rs" / "parse_test" / "test.xml"), "--", libtest])
+    bazel.main(["run-tests", "--out", str(ev / "rr" / "testlogs"), "--test", "//hw:leaky_test=bin/bench=_main"])
+
+    model, _ = read_model(os.path.join(REPO, "requirements"))
+    plan = migrate.census(model, ingest.collect([str(ev)]))
+    doc = migrate.worksheet(plan)
+    decided_paths = {c["path"] for g in doc["groups"] for c in g["cases"]}
+    assert not any("exit-status" in p for p in decided_paths), decided_paths
+    scoped = {r["case"]: r["counts_toward"] for r in doc["target_scope"]}
+    assert scoped == {
+        "//hw:bench_test#bench_test::exit-status": ["REQ-1", "REQ-2"],
+        "//hw:leaky_test#//hw:leaky_test::exit-status": ["REQ-1", "REQ-2"],
+        "//rs:parse_test#parse::exit-status": ["REQ-5", "REQ-6"],
+    }

@@ -1863,3 +1863,38 @@ def test_an_import_call_out_of_the_tree_does_not_refuse(tmp_path):
     }
     res = tag_codemod.apply_tags(decided, str(tmp_path))
     assert [f.path for f in res.to_write()] == ["pkg/test_base.py"] and not res.blocked
+
+
+def test_only_pytest_test_modules_and_the_named_source_resolve(tmp_path):
+    """A C++ case whose path reads like a Python module never resolves to a
+    helper module (tools/codec.py) or to a non-test module that happens to
+    define a matching function; a case whose evidence names a non-Python
+    source, or a record, is "not a Python test"."""
+    files = {
+        "app/tests/test_config.py": 'import pytest\n\n\n@pytest.mark.rr("REQ-1", "REQ-2")\ndef test_load():\n    pass\n',
+        "tools/codec.py": "def encode():\n    pass\n",
+        "pylib/codec.py": 'import pytest\n\n\n@pytest.mark.rr("REQ-1", "REQ-2")\ndef test_round_trip():\n    pass\n',
+    }
+    for rel, body in files.items():
+        (tmp_path / os.path.dirname(rel)).mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(body, encoding="utf-8")
+    py = CaseKey("//app/tests:t", "app.tests.test_config::test_load")
+    cc = CaseKey("//fw:codec_test", "codec::round_trip")
+    cc2 = CaseKey("//fw:codec_test", "codec::test_round_trip")
+    rec = CaseKey("record:bench", "test_config::test_load")
+    named = CaseKey("//fw:codec2_test", "test_config::test_load")
+    decided = {py: "REQ-1", cc: "REQ-2", cc2: "REQ-2", rec: "REQ-2", named: "REQ-2"}
+    res = tag_codemod.apply_tags(decided, str(tmp_path), files_of={named: "fw/codec_test.cc"})
+    unresolved = dict(res.unresolved)
+    assert "no Python source of this module" in unresolved[cc]
+    assert "no Python source of this module" in unresolved[cc2]
+    assert unresolved[rec] == "not a Python test (a record)"
+    assert unresolved[named] == "not a Python test (its evidence names fw/codec_test.cc)"
+    assert res.unmatched == [] and res.unmatched_files == set()
+    assert [f.path for f in res.changed] == ["app/tests/test_config.py"]
+    assert traces(res.changed[0].new_text)["test_load"][0] == ("REQ-1",)
+    # A .py source named by the evidence narrows the candidates to that file.
+    other = CaseKey("//app/tests:t2", "test_config::test_load")
+    res = tag_codemod.apply_tags({other: "REQ-2"}, str(tmp_path), files_of={other: "app/other/test_config.py"})
+    assert "app/other/test_config.py, which is not a scanned pytest test module" in dict(res.unresolved)[other]
+    assert res.changed == []

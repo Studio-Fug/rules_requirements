@@ -332,26 +332,34 @@ inline std::string Seconds(double seconds) {
   return std::to_string(ms / 1000) + "." + frac.substr(1);
 }
 
-// Writes the JUnit atomically (temporary file, then rename).
-inline void WriteJUnit(const std::string& path, const std::string& suite, const std::vector<Result>& results) {
-  if (path.empty()) return;
+// The results of one rr::RunCases call: one <testsuite>.
+struct SuiteResults {
+  std::string path;  // the JUnit file they went to
+  std::string suite;
+  std::vector<Result> results;
+};
+
+// Every earlier rr::RunCases call of this process: a binary that calls it
+// more than once (a new RR_CASE suite next to a converted legacy one) gets
+// all of its suites in the one JUnit, not just the last call's.
+inline std::vector<SuiteResults>& Written() {
+  static std::vector<SuiteResults> written;
+  return written;
+}
+
+inline void Count(const std::vector<Result>& results, int* failures, int* errors, double* total) {
+  for (const Result& r : results) {
+    if (r.status == "failed") ++*failures;
+    if (r.status == "error") ++*errors;
+    *total += r.seconds;
+  }
+}
+
+inline void WriteSuite(FILE* f, const std::string& suite, const std::vector<Result>& results) {
   int failures = 0, errors = 0;
   double total = 0;
-  for (const Result& r : results) {
-    if (r.status == "failed") ++failures;
-    if (r.status == "error") ++errors;
-    total += r.seconds;
-  }
-  const std::string tmp = path + ".rr_case.tmp";
-  FILE* f = std::fopen(tmp.c_str(), "w");
-  if (f == nullptr) {
-    std::fprintf(stderr, "rr_case: cannot write %s\n", tmp.c_str());
-    return;
-  }
+  Count(results, &failures, &errors, &total);
   const std::string esc_suite = XmlAttr(suite);
-  std::fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-  std::fprintf(f, "<testsuites tests=\"%u\" failures=\"%d\" errors=\"%d\" time=\"%s\">\n",
-               static_cast<unsigned>(results.size()), failures, errors, Seconds(total).c_str());
   std::fprintf(f, "  <testsuite name=\"%s\" tests=\"%u\" failures=\"%d\" errors=\"%d\" skipped=\"0\" time=\"%s\">\n",
                esc_suite.c_str(), static_cast<unsigned>(results.size()), failures, errors, Seconds(total).c_str());
   for (const Result& r : results) {
@@ -369,7 +377,36 @@ inline void WriteJUnit(const std::string& path, const std::string& suite, const 
     }
     std::fprintf(f, "    </testcase>\n");
   }
-  std::fprintf(f, "  </testsuite>\n</testsuites>\n");
+  std::fprintf(f, "  </testsuite>\n");
+}
+
+// Writes the JUnit atomically (temporary file, then rename): the suites of
+// this process's earlier rr::RunCases calls to `path`, then this one's.
+inline void WriteJUnit(const std::string& path, const std::string& suite, const std::vector<Result>& results) {
+  if (path.empty()) return;
+  int failures = 0, errors = 0;
+  double total = 0;
+  unsigned tests = static_cast<unsigned>(results.size());
+  Count(results, &failures, &errors, &total);
+  for (const SuiteResults& w : Written()) {
+    if (w.path != path) continue;
+    Count(w.results, &failures, &errors, &total);
+    tests += static_cast<unsigned>(w.results.size());
+  }
+  const std::string tmp = path + ".rr_case.tmp";
+  FILE* f = std::fopen(tmp.c_str(), "w");
+  if (f == nullptr) {
+    std::fprintf(stderr, "rr_case: cannot write %s\n", tmp.c_str());
+    return;
+  }
+  std::fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+  std::fprintf(f, "<testsuites tests=\"%u\" failures=\"%d\" errors=\"%d\" time=\"%s\">\n", tests, failures, errors,
+               Seconds(total).c_str());
+  for (const SuiteResults& w : Written()) {
+    if (w.path == path) WriteSuite(f, w.suite, w.results);
+  }
+  WriteSuite(f, suite, results);
+  std::fprintf(f, "</testsuites>\n");
   const bool ok = std::fclose(f) == 0;
   if (!ok || std::rename(tmp.c_str(), path.c_str()) != 0) {
     std::fprintf(stderr, "rr_case: cannot write %s\n", path.c_str());
@@ -705,6 +742,7 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     std::fprintf(stderr, "rr_case: %s has no test cases (define them with RR_CASE or pass them to rr::RunCases)\n",
                  suite.c_str());
     WriteJUnit(junit, suite, {});
+    Written().push_back(SuiteResults{junit, suite, {}});
     return 1;
   }
 
@@ -781,6 +819,7 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
     results.back() = r;
   }
   WriteJUnit(junit, suite, results);
+  Written().push_back(SuiteResults{junit, suite, results});
   std::printf("[==========] %s: %u case(s), %d failed%s\n", suite.c_str(), static_cast<unsigned>(results.size()),
               failed, leaked_before_cases ? ", memory leaked before any case ran" : "");
   std::fflush(stdout);
@@ -791,7 +830,9 @@ inline int Run(int argc, char** argv, const char* suite_name, const std::vector<
 
 // Runs the cases defined with RR_CASE, as suite `suite`. Returns the exit
 // status for main(): 0 if every selected case passed, 1 if any failed, 2 on
-// a bad flag.
+// a bad flag. It may be called more than once in one binary (RR_CASE cases
+// and a converted legacy list, say): the JUnit then holds every call's
+// suite, and main should fail if any call did (`return a | b;`).
 inline int RunCases(int argc, char** argv, const char* suite) {
   return internal::Run(argc, argv, suite, internal::Registry());
 }

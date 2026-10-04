@@ -49,7 +49,12 @@ reference.
   - googletest — `RR_VERIFIES("REQ-1");`
   - plain-assert C++ — `RR_CASE(name, "REQ-1") { ... }`, each case forked and reported on its own
   - Rust — `rr::verifies!("REQ-1");` (with a libtest → JUnit wrapper)
-  - anything else — `JUnitWriter` for hand-rolled (e.g. hardware-in-the-loop) harnesses
+  - node:test — `verifies(t, "REQ-1")` with `rr_node_test`, one JUnit case per test
+  - anything else — `JUnitWriter` (and `CheckPlan`) for hand-rolled (e.g. hardware-in-the-loop) harnesses
+- **Migration to one test case, one requirement** — `rr cases` lists every
+  test case by its stable key, `rr migrate plan` writes the attribution
+  worksheet, and `rr migrate apply --stage tags` rewrites Python test tags to
+  the decided owners (see [CHANGELOG.md](CHANGELOG.md) for what is new).
 - **Pluggable evidence ingestion.** JUnit is the standard; Rust libtest output and
   signed-off inspection records are built in, and new formats are one small
   `Ingestor` class (or a `rules_requirements.ingestors` entry point) away.
@@ -189,7 +194,8 @@ include only model files, and the server is local-only by default (see the
 | [`cc/rr_gtest.h`](cc/rr_gtest.h) | googletest hook (`@rules_requirements//cc:gtest`) |
 | [`cc/rr_case.h`](cc/rr_case.h) | per-case JUnit for plain-assert C++ tests (`@rules_requirements//cc:case`) |
 | [`rust/src/lib.rs`](rust/src/lib.rs) | Rust hook (`@rules_requirements//rust:rr`, crate `rr`) |
-| [`schema/`](schema) | JSON Schema for model files (editor completion) |
+| [`js/`](js) | node:test hook: `rr_node_test`'s runner, reporter and `verifies.cjs` |
+| [`schema/`](schema) | JSON Schemas for model files (editor completion) and the attribution worksheet |
 | [`tests/integration/`](tests/integration) | every hook → evidence → report, pinned by goldens |
 
 ## Development

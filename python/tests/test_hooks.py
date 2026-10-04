@@ -277,7 +277,11 @@ def test_unittest_subtests_and_fixture_errors(tmp_path):
         fixture = next(c for c in cases if c.name == "setUpClass")
         assert fixture.status == "error" and fixture.requirements == ("REQ-8",) and fixture.duration < 60
         sub = [c for c in cases if c.name.startswith("test_many")]
-        assert [c.status for c in sub] == ["failed"] and sub[0].requirements == ("REQ-9",) and "(i=2)" in sub[0].name
+        assert [c.status for c in sub] == ["failed", "failed"] and sub[0].requirements == ("REQ-9",)
+        assert "(i=2)" in sub[0].name
+        # unittest reports no outcome for the test itself: its own key reads failed, not missing
+        assert sub[1].name == "test_many" and sub[1].requirements == ("REQ-9",)
+        assert sub[1].message == "subtest(s) failed: (i=2)"
     finally:
         globals().pop("Broken", None)
 
@@ -512,7 +516,7 @@ def test_junit_writer_single_requirement(tmp_path):
     w.add("e")
     assert [c.requirement for c in w.cases] == ["REQ-1", "REQ-2", "REQ-3", "REQ-4", None]
     assert w.cases[3].classname == "bench.step"
-    for bad in ("REQ-1, REQ-2", "REQ-1 REQ-2", "", " "):
+    for bad in ("REQ-1, REQ-2", "REQ-1 REQ-2"):  # "" is no requirement, as in 0.1
         with pytest.raises(ValueError, match="RR-E104"):
             w.add("bad", bad)
         with pytest.raises(ValueError, match="RR-E104"), w.case("bad", bad):
@@ -1012,3 +1016,252 @@ def test_pytest_space_separated_marker_records_one_id_without_warning(tmp_path):
     assert proc.returncode == 0, out
     assert cases["test_s"].requirements == ("REQ-1 REQ-2",)
     assert "MultipleRequirementsWarning" not in out
+
+
+def _keys(xml):
+    from rules_requirements.case_keys import index_cases
+
+    return {str(k): r for k, r in index_cases(ingest.collect([str(xml)])).items()}
+
+
+def test_wrap_marks_whole_run_results(tmp_path, monkeypatch):
+    """rr wrap's own whole-target results are [target] (rr.synthetic) or
+    rr.scope=target, like Bazel's generated XML and rr_node_test's errors."""
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "out.xml"
+    # libtest: nothing parseable from a clean exit -> the target's [target] case
+    quiet = tmp_path / "quiet"
+    quiet.write_text("#!/bin/sh\nexit 0\n")
+    quiet.chmod(0o755)
+    assert wrap.main(["--target", "//rs:nothing_test", "--junit-xml", str(xml), "--", str(quiet)]) == 0
+    (row,) = _keys(xml).values()
+    assert row.synthetic and str(row.key) == "suite:nothing_test#[target]"
+    # ... from a crash: the exit taint, about the whole run
+    quiet.write_text("#!/bin/sh\nexit 139\n")
+    assert wrap.main(["--target", "//rs:nothing_test", "--junit-xml", str(xml), "--", str(quiet)]) == 139
+    (row,) = _keys(xml).values()
+    assert row.target_scope and row.status == "error"
+    # libtest: every test passed, the binary failed -> the exit taint is target scope
+    leaky = tmp_path / "leaky"
+    leaky.write_text("#!/bin/sh\necho 'running 1 test'\necho 'test parse::a ... ok'\nexit 101\n")
+    leaky.chmod(0o755)
+    assert wrap.main(["--suite", "parse_test", "--junit-xml", str(xml), "--", str(leaky)]) == 101
+    rows = _keys(xml)
+    assert rows["suite:parse_test#parse_test::exit-status"].target_scope
+    assert not rows["suite:parse_test#parse::a"].target_scope
+
+    # --format junit
+    report = tmp_path / "report.xml"
+
+    def run(body, code):
+        runner = tmp_path / "runner"
+        write_body = f"open({str(report)!r}, 'w').write({body!r})\n" if body is not None else ""
+        runner.write_text(f"#!{sys.executable}\nimport sys\n{write_body}sys.exit({code})\n")
+        runner.chmod(0o755)
+        if report.exists():
+            report.unlink()
+        wrap.main(
+            ["--format", "junit", "--junit-in", str(report), "--junit-xml", str(xml), "--suite", "t", "--", str(runner)]
+        )
+        return _keys(xml)
+
+    (row,) = run("<testsuites/>", 0).values()  # no test cases
+    assert row.synthetic and row.status == "passed"
+    (row,) = run(None, 0).values()  # no report
+    assert row.target_scope and row.status == "error" and not row.synthetic
+    (row,) = run("<html/>", 0).values()  # not JUnit
+    assert row.target_scope and row.status == "error"
+    two = (
+        "<testsuite name='bench'><testcase classname='bench' name='a'><properties>"
+        "<property name='requirement' value='REQ-1'/></properties></testcase>"
+        "<testcase classname='bench' name='b'><properties>"
+        "<property name='requirement' value='REQ-2'/></properties></testcase></testsuite>"
+    )
+    rows = run(two, 3)
+    exit_row = rows["suite:t#t::exit-status"]
+    assert exit_row.target_scope and exit_row.declared == ("REQ-1", "REQ-2")  # ids kept for 0.2 verdicts
+    assert not rows["suite:bench#bench::a"].target_scope
+
+
+def test_wrap_warns_on_a_case_naming_several_ids(tmp_path, monkeypatch, capsys):
+    """rr::verifies! with two ids in one test: recorded (0.2), with RR-E101 on stderr."""
+    fake = tmp_path / "multi"
+    fake.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, os\n"
+        "with open(os.environ['RR_TRACE_FILE'], 'a') as fh:\n"
+        "    for rid in ('REQ-5', 'REQ-6'):\n"
+        "        fh.write(json.dumps({'test': 'parse::a', 'requirements': [rid], 'level': 'sil'}) + '\\n')\n"
+        "    fh.write(json.dumps({'test': 'parse::b', 'requirements': ['REQ-7']}) + '\\n')\n"
+        "print('running 2 tests')\n"
+        "print('test parse::a ... ok')\n"
+        "print('test parse::b ... ok')\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "m.xml"
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 0
+    err = capsys.readouterr().err
+    assert "rr wrap: warning: parse::a names REQ-5, REQ-6" in err and "[RR-E101]" in err
+    assert "parse::b" not in err
+    cases = {c.name: c for c in ingest.collect([str(xml)]).cases}
+    assert cases["a"].requirements == ("REQ-5", "REQ-6")
+
+
+def _run_strict(tmp_path):
+    """pytest over tmp_path with DeprecationWarnings escalated; (proc, cases by name)."""
+    (tmp_path / "main.py").write_text(
+        "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
+    )
+    xml = tmp_path / "out.xml"
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "main.py"), "-q", "-p", "no:cacheprovider", "-W", "error::DeprecationWarning"],
+        env=_env(XML_OUTPUT_FILE=str(xml)),
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    cases = {c.name: c for c in ingest.collect([str(xml)]).cases} if xml.exists() else {}
+    return proc, cases
+
+
+def test_pytest_marker_and_rr_verifies_on_one_function_warn(tmp_path):
+    """One scope, two declarations naming different ids: a multi-id case."""
+    (tmp_path / "test_same.py").write_text(
+        "import pytest, unittest\n"
+        "from rules_requirements import rr\n"
+        "@pytest.mark.rr('REQ-A')\n"
+        "@rr.verifies('REQ-B')\n"
+        "def test_same():\n    pass\n"
+        "@pytest.mark.rr('REQ-C')\n"
+        "@rr.verifies('REQ-C')\n"  # the same id twice: one requirement
+        "def test_agree():\n    pass\n"
+        "@pytest.mark.rr('REQ-D')\n"
+        "@rr.verifies('REQ-E')\n"
+        "class TestK:\n"
+        "    def test_k(self):\n        pass\n"
+    )
+    proc, cases = _run_strict(tmp_path)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "test_same.py::test_same: marker and rr.verifies names REQ-A, REQ-B" in out
+    assert "test_same.py::TestK: marker and rr.verifies names REQ-D, REQ-E" in out
+    assert cases["test_same"].status == "error" and cases["test_agree"].status == "passed"
+    assert cases["test_k"].status == "error"
+
+
+def test_pytest_param_mark_and_function_marker_do_not_warn(tmp_path):
+    """A pytest.param mark is nearer than the function's marker (0.3 keeps
+    it alone): not a multi-id declaration. Several ids in one param mark are."""
+    (tmp_path / "test_p.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('x', [1, pytest.param(2, marks=pytest.mark.rr('REQ-3'))])\n"
+        "@pytest.mark.rr('REQ-1')\n"
+        "def test_params(x):\n    pass\n"
+    )
+    proc, cases = _run_strict(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert set(cases["test_params[2]"].requirements) == {"REQ-1", "REQ-3"}  # both recorded, as in 0.1
+    (tmp_path / "test_p.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('x', [1, pytest.param(2, marks=pytest.mark.rr('REQ-3', 'REQ-4'))])\n"
+        "def test_params(x):\n    pass\n"
+    )
+    proc, cases = _run_strict(tmp_path)
+    assert proc.returncode == 1 and "test_params[2]: pytest.param marks names REQ-3, REQ-4" in proc.stdout
+    assert cases["test_params[1]"].status == "passed" and cases["test_params[2]"].status == "error"
+
+
+def test_rr_verifies_on_a_subclass_of_a_decorated_class_does_not_warn(tmp_path):
+    (tmp_path / "test_inh.py").write_text(
+        "import unittest\n"
+        "from rules_requirements import rr\n"
+        "@rr.verifies('REQ-1')\n"
+        "class Base(unittest.TestCase):\n"
+        "    def test_base(self):\n        pass\n"
+        "@rr.verifies('REQ-2')\n"
+        "class Sub(Base):\n"
+        "    def test_sub(self):\n        pass\n"
+    )
+    proc, cases = _run_strict(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert cases["test_sub"].requirements == ("REQ-1", "REQ-2")  # recorded as in 0.1
+
+    def stacked_on_a_subclass():
+        @rr.verifies("REQ-1")
+        class Base:
+            pass
+
+        @rr.verifies("REQ-3")
+        @rr.verifies("REQ-2")
+        class Sub(Base):
+            pass
+
+    (w,) = _recorded(stacked_on_a_subclass)  # its own two decorators are still one scope
+    assert "stacked decorators" in str(w.message) and "names REQ-2, REQ-3;" in str(w.message)
+
+
+def test_pytest_runner_pins_the_rootdir_to_the_runfiles_tree(tmp_path):
+    """An ini file above the runfiles tree (the execroot's pyproject.toml in a
+    local run) must not put bazel-out/.../runfiles into the classnames."""
+    execroot = tmp_path / "execroot" / "_main"
+    runfiles = execroot / "bazel-out" / "k8-fastbuild" / "bin" / "pi" / "server" / "server_test.runfiles"
+    pkg = runfiles / "_main" / "pi" / "server"
+    pkg.mkdir(parents=True)
+    (pkg / "test_handler.py").write_text("def test_configure():\n    pass\n")
+    (execroot / "pyproject.toml").write_text("[tool.pytest.ini_options]\nminversion = '6.0'\n")
+    xml = tmp_path / "out.xml"
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from rules_requirements.hooks.pytest_runner import main_argv\n"
+        "raise SystemExit(main_argv(['pi/server/test_handler.py']))\n"
+    )
+    env = _env(XML_OUTPUT_FILE=str(xml), TEST_SRCDIR=str(runfiles), TEST_WORKSPACE="_main")
+    proc = subprocess.run([sys.executable, str(main)], env=env, capture_output=True, text=True, cwd=runfiles / "_main")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    (case,) = ingest.collect([str(xml)]).cases
+    assert case.classname == "pi.server.test_handler"
+    # An explicit --rootdir is the caller's.
+    main.write_text(
+        "from rules_requirements.hooks.pytest_runner import main_argv\n"
+        f"raise SystemExit(main_argv(['--rootdir={execroot}', 'pi/server/test_handler.py']))\n"
+    )
+    proc = subprocess.run([sys.executable, str(main)], env=env, capture_output=True, text=True, cwd=runfiles / "_main")
+    (case,) = ingest.collect([str(xml)]).cases
+    assert case.classname.startswith("bazel-out.k8-fastbuild.bin.pi.server")
+
+
+def test_junit_writer_empty_requirement_string_is_no_requirement(tmp_path):
+    """0.1.0 recorded no id for ''; a comma or inner whitespace is still RR-E104."""
+    w = junit_writer.JUnitWriter("bench", file="")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        w.add("a", "")
+        w.add("b", requirements="")
+        w.add("c", "  ")
+        with w.case("d", ""):
+            pass
+    assert [c.requirements for c in w.cases] == [[], [], [], []]
+    with pytest.raises(ValueError, match="RR-E104"):
+        w.add("e", "REQ-1, REQ-2")
+    with pytest.raises(ValueError, match="RR-E104"):
+        w.add("f", "REQ 1")
+
+
+def test_source_file_on_another_drive_never_raises(tmp_path, monkeypatch):
+    """Windows: relpath raises for a script on another drive than the root; the
+    derived rr.file default must not make JUnitWriter(...) raise."""
+    import ntpath
+
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+
+    def cross_drive(path, start=None):
+        return ntpath.relpath("D:\\tools\\bench.py", "C:\\work")
+
+    monkeypatch.setattr(junit_writer.os.path, "relpath", cross_drive)
+    with pytest.raises(ValueError):
+        cross_drive("x")  # what ntpath does
+    script = str(tmp_path / "bench.py")
+    assert junit_writer.source_file(script) == script.replace(os.sep, "/")
+    monkeypatch.setattr(sys, "argv", [script])
+    assert junit_writer.JUnitWriter("bench").file == script.replace(os.sep, "/")

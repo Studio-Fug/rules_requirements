@@ -298,6 +298,18 @@ def decisions(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
     return out
 
 
+def case_files(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
+    """Each contested case's test source (its row's ``file``), where the evidence named one."""
+    out: dict[CaseKey, str] = {}
+    for g in (doc or {}).get("groups", []) or []:
+        if not isinstance(g, dict):
+            continue
+        for c in g.get("cases", []) or []:
+            if isinstance(c, dict) and c.get("path") is not None and isinstance(c.get("file"), str) and c["file"]:
+                out[CaseKey(str(g.get("target", "")), str(c["path"]))] = c["file"]
+    return out
+
+
 def model_edits(doc: Mapping[str, Any]) -> list[dict[str, str]]:
     """The ``verified_by`` edits the worksheet's decisions imply, per (target, requirement).
 

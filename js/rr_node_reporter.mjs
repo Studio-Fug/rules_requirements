@@ -16,7 +16,11 @@
 //       a failure that belongs to no case: a describe or parent test failing
 //       outside its subtests (`<hooks>`), or a root-level after() hook (`<file>`);
 //   {"kind":"warning", "message"}
-//       an rr diagnostic that cannot be tied to a case.
+//       an rr diagnostic that cannot be tied to a case;
+//   {"kind":"start"}, {"kind":"end"}
+//       node:test started and finished reporting (the event stream ended). A
+//       process that exits mid-run (`process.exit(0)` in a test) never writes
+//       the end; a file that registers no test writes neither.
 //
 // Node guarantees that test:start, test:pass/test:fail and test:diagnostic
 // arrive in declaration order, and a test's diagnostics right after its own
@@ -56,6 +60,7 @@ export default async function* rrCases(source) {
   const stack = []; // the open test:start chain, by nesting: {name, line, children}
   let index = 0;
   let last = null; // the most recently completed case: diagnostics follow it
+  emit({ kind: "start" });
   for await (const event of source) {
     const data = event.data ?? {};
     if (event.type === "test:start" || event.type === "test:plan") {
@@ -107,6 +112,7 @@ export default async function* rrCases(source) {
           duration: (data.details?.duration_ms ?? 0) / 1000,
           file: data.file || testFile,
           line: data.line,
+          column: data.column,
         });
       }
       stack.length = data.nesting;
@@ -127,4 +133,5 @@ export default async function* rrCases(source) {
       }
     }
   }
+  emit({ kind: "end" });
 }

@@ -212,6 +212,8 @@ runtimes cannot be attributed to a test (the wrapper warns about them).
 ### `rr_node_test`
 
 ```starlark
+# MODULE.bazel: bazel_dep(name = "aspect_rules_js", version = "3.2.2")  # or newer;
+# its default Node 22 toolchain is enough: no toolchain or npm setup is needed.
 load("@aspect_rules_js//js:defs.bzl", "js_test")
 
 rr_node_test(

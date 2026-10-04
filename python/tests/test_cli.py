@@ -350,6 +350,7 @@ def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
     assert (root / "app/tests/test_config.py").read_text() == before
     rc, out, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--dry-run", "--partial")
     assert rc == 1 and "would rewrite app/tests/test_config.py" in err
+    assert "4 file(s) would be rewritten, 1 refused" in err and "file(s) rewritten" not in err  # nothing was
 
     # All or nothing by default: test_modes.py is refused, so nothing is written.
     rc, _, err = run(capsys, "migrate", "apply", "decided.rrplan", "--stage", "tags", "--model", "requirements")
@@ -469,3 +470,39 @@ def test_migrate_apply_rejects_bad_worksheets(capsys, model_path, tmp_path):
     assert rc == 2 and "model is invalid" in err
     rc, _, err = run(capsys, "migrate", "apply", bad, "--stage", "tags", "--model", invalid)
     assert rc == 2
+
+
+def test_migrate_apply_ignores_unrelated_python_modules(capsys, tmp_path):
+    """//fw:codec_test#codec::round_trip (C++) must not resolve to tools/codec.py
+    and hold the whole apply back."""
+    (tmp_path / "app" / "tests").mkdir(parents=True)
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "app" / "tests" / "test_config.py").write_text(
+        'import pytest\n\n\n@pytest.mark.rr("REQ-1", "REQ-2")\ndef test_load():\n    pass\n', encoding="utf-8"
+    )
+    (tmp_path / "tools" / "codec.py").write_text("def encode():\n    pass\n", encoding="utf-8")
+    sheet = write(
+        tmp_path,
+        "plan.rrplan",
+        """
+        schema: rules_requirements/attribution-worksheet/v1
+        groups:
+        - target: //app/tests:t
+          group: app.tests.test_config
+          counts_toward: [REQ-1, REQ-2]
+          owner: REQ-1
+          cases: [{path: app.tests.test_config::test_load}]
+        - target: //fw:codec_test
+          group: codec
+          counts_toward: [REQ-1, REQ-2]
+          owner: REQ-2
+          cases: [{path: codec::round_trip, file: fw/codec_test.cc}]
+        """,
+    )
+    rc, out, err = run(
+        capsys, "migrate", "apply", sheet, "--stage", "tags", "--dry-run", "--no-collect-check", "--root", str(tmp_path)
+    )
+    assert rc == 0, err
+    assert "tools/codec.py" not in out + err
+    assert "not a Python test (its evidence names fw/codec_test.cc)" in out + err
+    assert "would rewrite app/tests/test_config.py" in out + err
