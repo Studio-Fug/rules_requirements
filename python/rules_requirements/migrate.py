@@ -31,7 +31,7 @@ from typing import Any, Iterable, Mapping
 
 from rules_requirements import config as cfg
 from rules_requirements._vendor import yaml
-from rules_requirements.case_keys import CaseKey, CaseRow, index_cases
+from rules_requirements.case_keys import CaseKey, CaseRow, index_cases, run_targets
 from rules_requirements.ingest import Evidence
 from rules_requirements.model import Model
 from rules_requirements.util import dedupe, natural_key
@@ -380,7 +380,7 @@ class Verification:
 
     offences: list[Offence] = field(default_factory=list)
     decided: int = 0  # decided cases found in the new evidence with exactly their owner
-    # Cases with no result whose target has no result at all in the new
+    # Cases with no result whose target has no result file in the new
     # evidence (a target CI does not run), tolerated with allow_missing.
     missing: list[CaseKey] = field(default_factory=list)
     # Decided cases declaring no id before or after: they count only through
@@ -412,7 +412,7 @@ def unkeyed(doc: Mapping[str, Any], evidence: Evidence) -> str:
     a directory named ``testlogs``), so evidence copied into a directory of
     another name is keyed by suite name and no case matches."""
     wanted = sorted({k.target for k in decisions(doc) if _is_label(k.target)}, key=natural_key)
-    found = {k.target for k in index_cases(evidence)}
+    found = run_targets(evidence)
     if not wanted or not found or any(_is_label(t) for t in found):
         return ""
     return (
@@ -446,9 +446,13 @@ def verify(
     are not compared.
 
     A case with no result is an offence, but with ``allow_missing`` one
-    whose target has no result at all in ``evidence`` (a HITL or manual
-    target CI does not run) is only listed in ``missing``. A case missing
-    from a target that did run stays an offence: it was renamed or lost.
+    whose target has no result file at all in ``evidence`` (a HITL or
+    manual target CI does not run) is only listed in ``missing``. A case
+    missing from a target that did run stays an offence: it was renamed or
+    lost. A target has run when the evidence has any result file for it
+    (:func:`~rules_requirements.case_keys.run_targets`): a case, a
+    synthetic whole-run result, or a report with no testcase at all (pytest
+    collected nothing).
 
     Only declared ids are checked. A decided case that declared no id before
     the rewrite and declares none after counts only through ``verified_by``,
@@ -471,7 +475,7 @@ def verify(
     out = Verification()
     decided = {k: v for k, v in decisions(doc).items() if v != OPEN}
     rows = index_cases(evidence)
-    ran = {key.target for key in rows}
+    ran = run_targets(evidence)  # any result file for it, an empty one included
     before = index_cases(baseline) if baseline is not None else None
     claims: dict[CaseKey, list[str]] = {}
     if model is not None:

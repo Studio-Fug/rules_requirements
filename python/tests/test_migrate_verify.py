@@ -212,6 +212,55 @@ def test_allow_missing_never_excuses_a_case_missing_from_a_target_that_ran(tmp_p
     assert [o.key for o in res.offences] == [NODE_A, NODE_U], [o.describe() for o in res.offences]
 
 
+_SYNTHETIC = (
+    "<testsuites><testsuite name='config_test' tests='1' failures='0' errors='1'>"
+    "<testcase name='config_test' status='run' duration='0' time='0'>"
+    "<error message='exited with error code 5'></error></testcase>"
+    "<system-out>Generated test.log (if the file is not UTF-8, then this may be unreadable):"
+    "</system-out></testsuite></testsuites>"
+)
+
+
+@pytest.mark.parametrize(
+    "report",
+    [
+        "<testsuites><testsuite name='config_test' tests='0'></testsuite></testsuites>",
+        "<testsuite name='pytest' errors='0' failures='0' skipped='0' tests='0'/>",
+        "<testsuites/>",
+        _SYNTHETIC,
+    ],
+    ids=["empty-testsuite", "pytest-collected-nothing", "empty-testsuites", "synthetic-only"],
+)
+@pytest.mark.parametrize("baseline", [True, False], ids=["baseline", "worksheet"])
+def test_a_target_with_a_result_file_ran(tmp_path, report, baseline):
+    """A target whose test.xml is in the evidence ran, even when the file
+    holds no testcase (pytest collected nothing) or only Bazel's synthetic
+    whole-run result: allow_missing does not excuse its missing cases."""
+    root = evidence(tmp_path / "new", AFTER, drop=[PY_A, PY_B, PY_C])
+    path = os.path.join(root, "bazel-testlogs", "app/tests", "config_test", "test.xml")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(report)
+    new = ingest.collect([root])
+    old = ingest.collect([evidence(tmp_path / "old", BEFORE)]) if baseline else None
+    res = migrate.verify(worksheet(), new, old, allow_missing=True)
+    expected = [PY_A, PY_C, PY_B] if baseline else [PY_A, PY_B]
+    assert sorted(o.key for o in res.offences) == sorted(expected), [o.describe() for o in res.offences]
+    assert all("though its target ran" in o.reason for o in res.offences)
+    assert not res.ok and not res.missing
+
+
+@pytest.mark.parametrize("baseline", [True, False], ids=["baseline", "worksheet"])
+def test_a_target_with_no_result_file_did_not_run(tmp_path, baseline):
+    """No result file at all for the target (CI does not run it): excused by
+    allow_missing, an offence without it."""
+    new = ingest.collect([evidence(tmp_path / "new", AFTER, drop=[PY_A, PY_B, PY_C])])
+    old = ingest.collect([evidence(tmp_path / "old", BEFORE)]) if baseline else None
+    res = migrate.verify(worksheet(), new, old, allow_missing=True)
+    assert res.ok and set(res.missing) == ({PY_A, PY_B, PY_C} if baseline else {PY_A, PY_B})
+    assert not migrate.verify(worksheet(), new, old).ok
+
+
 def test_untagged_cases_with_a_model(tmp_path):
     """With a model, a decided case that declares no id is owned through
     verified_by only when its target's claimers are exactly its owner; else
@@ -298,7 +347,7 @@ def test_cli(tmp_path, capsys, monkeypatch):
     rc, out, err = run("--evidence", hitl, "--baseline", old, "--allow-missing")
     assert rc == 0 and out == "", out
     assert (
-        "warning: 2 case(s) of 1 target(s) with no result at all in the evidence (--allow-missing: not run there): "
+        "warning: 2 case(s) of 1 target(s) with no result file in the evidence (--allow-missing: not run there): "
         f"not verified ({CC})\n  {CC_OPEN}\n  {CC_A}\n"
     ) in err
 

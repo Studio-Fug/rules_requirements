@@ -591,7 +591,7 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
     if res.missing:
         targets = sorted({key.target for key in res.missing}, key=natural_key)
         print(
-            f"warning: {len(res.missing)} case(s) of {len(targets)} target(s) with no result at all in the evidence "
+            f"warning: {len(res.missing)} case(s) of {len(targets)} target(s) with no result file in the evidence "
             f"(--allow-missing: not run there): not verified ({', '.join(targets)})",
             file=sys.stderr,
         )
@@ -986,8 +986,10 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument(
         "--allow-missing",
         action="store_true",
-        help="a case with no result is a warning, not an error, when its target has no result at all in the "
-        "evidence (a HITL or manual target CI does not run); a case missing from a target that ran stays an error",
+        help="a case with no result is a warning, not an error, when its target has no result file at all in the "
+        "evidence (a HITL or manual target CI does not run); a case missing from a target that ran stays an error. "
+        "A target with any result file ran: a test.xml with no testcase (pytest collected nothing) or only Bazel's "
+        "synthetic whole-run result included",
     )
     mv.add_argument(
         "--model",
