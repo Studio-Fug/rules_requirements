@@ -246,22 +246,36 @@ def cmd_graph(args: argparse.Namespace) -> int:
 def cmd_ingest(args: argparse.Namespace) -> int:
     for spec in args.ingestor or []:
         ingest.load_ingestor(spec)
+    from rules_requirements.case_keys import run_dims_from_path
+
     ev = ingest.collect([_path(p) for p in args.paths], only=args.format or None)
     rows: list[dict[str, Any]] = [
         {
             "name": c.name,
             "classname": c.classname,
             "status": c.status,
-            "requirements": list(c.requirements),
+            "declared": list(c.declared),  # tags, never owners
+            "requirements": list(c.declared),  # deprecated name of "declared" (0.3.x)
             "level": c.level,
             "artifact": c.artifact,
             "target": c.target,
+            "scope": c.scope,
+            "synthetic": c.synthetic,
+            "attempt": run_dims_from_path(c.source).attempt,
+            "file": c.file,
+            "line": c.line,
             "source": c.source,
         }
         for c in ev.cases
     ]
+    _print_ingest_issues(ev)
     print(json.dumps({"files": ev.files, "cases": rows}, indent=2))
     return 0
+
+
+def _print_ingest_issues(ev: ingest.Evidence) -> None:
+    for issue in ev.issues:
+        print(issue, file=sys.stderr)
 
 
 def _collect_evidence(args: argparse.Namespace, command: str) -> ingest.Evidence | None:
@@ -278,6 +292,7 @@ def _collect_evidence(args: argparse.Namespace, command: str) -> ingest.Evidence
     for given, path in zip(args.evidence, paths):
         if not any(f in used for f in ingest.expand([path])):
             print(f"warning: [no-evidence] {given}: no evidence file found there", file=sys.stderr)
+    _print_ingest_issues(ev)
     if not ev.files:
         print(f"rr {command}: no evidence found in {' '.join(args.evidence) or '(nothing given)'}", file=sys.stderr)
         return None
