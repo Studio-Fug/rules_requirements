@@ -520,3 +520,44 @@ def test_malformed_claim_items_are_never_written(item):
         edit.normalize("requirement", data)
     with pytest.raises(edit.EditError):
         edit.insert_entity("requirements: []\n", "requirement", data)
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        ["returns x, y when z"],
+        ["a,b"],
+        ["null,", "a"],
+        ["a[", "b]"],
+        ["{x}", "x{"],
+        ["a #b", "#c"],
+        ["test_x[exc0-False]", "x, " * 30],
+    ],
+)
+def test_selectors_with_flow_indicators_are_written_as_one_selector(selectors):
+    data = {"id": "PR-1", "title": "t", "verified_by": [{"target": "//a:b", "cases": selectors}]}
+    out = edit.insert_entity("requirements: []\n", "requirement", data)
+    edit.verify("requirements: []\n", out, {"PR-1": {**data, "kind": "requirement"}})
+    assert parse(out).get("PR-1").verified_by[0].cases == tuple(selectors)
+    # and again as one item among several, where each item gets its own line
+    data["verified_by"].append({"target": "//c:d", "cases": ["y, " * 20]})
+    out = edit.update_entity(out, "PR-1", data)
+    assert [vb.cases for vb in parse(out).get("PR-1").verified_by] == [tuple(selectors), ("y, " * 20,)]
+
+
+def test_claims_that_render_no_other_way_are_double_quoted_blocks(monkeypatch):
+    long_case = "a, b " * 20
+    items = [{"target": "//a:b", "cases": [long_case], "level": "hil"}, "//c:d"]
+    monkeypatch.setattr(edit, "_claim_lines", lambda key, items, pad: [f"{pad}{key}: [broken"])
+    lines = edit._claim_block("verified_by", items, "")
+    assert lines == [
+        "verified_by:",
+        '  - "target": "//a:b"',
+        '    "cases":',
+        f'      - "{long_case}"',
+        '    "level": "hil"',
+        '  - "//c:d"',
+    ]
+    monkeypatch.setattr(edit, "_quoted_block", lambda key, items, pad: [f"{pad}{key}: [broken"])
+    with pytest.raises(edit.EditError):
+        edit._claim_block("verified_by", items, "")

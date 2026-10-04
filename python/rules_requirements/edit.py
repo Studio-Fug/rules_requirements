@@ -174,26 +174,38 @@ def _dq(text: str) -> str:
     return "".join(out)
 
 
-def _scalar(value: Any) -> str:
+# Inside a flow collection (``[a, b]``, ``{k: v}``) these end or open a node,
+# so a plain scalar holding one would be split ("a, b" reads as two items) or
+# not parse at all; outside one they are ordinary characters.
+_FLOW_INDICATORS = frozenset(",[]{}")
+
+
+def _scalar(value: Any, flow: bool = False) -> str:
+    """One scalar, plain when that reads back as the same string, else
+    double-quoted. ``flow``: it sits inside a flow collection."""
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value)
     text = str(value)
+    if flow and not _FLOW_INDICATORS.isdisjoint(text):
+        return _dq(text)
     return text if _plain_ok(text) else _dq(text)
 
 
-def _value(value: Any) -> str:
-    """Any plain YAML value in flow form (for keys this model does not define)."""
+def _value(value: Any, flow: bool = True) -> str:
+    """Any plain YAML value, collections in flow form (for keys this model
+    does not define). ``flow``: a scalar ``value`` sits inside a flow
+    collection; nested scalars always do."""
     if isinstance(value, (list, tuple)):
         return "[" + ", ".join(_value(v) for v in value) + "]"
     if isinstance(value, Mapping):
-        return "{" + ", ".join(f"{_scalar(k)}: {_value(v)}" for k, v in value.items()) + "}"
+        return "{" + ", ".join(f"{_scalar(k, flow=True)}: {_value(v)}" for k, v in value.items()) + "}"
     if value is None:
         return "null"
     if isinstance(value, (bool, int, float)):
         return _scalar(value)
-    return _scalar(str(value)) if not hasattr(value, "isoformat") else _dq(value.isoformat())
+    return _scalar(str(value), flow) if not hasattr(value, "isoformat") else _dq(value.isoformat())
 
 
 def _reads_back(snippet: str, expected: Any) -> bool:
@@ -207,9 +219,9 @@ def _flow_list(items: list[Any]) -> str:
     parts = []
     for item in items:
         if isinstance(item, Mapping):
-            parts.append("{" + ", ".join(f"{k}: {_value(v)}" for k, v in item.items()) + "}")
+            parts.append("{" + ", ".join(f"{_scalar(k, flow=True)}: {_value(v)}" for k, v in item.items()) + "}")
         else:
-            parts.append(_scalar(item))
+            parts.append(_scalar(item, flow=True))
     return "[" + ", ".join(parts) + "]"
 
 
@@ -258,7 +270,7 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
                     continue
                 prefix = f"{pad}  - " if first else f"{pad}    "
                 # a key this model does not define keeps its value as-is
-                block = _text_block(nk, str(note[nk]), "") if nk in known else [f"{nk}: {_value(note[nk])}"]
+                block = _text_block(nk, str(note[nk]), "") if nk in known else [f"{nk}: {_value(note[nk], flow=False)}"]
                 lines.append(prefix + block[0])
                 lines += [f"{pad}    {ln}" if ln else "" for ln in block[1:]]
                 first = False
@@ -283,10 +295,23 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
 def _claim_block(key: str, items: list[Any], pad: str) -> list[str]:
     """``verified_by`` / ``validated_by``: one flow line if it fits, else one
     entry per item — a flow mapping if it fits, else a block mapping with the
-    selectors as a block list (long case names stay readable in diffs)."""
+    selectors as a block list (long case names stay readable in diffs).
+
+    Every candidate is re-parsed and the first that reads back exactly wins;
+    the last resort is block form with every string double-quoted, and an
+    items list that not even that renders is refused with :class:`EditError`.
+    """
     flow = f"{pad}{key}: {_flow_list(items)}"
     if len(flow) <= WIDTH and _reads_back(f"{key}: {_flow_list(items)}\n", {key: items}):
         return [flow]
+    for lines in (_claim_lines(key, items, pad), _quoted_block(key, items, pad)):
+        snippet = "\n".join(ln[len(pad) :] for ln in lines) + "\n"
+        if _reads_back(snippet, {key: items}):
+            return lines
+    raise EditError(f"{key}: cannot render {items!r} so that it reads back unchanged")
+
+
+def _claim_lines(key: str, items: list[Any], pad: str) -> list[str]:
     out = [f"{pad}{key}:"]
     for item in items:
         if not isinstance(item, Mapping):
@@ -302,13 +327,32 @@ def _claim_block(key: str, items: list[Any], pad: str) -> list[str]:
             first = False
             if k == "cases" and v:
                 out.append(f"{lead}cases:")
-                out += [f"{pad}      - {_value(c)}" for c in v]
+                out += [f"{pad}      - {_value(c, flow=False)}" for c in v]
             else:
-                out.append(f"{lead}{k}: {_value(v)}")
-    snippet = "\n".join(ln[len(pad) :] for ln in out) + "\n"
-    if _reads_back(snippet, {key: items}):
-        return out
-    return [f"{pad}{key}:"] + [f"{pad}  - {_value(item)}" for item in items]
+                out.append(f"{lead}{k}: {_value(v, flow=False)}")
+    return out
+
+
+def _quoted_block(key: str, items: list[Any], pad: str) -> list[str]:
+    """Block form with every string key and value double-quoted."""
+
+    def q(value: Any) -> str:
+        return _dq(value) if isinstance(value, str) else _value(value)
+
+    out = [f"{pad}{key}:"]
+    for item in items:
+        if not isinstance(item, Mapping) or not item:
+            out.append(f"{pad}  - {q(item)}")
+            continue
+        lead = f"{pad}  - "
+        for k, v in item.items():
+            if isinstance(v, (list, tuple)) and v:
+                out.append(f"{lead}{q(k)}:")
+                out += [f"{pad}      - {q(c)}" for c in v]
+            else:
+                out.append(f"{lead}{q(k)}: {q(v)}")
+            lead = f"{pad}    "
+    return out
 
 
 def render_entity(
