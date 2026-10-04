@@ -281,6 +281,45 @@ def _alive(pid):
         return False
 
 
+# How long to wait for the hung child to die once its runner is killed. The
+# child dies promptly via PR_SET_PDEATHSIG; the bound only has to survive a
+# loaded host reaping it slowly (it flaked once at 10 s under Bazel 7.7.1), so
+# it is generous and measured from the kill, not from the start of the test.
+_CHILD_DEATH_TIMEOUT = 60
+
+
+def _wait_gone(pid, timeout, *, alive=_alive, now=time.monotonic, sleep=time.sleep):
+    """Poll until `pid` is gone, or `timeout` seconds (measured from now) pass.
+    Returns whether it is gone. `alive`/`now`/`sleep` are injectable for tests."""
+    deadline = now() + timeout
+    gone = not alive(pid)
+    while not gone and now() < deadline:
+        sleep(0.02)
+        gone = not alive(pid)
+    return gone
+
+
+def test_wait_gone_tolerates_a_child_that_dies_after_the_old_deadline():
+    """A child that dies later than the old 10 s bound but within the generous
+    one must still be seen gone: the flaky deadline is what this guards."""
+    clock = {"t": 0.0}
+    dies_at = 11.0  # later than the old 10 s deadline, well inside the generous one
+
+    def now():
+        return clock["t"]
+
+    def sleep(_dt):
+        clock["t"] += 1.0  # each poll advances one simulated second
+
+    def alive(_pid):
+        return now() < dies_at
+
+    clock["t"] = 0.0
+    assert not _wait_gone(object(), 10, alive=alive, now=now, sleep=sleep)  # old bound: times out
+    clock["t"] = 0.0
+    assert _wait_gone(object(), _CHILD_DEATH_TIMEOUT, alive=alive, now=now, sleep=sleep)  # generous: waits it out
+
+
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_PDEATHSIG is Linux-only")
 def test_a_hung_case_dies_with_its_killed_runner(binary, tmp_path):
     # rr_evidence (and many CI runners) kill only the runner on a timeout,
@@ -300,10 +339,9 @@ def test_a_hung_case_dies_with_its_killed_runner(binary, tmp_path):
         assert _alive(child)
         runner.kill()
         runner.wait()
-        deadline = time.monotonic() + 10
-        while _alive(child) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert not _alive(child), "the hung case outlived its killed runner"
+        # Measured from the kill, with a generous upper bound so a loaded host
+        # reaping the child slowly does not fail a test that still proves it dies.
+        assert _wait_gone(child, _CHILD_DEATH_TIMEOUT), "the hung case outlived its killed runner"
         assert _cases(tmp_path / "out.xml")["hangs"][1].startswith("did not finish")
     finally:
         runner.kill()
