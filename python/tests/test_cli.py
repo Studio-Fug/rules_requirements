@@ -303,11 +303,12 @@ def test_cases_lists_keys(capsys, tmp_path):
     loose = junit(tmp_path, "loose/report.xml", [("b", "failed", [], "")])
     rc, out, err = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"), loose)
     assert rc == 0
-    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
+    # The [rr:REQ-9] name tag is a declared id too (v0.3): two ids, a multi-tag case.
+    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1,REQ-9\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
     assert "2 case(s) in 2 target(s)" in err and "[unscoped-evidence]" in err and "suite:s" in err
     rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path), "--target", "//pkg:t", "--json")
     (row,) = json.loads(out)
-    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1"]
+    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1", "REQ-9"]
 
 
 def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):

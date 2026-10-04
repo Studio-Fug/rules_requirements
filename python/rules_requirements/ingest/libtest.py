@@ -134,9 +134,11 @@ def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCas
 def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
     """Apply ``rr::verifies!`` trace lines to the matching cases.
 
-    Each line is JSON ``{"test": "<module::name>", "requirements": [...],
+    Each line is JSON ``{"test": "<module::name>", "requirement": "PR-4",
     "level": "...", "artifact": {...}}``; ``test`` is the libtest thread name,
-    which is the test's full path.
+    which is the test's full path. The 0.2 list form (``"requirements":
+    [...]``) is still read. Every id becomes a declared tag of the case, so a
+    list of two, or two lines with different ids, is a ``multi-tag`` case.
     """
     by_name = {(f"{c.classname}::{c.name}" if c.classname else c.name): c for c in cases}
     for line in trace_text.splitlines():
@@ -147,10 +149,15 @@ def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(rec, dict):
+            continue
         case = by_name.get(str(rec.get("test", "")))
         if case is None:
             continue
-        props = [("requirement", r) for r in rec.get("requirements", [])]
+        props: list[tuple[str, str]] = []
+        for key in ("requirement", "requirements"):  # 0.3 single id; the 0.2 list form
+            value = rec.get(key)
+            props += [("requirement", str(r)) for r in (value if isinstance(value, list) else [value]) if r]
         if rec.get("level"):
             props.append(("level", str(rec["level"])))
         props += [(f"artifact.{k}", str(v)) for k, v in (rec.get("artifact") or {}).items()]

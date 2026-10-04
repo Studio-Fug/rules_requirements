@@ -22,7 +22,7 @@ def main(out: str, roots: list[str]) -> int:
                     continue
                 for case in JUnitIngestor().ingest(os.path.join(dirpath, name)):
                     path = f"{case.classname}::{case.name}" if case.classname else case.name
-                    props = [f"requirement={r}" for r in case.requirements]
+                    props = [f"requirement={r}" for r in case.declared]
                     props += [f"level={case.level}"] if case.level else []
                     props += [f"artifact.{k}={v}" for k, v in sorted(case.artifact.items())]
                     props += [f"{k}={v}" for k, v in sorted(case.properties.items())]

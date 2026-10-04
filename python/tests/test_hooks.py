@@ -1078,12 +1078,13 @@ def test_pytest_multi_id_warning_escalated_errors_one_test_per_declaration(tmp_p
 
 
 def test_pytest_space_separated_marker_records_one_id_without_warning(tmp_path):
-    # As on origin/main, a marker string is split on commas only: "REQ-1 REQ-2"
-    # is one (malformed) id, so it must not warn that it names several ids.
+    # The hook writes the marker string as given. Since v0.3, ingest splits a
+    # requirement value on commas *and* whitespace: "REQ-1 REQ-2" declares two
+    # ids, which makes the case a multi-tag (quarantined), never two owners.
     (tmp_path / "test_space.py").write_text("import pytest\n@pytest.mark.rr('REQ-1 REQ-2')\ndef test_s():\n    pass\n")
     proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
     assert proc.returncode == 0, out
-    assert cases["test_s"].requirements == ("REQ-1 REQ-2",)
+    assert cases["test_s"].declared == ("REQ-1", "REQ-2")
     assert "MultipleRequirementsWarning" not in out
 
 

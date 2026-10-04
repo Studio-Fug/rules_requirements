@@ -6,7 +6,8 @@ import pytest
 from conftest import junit, write
 
 from rules_requirements import ingest
-from rules_requirements.ingest import Ingestor, TestCase
+from rules_requirements.case_keys import CaseKey, index_cases, is_target_scope, key_of
+from rules_requirements.ingest import IngestIssue, Ingestor, TestCase, apply_properties, split_ids
 from rules_requirements.ingest.junit import JUnitIngestor, target_from_path
 from rules_requirements.ingest.libtest import merge_trace, parse_libtest
 
@@ -65,13 +66,13 @@ def test_junit_dialects(tmp_path):
     path = write(tmp_path, "bazel-testlogs/pkg/t/test.xml", xml)
     cases = {c.name: c for c in JUnitIngestor().ingest(path)}
     a = cases["a"]
-    assert a.requirements == ("REQ-1", "REQ-2", "REQ-3")
+    assert a.declared == ("REQ-1", "REQ-2", "REQ-3")  # every id: a multi-tag case
     assert a.level == "hil" and a.artifact == {"fw": "1.2"}
     assert a.properties == {"owner": "qa"}
     assert a.duration == 0.5 and a.target == "//pkg:t"
     assert a.full_name == "//pkg:t c::a"
     b = cases["b"]
-    assert b.requirements == ("REQ-4",) and b.level == "sil" and b.properties == {"custom": "x"}
+    assert b.declared == ("REQ-4",) and b.level == "sil" and b.properties == {"custom": "x"}
     assert b.duration == 0.0
     assert cases["c"].status == "skipped"
     assert cases["d"].status == "failed" and cases["d"].message == "long text" and cases["d"].is_failure
@@ -79,9 +80,13 @@ def test_junit_dialects(tmp_path):
     assert cases["f"].status == "skipped" and cases["f"].full_name == "//pkg:t f"
 
 
-def test_junit_unparseable_reports_an_error(tmp_path):
+def test_junit_unparseable_reports_a_target_scope_error(tmp_path):
     (case,) = JUnitIngestor().ingest(write(tmp_path, "bazel-testlogs/p/t/test.xml", "<testsuite><oops"))
     assert case.status == "error" and case.target == "//p:t" and "unreadable" in case.message
+    # About the whole run: it taints the target's members, it is no member itself.
+    assert case.scope == "target" and is_target_scope(case) and case.declared == ()
+    (row,) = index_cases([case]).values()
+    assert row.target_scope and row.key == CaseKey("//p:t", "<unreadable>")
 
 
 def test_testsuites_level_properties_and_attempts(tmp_path):
@@ -161,7 +166,7 @@ def test_libtest_parse_and_trace():
         ]
     )
     merge_trace(list(cases.values()), trace)
-    assert cases["parse::rejects_empty"].requirements == ("REQ-1",)
+    assert cases["parse::rejects_empty"].declared == ("REQ-1",)
     assert cases["parse::rejects_empty"].level == "sil"
     assert cases["::top_level"].artifact == {"k": "v"}
 
@@ -199,7 +204,7 @@ def test_records_ingestor(tmp_path):
     ev = ingest.collect([yaml_path, json_path])
     by_name = {c.name: c for c in ev.cases}
     lbl = by_name["label-legible"]
-    assert lbl.requirements == ("REQ-12",) and lbl.level == "inspection"
+    assert lbl.declared == ("REQ-12",) and lbl.level == "inspection"
     assert lbl.artifact == {"board_rev": "C"} and lbl.properties == {"signed_by": "J. Doe"}
     assert by_name["weird"].status == "error" and "no valid status" in by_name["weird"].message
     assert by_name["planned-not-signed"].status == "error"
@@ -217,7 +222,7 @@ class TapIngestor(Ingestor):
                     ok = line.startswith("ok")
                     name = line.split("-", 1)[1].split("#")[0].strip()
                     reqs = tuple(line.split("# rr:")[1].split()) if "# rr:" in line else ()
-                    yield TestCase(name=name, status="passed" if ok else "failed", requirements=reqs, source=path)
+                    yield TestCase(name=name, status="passed" if ok else "failed", declared=reqs, source=path)
 
 
 def test_custom_ingestor_registration(tmp_path):
@@ -346,3 +351,265 @@ def test_libtest_nocapture_last_verdict_and_failure_list_win():
     )
     cases = {f"{c.classname}::{c.name}": c.status for c in parse_libtest(text)}
     assert cases == {"hw::flash_and_boot": "failed", "hw::other": "passed", "hw::silent": "failed"}
+
+
+# --- v0.3: ingest records declared ids, never owners -------------------------
+
+
+def test_declared_is_a_field_and_requirements_a_deprecated_alias():
+    # Positional construction is unchanged: the fourth field was `requirements`.
+    case = TestCase("n", "passed", "cls", ("R-1",), "unit", {}, "", 0.5, "r.xml", "//a:b", {"k": "v"})
+    assert case.declared == ("R-1",)
+    with pytest.warns(DeprecationWarning, match="use TestCase.declared"):
+        assert case.requirements == ("R-1",)
+    with pytest.warns(DeprecationWarning, match="tags, not owners"):
+        case.requirements = ["R-2", "R-3"]
+    assert case.declared == ("R-2", "R-3")  # a list is stored as a tuple
+    with pytest.warns(DeprecationWarning):
+        legacy = TestCase("n", "passed", requirements=["R-4"])
+    assert legacy.declared == ("R-4",)
+    with pytest.raises(TypeError, match="not both"), pytest.warns(DeprecationWarning):
+        TestCase("n", "passed", declared=("R-1",), requirements=("R-2",))
+    # A bare string is one id, not its characters.
+    assert TestCase("n", "passed", declared="R-5").declared == ("R-5",)
+    # Ownership is nobody's field: a case has no owner to set.
+    assert not any("owner" in name for name in vars(TestCase("n", "passed")))
+
+
+def test_scope_and_synthetic_accessors():
+    assert TestCase("n", "error", properties={"rr.scope": "TARGET"}).scope == "target"
+    assert TestCase("n", "passed").scope == "case"
+    assert TestCase("n", "passed", properties={"rr.synthetic": "true"}).synthetic
+    assert not TestCase("n", "passed").synthetic
+
+
+@pytest.mark.parametrize(
+    ("value", "ids"),
+    [
+        ("REQ-1", ["REQ-1"]),
+        ("REQ-1,REQ-2", ["REQ-1", "REQ-2"]),
+        (" REQ-1 , REQ-2 ", ["REQ-1", "REQ-2"]),
+        ("REQ-1 REQ-2", ["REQ-1", "REQ-2"]),  # whitespace separates ids too (v0.3)
+        ("REQ-1\tREQ-2\nREQ-3", ["REQ-1", "REQ-2", "REQ-3"]),
+        (",,", []),
+        ("", []),
+    ],
+)
+def test_split_ids_on_commas_and_whitespace(value, ids):
+    assert split_ids(value) == ids
+
+
+def test_apply_properties_gathers_every_id_in_order_without_deciding():
+    case = TestCase("probe [rr:REQ-9]", "passed")
+    apply_properties(
+        case,
+        [("requirement", "REQ-2"), ("requirements", "REQ-1 REQ-2"), ("requirement", ""), ("level", "HIL")],
+    )
+    # Distinct ids, in order, the name tag last: a multi-tag case, for
+    # attribution to quarantine. Nothing here picks one of them.
+    assert case.declared == ("REQ-2", "REQ-1", "REQ-9")
+    assert case.level == "hil"
+    apply_properties(case, [("requirement", "REQ-1")])  # idempotent: no duplicates
+    assert case.declared == ("REQ-2", "REQ-1", "REQ-9")
+
+
+@pytest.mark.parametrize(
+    ("testcase", "declared"),
+    [
+        # Every way a JUnit producer can name more than one id (P11): all kept.
+        (
+            '<testcase name="t"><properties><property name="requirement" value="A-1"/>'
+            '<property name="requirement" value="B-2"/></properties></testcase>',
+            ("A-1", "B-2"),
+        ),
+        ('<testcase name="t" requirement="A-1,B-2"/>', ("A-1", "B-2")),
+        ('<testcase name="t" requirements="A-1 B-2"/>', ("A-1", "B-2")),
+        (
+            '<testcase name="t"><properties><property name="requirements" value="A-1, B-2"/></properties></testcase>',
+            ("A-1", "B-2"),
+        ),
+        ('<testcase name="t [rr:A-1] [rr:B-2]"/>', ("A-1", "B-2")),
+        ('<testcase name="t [rr:A-1,B-2]"/>', ("A-1", "B-2")),
+        (
+            '<testcase name="t [rr:A-1]"><properties><property name="requirement" value="B-2"/></properties></testcase>',
+            ("B-2", "A-1"),
+        ),
+        # One id however it is spelled.
+        ('<testcase name="t [rr:A-1]"/>', ("A-1",)),
+        (
+            '<testcase name="t" requirement="A-1"><properties><property name="requirement" value="A-1"/>'
+            "</properties></testcase>",
+            ("A-1",),
+        ),
+        ('<testcase name="t"/>', ()),
+    ],
+)
+def test_junit_declared_ids(tmp_path, testcase, declared):
+    path = write(tmp_path, "bazel-testlogs/p/t/test.xml", f'<testsuite name="s">{testcase}</testsuite>')
+    (case,) = JUnitIngestor().ingest(path)
+    assert case.declared == declared
+    # Re-tagging never renames a case: the key never carries the tags.
+    assert key_of(case) == CaseKey("//p:t", "t")
+
+
+def test_name_tags_are_declared_for_hand_built_cases_too():
+    rows = index_cases([TestCase("probe [rr:PR-1] ok", "passed", target="//a:b")])
+    (row,) = rows.values()
+    assert row.key == CaseKey("//a:b", "probe ok") and row.declared == ("PR-1",)
+
+
+def test_suite_level_requirements_are_not_inherited(tmp_path):
+    xml = """<testsuites>
+      <properties><property name="requirement" value="REQ-9"/><property name="artifact.sha" value="abc"/></properties>
+      <testsuite name="Interlock">
+        <properties>
+          <property name="requirements" value="REQ-1,REQ-3"/>
+          <property name="level" value="HIL"/>
+          <property name="hostname" value="rig-2"/>
+        </properties>
+        <testcase classname="Interlock" name="CutsHeater"/>
+        <testcase classname="Interlock" name="Own"><properties>
+          <property name="requirement" value="REQ-4"/></properties></testcase>
+      </testsuite>
+    </testsuites>"""
+    ev = ingest.collect([write(tmp_path, "bazel-testlogs/fw/interlock_test/test.xml", xml)])
+    cut, own = ev.cases
+    # level and artifact.* still reach the cases; requirement ids do not (P6/P12).
+    assert cut.declared == () and own.declared == ("REQ-4",)
+    assert cut.level == own.level == "hil" and cut.artifact == {"sha": "abc"}
+    assert "hostname" not in cut.properties
+    assert cut.suite_declared == own.suite_declared == ("REQ-9", "REQ-1", "REQ-3")
+    # One warning per suite, not per case.
+    assert ev.issues == [
+        IngestIssue(
+            "suite-level-requirement", cut.source, "//fw:interlock_test", "Interlock", ("REQ-9", "REQ-1", "REQ-3")
+        )
+    ]
+    assert "[suite-level-requirement]" in str(ev.issues[0]) and "not inherited" in str(ev.issues[0])
+    assert ev.for_id("REQ-1") == [] and ev.for_id("REQ-4") == [own]
+
+
+def test_nested_testcases_become_a_scope(tmp_path):
+    xml = """<testsuite name="go">
+      <testcase classname="pkg" name="TestParse [rr:REQ-8]" file="pkg/parse_test.go">
+        <properties><property name="level" value="unit"/><property name="requirement" value="REQ-7"/></properties>
+        <testcase name="empty" line="12"/>
+        <testcase name="unicode"><failure message="bad rune"/></testcase>
+        <testcase name="deeper"><testcase name="leaf [rr:REQ-1]"/></testcase>
+      </testcase>
+      <testcase classname="pkg" name="TestSetup"><error message="setup broke"/>
+        <testcase name="never"><skipped/></testcase>
+      </testcase>
+      <testcase classname="pkg" name="TestAggregate"><failure message="1 subtest failed"/>
+        <testcase name="sub"><failure message="boom"/></testcase>
+      </testcase>
+      <testcase name="TopLevel"><testcase name="child"/></testcase>
+    </testsuite>"""
+    ev = ingest.collect([write(tmp_path, "bazel-testlogs/pkg/parse_test/test.xml", xml)])
+    rows = index_cases(ev)
+    by_path = {k.path: r for k, r in rows.items()}
+    assert sorted(by_path) == [
+        "TopLevel::child",
+        "pkg > TestAggregate::sub",
+        "pkg > TestParse > deeper::leaf",
+        "pkg > TestParse::empty",
+        "pkg > TestParse::unicode",
+        "pkg > TestSetup::<hooks>",
+        "pkg > TestSetup::never",
+    ]
+    empty = by_path["pkg > TestParse::empty"]
+    # The parent's level and source reach its children; its ids (property or
+    # name tag) are scope-level, and do not.
+    assert empty.status == "passed" and empty.level == "unit" and empty.declared == ()
+    assert empty.file == "pkg/parse_test.go" and empty.line == 12
+    assert by_path["pkg > TestParse::unicode"].status == "failed"
+    assert by_path["pkg > TestParse > deeper::leaf"].declared == ("REQ-1",)
+    # A parent failing on its own is target-scope; one failing because a
+    # child failed is not reported twice.
+    hooks = by_path["pkg > TestSetup::<hooks>"]
+    assert hooks.target_scope and hooks.status == "error" and "setup broke" in hooks.message
+    assert not any(k.path.startswith("pkg > TestAggregate::<") for k in rows)
+    leaf = next(c for c in ev.cases if c.name == "empty")
+    assert leaf.suite_declared == ("REQ-7", "REQ-8")
+    assert {i.scope for i in ev.issues} == {"go"}
+
+
+def test_records_target_and_single_requirement(tmp_path):
+    path = write(
+        tmp_path,
+        "evidence/panel_inspection.rr.yaml",
+        """
+        target: record:panel_inspection
+        evidence:
+          - name: label-legible
+            status: passed
+            requirement: REQ-12
+          - name: legacy-list
+            status: passed
+            requirements: [REQ-13]
+          - name: two-ids
+            status: passed
+            requirements: [REQ-13, REQ-14]
+          - name: both-keys
+            status: passed
+            requirement: REQ-1
+            requirements: [REQ-2]
+          - name: elsewhere
+            status: failed
+            target: //bench:soak_test
+            requirement: [REQ-3]
+          - name: untagged
+            status: passed
+        """,
+    )
+    cases = {c.name: c for c in ingest.collect([path]).cases}
+    assert cases["label-legible"].declared == ("REQ-12",)
+    assert cases["legacy-list"].declared == ("REQ-13",)
+    assert cases["two-ids"].declared == ("REQ-13", "REQ-14")  # multi-tag downstream
+    assert cases["both-keys"].declared == ("REQ-1", "REQ-2")
+    assert cases["untagged"].declared == ()
+    assert key_of(cases["label-legible"]) == CaseKey("record:panel_inspection", "label-legible")
+    assert key_of(cases["elsewhere"]) == CaseKey("//bench:soak_test", "elsewhere")
+    # Without a document target, the key's target is record:<file stem>.
+    bare = write(tmp_path, "bench.rr.yaml", "evidence:\n  - {name: x, status: passed, requirement: REQ-1}\n")
+    (case,) = ingest.collect([bare]).cases
+    assert case.target == "" and key_of(case) == CaseKey("record:bench", "x")
+
+
+def test_rust_trace_lines_single_id_and_legacy_lists():
+    cases = parse_libtest(LIBTEST, target="//r:t")
+    by_path = {f"{c.classname}::{c.name}": c for c in cases}
+    trace = "\n".join(
+        [
+            json.dumps({"test": "parse::rejects_empty", "requirement": "REQ-1"}),
+            json.dumps({"test": "parse::accepts_c", "requirements": ["REQ-1", "REQ-2"]}),  # 0.2 list
+            json.dumps({"test": "slow::soak", "requirement": "REQ-3"}),
+            json.dumps({"test": "slow::soak", "requirement": "REQ-4"}),  # a second call, another id
+            json.dumps(["not", "an", "object"]),
+            json.dumps({"test": "top_level", "requirement": ""}),
+        ]
+    )
+    merge_trace(cases, trace)
+    assert by_path["parse::rejects_empty"].declared == ("REQ-1",)
+    assert by_path["parse::accepts_c"].declared == ("REQ-1", "REQ-2")
+    assert by_path["slow::soak"].declared == ("REQ-3", "REQ-4")
+    assert by_path["::top_level"].declared == ()
+
+
+def test_file_and_line(tmp_path):
+    xml = (
+        '<testsuite name="s">'
+        '<testcase classname="c" name="a" file="/x/t.runfiles/_main/pkg/a_test.cc" line="7"/>'
+        '<testcase classname="c" name="b" line="nope"><properties>'
+        '<property name="rr.file" value="bazel-out/k8-fastbuild/bin/pkg/b_test.py"/></properties></testcase>'
+        "</testsuite>"
+    )
+    a, b = JUnitIngestor().ingest(write(tmp_path, "r.xml", xml))
+    assert (a.file, a.line) == ("pkg/a_test.cc", 7)
+    assert (b.file, b.line) == ("pkg/b_test.py", 0)
+    assert a.properties["rr.file"] == "/x/t.runfiles/_main/pkg/a_test.cc"  # the raw value is kept
+
+
+def test_a_bare_testcase_report(tmp_path):
+    (case,) = JUnitIngestor().ingest(write(tmp_path, "bazel-testlogs/p/t/test.xml", '<testcase name="only"/>'))
+    assert key_of(case) == CaseKey("//p:t", "only") and case.status == "passed"
