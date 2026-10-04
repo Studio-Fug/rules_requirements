@@ -32,9 +32,43 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
-from rules_requirements.ingest import STATUS_ORDER, Evidence, TestCase
-from rules_requirements.ingest.junit import ATTEMPT, SCOPE_PROPERTY, SHARD_RUN, SYNTHETIC_PROPERTY
+from rules_requirements.ingest import (
+    FILE_PROPERTY,
+    NAME_TAG,
+    STATUS_ORDER,
+    Evidence,
+    TestCase,
+    name_tags,
+    split_ids,
+    workspace_relative,
+)
+from rules_requirements.ingest.junit import ATTEMPT, SHARD_RUN
 from rules_requirements.util import dedupe, natural_key
+
+__all__ = [
+    "FILE_PROPERTY",
+    "RECORD_PREFIX",
+    "SUITE_PREFIX",
+    "SYNTHETIC_PATH",
+    "UNNAMED_PATH",
+    "CaseKey",
+    "CaseRow",
+    "RunDims",
+    "case_path",
+    "declared_of",
+    "file_of",
+    "index_cases",
+    "is_synthetic",
+    "is_target_scope",
+    "is_unscoped",
+    "key_of",
+    "name_tags",
+    "nodeid_to_case_path",
+    "pseudo_target",
+    "run_dims_from_path",
+    "target_of",
+    "workspace_relative",
+]
 
 SYNTHETIC_PATH = "[target]"
 """Path of the single result of a target that reported no per-case results."""
@@ -42,15 +76,9 @@ SYNTHETIC_PATH = "[target]"
 UNNAMED_PATH = "[unnamed]"
 """Path of a case whose classname and name are both empty (a key's path is never empty)."""
 
-FILE_PROPERTY = "rr.file"  # test source, relative to the workspace
-
 RECORD_PREFIX = "record:"
 SUITE_PREFIX = "suite:"
 _RECORD_SUFFIXES = (".rr.yaml", ".rr.yml", ".rr.json")
-
-# One "[rr:ID]" (or "[rr:A,B]") tag and at most one blank before it, so
-# "probe [rr:PR-1] ok" and "probe ok" are the same case.
-_NAME_TAG = re.compile(r"[ \t]?\[rr:([^\]]*)\]")
 
 
 @dataclass(frozen=True, order=True)
@@ -86,11 +114,6 @@ def pseudo_target(prefix: str, name: str) -> str:
     return prefix + (clean or "unnamed")
 
 
-def name_tags(name: str) -> list[str]:
-    """Ids declared by ``[rr:ID]`` tags in a case name, in order (``[rr:A,B]`` gives two)."""
-    return dedupe([part.strip() for tag in _NAME_TAG.findall(name) for part in re.split(r"[,\s]+", tag)])
-
-
 def case_path(classname: str, name: str) -> str:
     """The canonical path of a case: ``<classname>::<name>``, or ``<name>``.
 
@@ -101,7 +124,7 @@ def case_path(classname: str, name: str) -> str:
     A case with neither gets :data:`UNNAMED_PATH`.
     """
     cls = unicodedata.normalize("NFC", classname or "").strip()
-    leaf = _NAME_TAG.sub("", unicodedata.normalize("NFC", name or "")).strip()
+    leaf = NAME_TAG.sub("", unicodedata.normalize("NFC", name or "")).strip()
     return (f"{cls}::{leaf}" if cls else leaf) or UNNAMED_PATH
 
 
@@ -124,12 +147,23 @@ def nodeid_to_case_path(nodeid: str) -> str:
 
 def is_synthetic(case: TestCase) -> bool:
     """The target's single generated result (Bazel's fingerprint or ``rr.synthetic``)."""
-    return case.properties.get(SYNTHETIC_PROPERTY, "").lower() == "true"
+    return case.synthetic
 
 
 def is_target_scope(case: TestCase) -> bool:
     """A result about the whole target run (``rr.scope=target``), not a test case."""
-    return case.properties.get(SCOPE_PROPERTY, "").lower() == "target"
+    return case.scope == "target"
+
+
+def declared_of(case: TestCase) -> tuple[str, ...]:
+    """The ids a raw case declares: its ``declared`` tags plus any ``[rr:ID]``
+    name tags (also for a hand-built :class:`~rules_requirements.ingest.TestCase`). Tags, never owners.
+
+    Every value is split on commas and whitespace (``"PR-1, PR-2"`` is two
+    ids, whatever produced it), so a case naming two ids reads as a multi-tag.
+    """
+    ids = [rid for value in case.declared for rid in split_ids(str(value))]
+    return tuple(dedupe([*ids, *name_tags(case.name)]))
 
 
 def target_of(case: TestCase) -> str:
@@ -160,23 +194,9 @@ def key_of(case: TestCase) -> CaseKey:
     return CaseKey(target_of(case), path)
 
 
-_RUNFILES = re.compile(r"^.*?\.runfiles/[^/]+/")
-_BAZEL_OUT = re.compile(r"^(?:.*/)?bazel-out/[^/]+/bin/")
-
-
-def workspace_relative(path: str) -> str:
-    """Strip a ``*.runfiles/<workspace>/`` or ``bazel-out/<cfg>/bin/`` prefix."""
-    norm = (path or "").replace("\\", "/")
-    for rx in (_RUNFILES, _BAZEL_OUT):
-        stripped = rx.sub("", norm, count=1)
-        if stripped != norm:
-            return stripped
-    return norm
-
-
 def file_of(case: TestCase) -> str:
     """The test source a case came from (``rr.file``), workspace-relative; "" if unknown."""
-    return workspace_relative(case.properties.get(FILE_PROPERTY, ""))
+    return case.file or workspace_relative(case.properties.get(FILE_PROPERTY, ""))
 
 
 class RunDims(NamedTuple):
@@ -235,6 +255,7 @@ class CaseRow:
     synthetic: bool = False
     target_scope: bool = False
     file: str = ""
+    line: int = 0
     flaky: bool = False  # an earlier attempt failed, the final one passed
     attempts: int = 1
     duplicate: bool = False  # the same key twice in one report, or in two shards
@@ -259,6 +280,8 @@ class CaseRow:
             out["attempts"] = self.attempts
         if self.file:
             out["file"] = self.file
+        if self.line:
+            out["line"] = self.line
         if self.message and self.status in ("failed", "error"):
             out["message"] = self.message.splitlines()[0][:300]
         out["sources"] = list(self.sources)
@@ -344,11 +367,12 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
         rows[key] = CaseRow(
             key=key,
             status=status,
-            declared=tuple(dedupe([rid for c, _ in seen for rid in c.requirements])),
+            declared=tuple(dedupe([rid for c, _ in seen for rid in declared_of(c)])),
             level=next((c.level for c, _ in seen if c.level), ""),
             synthetic=key.synthetic,
             target_scope=any(is_target_scope(c) for c, _ in seen),
             file=next((f for f in (file_of(c) for c, _ in seen) if f), ""),
+            line=next((c.line for c, _ in seen if c.line), 0),
             flaky=flaky,
             attempts=attempts,
             duplicate=duplicate,

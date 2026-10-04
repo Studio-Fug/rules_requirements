@@ -189,8 +189,30 @@ def test_ingest_with_extra_ingestor_spec(capsys, tmp_path, monkeypatch):
     try:
         rc, out, _ = run(capsys, "ingest", f, "--ingestor", "noop_ing:N")
         assert rc == 0 and json.loads(out)["cases"][0]["name"] == "n"
+        # A third-party ingestor still filling the deprecated `requirements`
+        # fills `declared`: tags, which only attribution resolves (P14).
+        assert json.loads(out)["cases"][0]["declared"] == ["REQ-1"]
     finally:
         ingest._REGISTRY.pop("noop", None)
+
+
+def test_ingest_prints_declared_scope_synthetic_attempt_and_file(capsys, tmp_path):
+    write(
+        tmp_path,
+        "bazel-testlogs/pkg/t/test_attempts/attempt_1.xml",
+        '<testsuite name="s"><properties><property name="requirement" value="REQ-9"/></properties>'
+        '<testcase classname="m" name="a" file="pkg/t_test.py" line="4">'
+        '<properties><property name="requirement" value="REQ-1, REQ-2"/></properties></testcase>'
+        '<testcase name="exit-status"><properties><property name="rr.scope" value="target"/></properties>'
+        "<error/></testcase></testsuite>",
+    )
+    rc, out, err = run(capsys, "ingest", str(tmp_path / "bazel-testlogs"))
+    a, exit_status = json.loads(out)["cases"]
+    assert rc == 0
+    assert a["declared"] == a["requirements"] == ["REQ-1", "REQ-2"]
+    assert (a["scope"], a["synthetic"], a["attempt"], a["file"], a["line"]) == ("case", False, 1, "pkg/t_test.py", 4)
+    assert exit_status["scope"] == "target" and exit_status["declared"] == []
+    assert err.count("[suite-level-requirement]") == 1 and "REQ-9" in err
 
 
 def test_fail_on_counts_failures_on_needs_and_mitigations(capsys, model_path, tmp_path):
@@ -303,11 +325,12 @@ def test_cases_lists_keys(capsys, tmp_path):
     loose = junit(tmp_path, "loose/report.xml", [("b", "failed", [], "")])
     rc, out, err = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"), loose)
     assert rc == 0
-    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
+    # The [rr:REQ-9] name tag is a declared id too (v0.3): two ids, a multi-tag case.
+    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1,REQ-9\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
     assert "2 case(s) in 2 target(s)" in err and "[unscoped-evidence]" in err and "suite:s" in err
     rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path), "--target", "//pkg:t", "--json")
     (row,) = json.loads(out)
-    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1"]
+    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1", "REQ-9"]
 
 
 def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):

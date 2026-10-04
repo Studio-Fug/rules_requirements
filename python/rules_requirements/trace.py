@@ -259,7 +259,7 @@ def build_matrix(
     by_id: dict[str, list[TestCase]] = {}
     by_target: dict[str, list[TestCase]] = {}
     for case in evidence.cases:
-        for rid in case.requirements:
+        for rid in case.declared:
             by_id.setdefault(rid, []).append(case)
         if case.target:
             by_target.setdefault(_evidence_target(case.target, c.main_repo), []).append(case)
@@ -521,7 +521,7 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
                 )
     covered_targets = {vb.target for req in m.requirements.values() for vb in req.verified_by}
     for cs in matrix.evidence.cases:
-        if cs.is_failure and not cs.requirements and _evidence_target(cs.target, c.main_repo) not in covered_targets:
+        if cs.is_failure and not cs.declared and _evidence_target(cs.target, c.main_repo) not in covered_targets:
             gaps.append(
                 Gap(
                     "untraced-failure",
