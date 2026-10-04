@@ -763,7 +763,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         metavar="FILE",
         help="labels of every test target, one per line (`bazel query 'tests(//...)'`); "
-        "a claim on any other label is an unknown-target error",
+        "a claim, config.variants entry or lock target naming any other label is an unknown-target error",
     )
     v.set_defaults(func=cmd_validate)
 

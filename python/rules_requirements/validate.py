@@ -61,8 +61,9 @@ def validate(model: Model, strict: bool = False, known_targets: Collection[str] 
     """All issues in ``model``. ``strict`` promotes warnings to errors.
 
     ``known_targets`` (the labels ``bazel query 'tests(//...)'`` prints, in
-    any spelling) makes a claim on any other label an ``unknown-target``
-    error; pseudo-targets (``suite:``, ``record:``) are exempt.
+    any spelling) makes a claim, a ``config.variants`` entry or a lock
+    target naming any other label an ``unknown-target`` error;
+    pseudo-targets (``suite:``, ``record:``) are exempt.
     """
     v = _Validator(model, known_targets)
     v.run()
@@ -89,6 +90,11 @@ class _Validator:
 
     def add_at(self, code: str, message: str, entity: str, location: Location, severity: str = "error") -> None:
         self.issues.append(Issue(severity, code, message, entity, location))
+
+    def unknown(self, target: str) -> bool:
+        """Whether ``--known-targets`` was given and does not list ``target``
+        (normalized; pseudo-targets are never unknown)."""
+        return self.known is not None and not labels.is_pseudo(target) and target not in self.known
 
     def rule_at(self, name: str, message: str, entity: str, location: Location) -> None:
         sev = self.c.rule(name)
@@ -285,9 +291,17 @@ class _Validator:
         for group in self.c.variants:
             for label in group:
                 try:
-                    labels.normalize_label(label, self.c.main_repo)
+                    norm = labels.normalize_label(label, self.c.main_repo)
                 except labels.BadTarget as exc:
                     self.add("bad-target", f"config.variants: {exc}")
+                    continue
+                if self.unknown(norm):
+                    # a typo here would silently drop the variant from same-code-multiple-owners
+                    self.add(
+                        "unknown-target",
+                        f"config.variants: {label}: no such test target (not in --known-targets); "
+                        "the same-code check would silently skip it",
+                    )
 
         by_target: dict[str, list[Claim]] = {}
         for claim in self.m.claims():
@@ -316,7 +330,7 @@ class _Validator:
         except labels.BadTarget as exc:
             self.add_at("bad-target", f"{ent.id}: {rel}[{index}]: {exc}", ent.id, loc)
         else:
-            if self.known is not None and not labels.is_pseudo(vb.target) and vb.target not in self.known:
+            if self.unknown(vb.target):
                 self.add_at(
                     "unknown-target",
                     f"{where}: no such test target (not in --known-targets); a typo would read as not run forever",
@@ -412,7 +426,17 @@ class _Validator:
         by_target: dict[str, list[Claim]] = {}
         for claim in self.m.claims():
             by_target.setdefault(claim.target, []).append(claim)
+        reported: set[str] = set()
         for entry in lock.entries:
+            if entry.target not in reported and self.unknown(entry.target):
+                reported.add(entry.target)
+                self.add_at(
+                    "unknown-target",
+                    f"{entry.target}: no such test target (not in --known-targets); its locked cases "
+                    "would read as missing forever",
+                    "",
+                    Location(shown, entry.target_line),
+                )
             at = Location(shown, entry.line)
             key = f"{entry.target}#{entry.path}"
             if not self.m.is_verifiable(entry.owner):

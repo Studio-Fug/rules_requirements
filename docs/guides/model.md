@@ -204,7 +204,10 @@ string, `::`, `/` and blanks; `**` is the same as `*`. `\*` is a literal star
 and `\\` a literal backslash; any other backslash is a `bad-selector`. `?`, `[`
 and `]` are literals, so `test_x[*]` matches the pytest id `test_x[a]`. A
 selector is never empty, never padded with blanks, and never `[target]` (claim
-a synthetic result with `whole: true`).
+a synthetic result with `whole: true`). Like case paths it is in Unicode NFC
+(an editor that writes `é` decomposed would otherwise claim a case that never
+exists), and it never ends with an `[rr:ID]` name tag, which ingest strips
+from case names.
 
 **Labels** are compared in one spelling: `@@//p:n`, `@//p:n` and
 `@<config.main_repo>//p:n` are `//p:n`; `//p` is `//p:p`; a module
@@ -316,10 +319,10 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 | `mitigation-no-risk` | A mitigation mitigates nothing. |
 | `shared-case` | Claims of two entities can select one test case (the message names a witness). |
 | `same-code-multiple-owners` | Claims of two entities on targets of one `config.variants` group can select one case. |
-| `bad-selector` | A claim item with both or neither of `cases` / `whole: true`, an empty `cases`, or a selector that is empty, padded, `[target]` or badly escaped. |
+| `bad-selector` | A claim item with both or neither of `cases` / `whole: true`, an empty `cases`, or a selector that is empty, padded, not in Unicode NFC, `[target]`, badly escaped, or ends its case name with an `[rr:ID]` name tag (ingest strips those, so it could never match). |
 | `bad-target` | A claim's or `variants` entry's target is not a label or pseudo-target. |
-| `unknown-target` | With `rr validate --known-targets FILE` (`bazel query 'tests(//...)'` output): a claim names a label not in the file. |
-| `lock-invalid` | The configured `sets_lock` is missing or malformed, maps a case to a list, or names an owner that is not a user need, requirement or mitigation. |
+| `unknown-target` | With `rr validate --known-targets FILE` (`bazel query 'tests(//...)'` output): a claim, a `config.variants` entry or a lock target names a label not in the file (pseudo-targets are exempt). |
+| `lock-invalid` | The configured `sets_lock` is missing or malformed, maps a case to a list, has a case path that is not canonical (NFC, no surrounding blanks), or names an owner that is not a user need, requirement or mitigation. |
 | `lock-owner-changed` | `attribution: model`: a lock entry is selected by another entity's claim. |
 
 These cannot be configured: naming one under `config.rules` is itself an

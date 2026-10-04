@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping
 
 from rules_requirements import case_selectors, labels
@@ -458,9 +459,11 @@ def _sorted(items: Iterable[Any]) -> list[Any]:
 
 
 class _LineDict(dict):  # type: ignore[type-arg]
-    """A mapping that remembers the 1-based line it started on."""
+    """A mapping that remembers the 1-based line it started on, and the line
+    of each key written in it (``key_lines``; merged-in keys are absent)."""
 
     line = 0
+    key_lines: Mapping[Any, int] = MappingProxyType({})
 
 
 class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
@@ -511,8 +514,10 @@ def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict
         key = loader.construct_object(knode, deep=True)
         try:
             first = seen.get(key)
-        except TypeError:  # unhashable key: not a model field anyway
-            continue
+        except TypeError:  # a complex key (`? [a, b]`) cannot be a dict key
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark, "found unhashable key", knode.start_mark
+            ) from None
         if first is not None:
             raise yaml.constructor.ConstructorError(
                 "while constructing a mapping", first, f"found duplicate key {key!r}", knode.start_mark
@@ -521,6 +526,7 @@ def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict
     loader.flatten_mapping(node)
     out = _LineDict(loader.construct_pairs(node, deep=True))
     out.line = node.start_mark.line + 1
+    out.key_lines = {key: mark.line + 1 for key, mark in seen.items()}
     return out
 
 

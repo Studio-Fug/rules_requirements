@@ -322,6 +322,15 @@ def test_a_malformed_item_claims_the_whole_target(tmp_path, item):
     assert "REQ-2 and REQ-1 both claim cases of //a:t ('y' vs the whole target)" in shared.message
 
 
+def test_non_nfc_selectors_are_bad_selectors_not_a_second_case(tmp_path):
+    nfd, nfc = "m::caf\u0065\u0301", "m::caf\u00e9"
+    issues = issues_for(
+        tmp_path, reqs(f'[{{target: //a:t, cases: ["{nfd}"]}}]', f'[{{target: //a:t, cases: ["{nfc}"]}}]')
+    )
+    (bad,) = only(issues, "bad-selector")
+    assert bad.entity == "REQ-1" and "not in Unicode NFC" in bad.message
+
+
 def test_whole_and_legacy_rules(tmp_path):
     issues = issues_for(tmp_path, reqs("[//a:t, {target: //a:u, level: hil}, {target: //a:v, whole: true}]"))
     assert [i.severity for i in only(issues, "bare-target-reference")] == ["warning", "warning"]
@@ -378,6 +387,26 @@ def test_known_targets(tmp_path):
     assert only(validate(m), "unknown-target") == []
 
 
+def test_known_targets_cover_variants_and_lock_targets(tmp_path):
+    write(
+        tmp_path,
+        "verification.rrlock",
+        LOCK_HEAD + '  //h:fx:\n    "a::one": REQ-1\n  //h:gone:\n    "a::two": REQ-1\n    "a::three": REQ-1\n',
+    )
+    text = reqs(
+        '[{target: //h:fx, cases: ["a::*"]}, {target: //h:gone, cases: ["a::*"]}]',
+        config="{sets_lock: verification.rrlock, variants: [[//h:fx, //h:fx_jit_typo, 'record:x']]}",
+    )
+    m, _ = read_model(write(tmp_path, "m.yaml", text))
+    known = ["//h:fx", "//h:fx_jit"]
+    unknown = [i.message for i in only(validate(m, known_targets=known), "unknown-target")]
+    assert len(unknown) == 3, unknown
+    assert any(u.startswith("config.variants: //h:fx_jit_typo: no such test target") for u in unknown)
+    (in_lock,) = [i for i in only(validate(m, known_targets=known), "unknown-target") if "locked" in i.message]
+    assert in_lock.message.startswith("//h:gone: no such test target") and in_lock.location.line == 5
+    assert only(validate(m), "unknown-target") == []  # only with --known-targets
+
+
 # --- the verification-set lock ------------------------------------------------------
 
 LOCK_HEAD = "schema: rules_requirements/verification-lock/v1\ncases:\n"
@@ -412,6 +441,9 @@ def test_a_consistent_lock_is_valid(tmp_path):
         (LOCK_HEAD + '  //web:a_test: {"a::one": REQ-9}\n', "which is not defined"),
         ("[1, 2]\n", "one YAML mapping"),
         (LOCK_HEAD + "  //web:a_test: {a: REQ-1}\nextra: 1\n", "unknown key 'extra'"),
+        (LOCK_HEAD + "  //web:a_test:\n    ? [x, y]\n    : REQ-1\n", "found unhashable key"),
+        (LOCK_HEAD + '  //web:a_test:\n    "a::caf\\u0065\\u0301": REQ-1\n', "not a canonical case path"),
+        (LOCK_HEAD + '  //web:a_test:\n    " a::one": REQ-1\n    "a::one": REQ-2\n', "not a canonical case path"),
     ],
 )
 def test_lock_invalid(tmp_path, lock, fragment):
@@ -440,6 +472,7 @@ def test_lock_stale_and_owner_changed_in_model_mode(tmp_path):
     assert changed.location.path.endswith("verification.rrlock") and changed.location.line == 4
     (stale,) = only(issues, "lock-stale")
     assert stale.severity == "error" and "//web:a_test#b::gone is locked to REQ-1" in stale.message
+    assert stale.location.line == 5  # its own line, not its target's
     # a selector never selects the synthetic result
     lock2 = LOCK_HEAD + '  //web:a_test:\n    "[target]": REQ-1\n'
     assert only(lock_model(tmp_path, lock2), "lock-stale")

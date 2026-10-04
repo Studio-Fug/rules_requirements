@@ -333,6 +333,11 @@ def test_malformed_items_claim_the_whole_target(tmp_path, item, problem):
     assert claim.matches("x") and claim.matches("anything else")
 
 
+def test_a_complex_mapping_key_is_a_load_error_not_a_crash(tmp_path):
+    m, _ = read_model(write(tmp_path, "m.yaml", "requirements:\n  - ? [id, x]\n    : REQ-1\n"))
+    assert any("found unhashable key" in e for e in m.parse_errors)
+
+
 def test_items_without_a_target_are_parse_errors(tmp_path):
     m, _ = read_model(
         write(tmp_path, "m.yaml", "user_needs: [{id: UN-1, title: u, validated_by: [{cases: [x]}, '', 3]}]\n")

@@ -20,6 +20,10 @@ example instead of a report-time surprise.
   synthetic path ``[target]`` (claim a target's single synthetic result with
   ``whole: true``). Attribution never lets a selector match a synthetic or
   target-scope result.
+* A selector is in Unicode NFC, like every case path, and never ends with an
+  ``[rr:ID]`` name tag (ingest strips those from case names). Either would
+  never match: it would read as a missing case forever, and two spellings of
+  one case would compare as two cases.
 
 The module is named ``case_selectors`` rather than ``selectors``: the latter
 would shadow the standard library module (imported by :mod:`subprocess` and
@@ -29,6 +33,8 @@ would shadow the standard library module (imported by :mod:`subprocess` and
 from __future__ import annotations
 
 import functools
+import re
+import unicodedata
 from typing import Optional, Tuple
 
 STAR: None = None
@@ -38,6 +44,7 @@ Token = Optional[str]
 Tokens = Tuple[Token, ...]
 
 SYNTHETIC_PATH = "[target]"  # == case_keys.SYNTHETIC_PATH (not imported: no ingest dependency here)
+_NAME_TAG = re.compile(r"\[rr:[^\]]*\]")  # == case_keys._NAME_TAG, which case_path strips from names
 
 
 class BadSelector(ValueError):  # noqa: N818 - named after the bad-selector rule
@@ -75,11 +82,26 @@ def check(pattern: str) -> None:
         raise BadSelector("empty selector (use '*' for every case of the target)")
     if pattern != pattern.strip():
         raise BadSelector(f"{pattern!r}: leading or trailing blanks (case paths are stripped, so it would never match)")
-    tokens(pattern)
+    nfc = unicodedata.normalize("NFC", pattern)
+    if pattern != nfc:
+        raise BadSelector(f"{pattern!r}: not in Unicode NFC (case paths are, so it would never match); write {nfc!r}")
+    toks = tokens(pattern)
+    # What follows the last '*' and the last '::' after it is the end of the
+    # case name (a classname keeps its tags; names never hold one).
+    tail = "".join(t for t in toks[_last_star(toks) + 1 :] if t is not STAR).rpartition("::")[2]
+    if _NAME_TAG.search(tail):
+        raise BadSelector(f"{pattern!r}: holds an [rr:ID] name tag, which ingest strips from case names; leave it out")
     if pattern == SYNTHETIC_PATH:
         raise BadSelector(
             f"{pattern!r} is the synthetic result of a target without per-case results; claim it with whole: true"
         )
+
+
+def _last_star(toks: Tokens) -> int:
+    for i in range(len(toks) - 1, -1, -1):
+        if toks[i] is STAR:
+            return i
+    return -1
 
 
 def is_literal(pattern: str) -> bool:

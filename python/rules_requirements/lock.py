@@ -14,8 +14,10 @@ as a missing member instead of silently shrinking a set::
         "[target]": PR-25
 
 Each case maps to exactly one scalar id: a list value, a repeated key (the
-model loader's duplicate-key check) or one case under two spellings of its
-target is ``lock-invalid``, so the file cannot express two owners. The lock
+model loader's duplicate-key check), one case under two spellings of its
+target, or a case path that is not canonical (NFC, no surrounding blanks —
+:func:`~rules_requirements.case_keys.case_path`) is ``lock-invalid``, so the
+file cannot express two owners. The lock
 never creates ownership — attribution only uses it for expected members.
 
 The extension is deliberately not one :func:`~rules_requirements.model.model_files`
@@ -25,8 +27,9 @@ reads, so a lock next to the model never becomes part of it.
 from __future__ import annotations
 
 import os
+import unicodedata
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Any, Mapping
 
 from rules_requirements import labels
 from rules_requirements._vendor import yaml
@@ -48,7 +51,8 @@ class LockEntry:
     target: str  # normalized
     path: str  # the case path ("[target]" for a synthetic result)
     owner: str
-    line: int = 0  # line of the target's mapping
+    line: int = 0  # line of the entry
+    target_line: int = 0  # line of its target's key
 
 
 @dataclass(frozen=True)
@@ -93,8 +97,9 @@ def parse_lock(text: str, path: str = "", main_repo: str = "") -> Lock:
         cases = {}
     entries: list[LockEntry] = []
     seen: dict[tuple[str, str], str] = {}
+    key_lines: Mapping[Any, int] = getattr(cases, "key_lines", {})
     for target, members in cases.items():
-        line = getattr(members, "line", 0) or getattr(cases, "line", 0)
+        line: int = _line(key_lines, target) or getattr(members, "line", 0) or getattr(cases, "line", 0)
         at = f"{where}:{line}" if line else where
         if not isinstance(target, str):
             problems.append(f"{at}: target {target!r} is not a label")
@@ -107,9 +112,21 @@ def parse_lock(text: str, path: str = "", main_repo: str = "") -> Lock:
         if not isinstance(members, Mapping):
             problems.append(f"{at}: {target}: must map case paths to one id each")
             continue
+        case_lines: Mapping[Any, int] = getattr(members, "key_lines", {})
         for case, owner in members.items():
+            entry_line = _line(case_lines, case) or line
+            at = f"{where}:{entry_line}" if entry_line else where
             if not isinstance(case, str) or not case.strip():
                 problems.append(f"{at}: {target}: case {case!r} is not a case path")
+                continue
+            canonical = unicodedata.normalize("NFC", case).strip()
+            if case != canonical:
+                # Case paths are NFC with no surrounding blanks; two spellings
+                # of one path would be two entries for one case.
+                problems.append(
+                    f"{at}: {target}: case {case!r} is not a canonical case path (NFC, no surrounding "
+                    f"blanks); write {canonical!r}"
+                )
                 continue
             if isinstance(owner, (list, tuple, Mapping)):
                 problems.append(
@@ -124,10 +141,18 @@ def parse_lock(text: str, path: str = "", main_repo: str = "") -> Lock:
                 problems.append(f"{at}: {norm}#{case} is locked twice (spelled {seen[key]!r} and {target!r})")
                 continue
             seen[key] = target
-            entries.append(LockEntry(norm, case, owner.strip(), line))
+            entries.append(LockEntry(norm, case, owner.strip(), entry_line, line))
     if problems:
         raise LockError(problems)
     return Lock(tuple(entries), path)
+
+
+def _line(lines: Mapping[Any, int], key: Any) -> int:
+    """The line ``key`` was written on, 0 if unknown (or unhashable)."""
+    try:
+        return lines.get(key, 0)
+    except TypeError:
+        return 0
 
 
 def load_lock(path: str, main_repo: str = "", shown: str = "") -> Lock:
