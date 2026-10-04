@@ -85,8 +85,8 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     parser.add_argument(
         "--target",
         default="",
-        help="the test's label: names the suite (default: its name) and the exit-status case; the "
-        "label of a case comes from where its report lies (bazel-testlogs/...), not from this",
+        help="the test's label; its name is the default --suite. It is not written into the report: "
+        "a case's label comes from where its report lies (bazel-testlogs/...)",
     )
     parser.add_argument("--level", default="", help="default level for cases without one")
     parser.add_argument(
