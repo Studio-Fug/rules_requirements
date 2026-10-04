@@ -55,11 +55,10 @@ Inside ``with plan.check(name):`` the block may record the check's result
 itself (``plan.skipped(name, reason)`` for a check that cannot run on this
 board); that result is the check's only case, whatever the block does next.
 
-*v0.2 compatibility.* Until per-requirement verification sets land (0.3),
-skipped evidence does not stop a requirement reading VERIFIED. So on rig
-trouble a CheckPlan also withdraws the tag of every passed check whose
-requirement is also the tag of a check that did not run: the requirement reads
-neither VERIFIED nor FAILED from a partial run, as before.
+Recorded cases are final. On rig trouble the passed checks keep their tags:
+a requirement whose verification set also holds a check that was skipped
+reads INCOMPLETE (neither VERIFIED nor FAILED) through that skipped member.
+(0.2 withdrew the passed checks' tags instead, which sets make redundant.)
 """
 
 from __future__ import annotations
@@ -250,7 +249,6 @@ class CheckPlan:
             self.writer._append("rig", (), "error", failure, classname=self.suite)
             for step, check in pending:
                 self._record(step, check, "skipped", f"not run: rig trouble: {failure}")
-            self._withdraw_partial(pending)
         else:
             where = self._stopped_in or "the run"
             for step, check in pending:
@@ -262,15 +260,6 @@ class CheckPlan:
                 # Every check had passed (e.g. a cleanup step failed): no
                 # requirement is affected, but the stop is listed.
                 self.writer._append("after_checks", (), "error", failure, classname=self.suite)
-
-    def _withdraw_partial(self, pending: list[tuple[str, str]]) -> None:
-        # v0.2 only: a passed check must not verify a requirement that a check
-        # which never ran also verifies (0.3's verification sets make this
-        # INCOMPLETE by themselves).
-        unrun = {self.tags[f"{s}.{c}"] for s, c in pending if f"{s}.{c}" in self.tags}
-        for case in self._recorded.values():
-            if case.status == "passed" and case.requirement in unrun:
-                case.requirements = []
 
     def _resolve(self, name: str, current_only: bool = False) -> tuple[str, str]:
         """``(step, check)`` for a check of the current step, or (unless

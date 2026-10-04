@@ -674,9 +674,13 @@ def test_junit_writer_not_reached(tmp_path):
         tags={"rename": "REQ-13"},
     )
     rename, cert = w.cases
-    assert (rename.status, rename.requirements, rename.classname) == ("failed", ["REQ-13"], "hitl_e2e.websocket_checks")
+    assert (rename.status, rename.requirements, rename.classname) == (
+        "failed",
+        ("REQ-13",),
+        "hitl_e2e.websocket_checks",
+    )
     assert rename.message == "not reached: websocket_checks failed: OSError: reset"
-    assert cert.requirements == [] and cert.level == "hitl"
+    assert cert.requirements == () and cert.level == "hitl"
     with pytest.raises(ValueError, match="RR-E101"):
         w.not_reached(["x"], "r", tags={"x": ["REQ-1", "REQ-2"]})
     with pytest.raises(ValueError, match="RR-E104"):
@@ -827,13 +831,17 @@ def test_junit_writer_warning_shows_at_a_scripts_top_level(tmp_path):
 
 def test_junit_writer_legacy_form_accepts_any_iterable(tmp_path):
     w = junit_writer.JUnitWriter("bench", file="")
-    assert _recorded(lambda: w.add("set", {"REQ-1"})) == []
-    assert _recorded(lambda: w.add("gen", (r for r in ["REQ-2"]))) == []
-    assert _recorded(lambda: w.add("keys", {"REQ-3": 1}.keys())) == []
+    # one id in a list: a plain DeprecationWarning, not a multi-id one
+    for name, value in (("set", {"REQ-1"}), ("gen", (r for r in ["REQ-2"])), ("keys", {"REQ-3": 1}.keys())):
+        with pytest.warns(DeprecationWarning, match="pass the ONE id as a string") as caught:
+            w.add(name, value)
+        assert not any(issubclass(c.category, MultipleRequirementsWarning) for c in caught)
     assert len(_recorded(lambda: w.add("several", (r for r in ["REQ-4", "REQ-5"])))) == 1
+    with pytest.warns(DeprecationWarning, match="empty requirement list"):
+        w.add("none", [])
     with pytest.raises(TypeError):
         w.add("bad", 7)
-    assert [c.requirements for c in w.cases] == [["REQ-1"], ["REQ-2"], ["REQ-3"], ["REQ-4", "REQ-5"]]
+    assert [c.requirements for c in w.cases] == [("REQ-1",), ("REQ-2",), ("REQ-3",), ("REQ-4", "REQ-5"), ()]
 
 
 _APPENDER = r"""
@@ -1319,7 +1327,7 @@ def test_junit_writer_empty_requirement_string_is_no_requirement(tmp_path):
         w.add("c", "  ")
         with w.case("d", ""):
             pass
-    assert [c.requirements for c in w.cases] == [[], [], [], []]
+    assert [c.requirements for c in w.cases] == [(), (), (), ()]
     with pytest.raises(ValueError, match="RR-E104"):
         w.add("e", "REQ-1, REQ-2")
     with pytest.raises(ValueError, match="RR-E104"):
@@ -1484,3 +1492,28 @@ def test_unittest_method_declaration_beats_the_class(tmp_path):
     assert got[("Sub", "test_method")] == (("REQ-2",), "hil")
     files = {c.properties.get("rr.file", "") for c in ingest.collect([str(xml)]).cases}
     assert len(files) == 1 and files.pop().endswith("test_hooks.py")
+
+
+def test_junit_writer_cases_are_read_only():
+    """P5: a recorded case cannot be re-attributed afterwards."""
+    import dataclasses
+
+    w = junit_writer.JUnitWriter("bench", file="")
+    w.add("a", "REQ-1")
+    (case,) = w.cases
+    assert isinstance(w.cases, tuple) and case.requirement == "REQ-1" and case.requirements == ("REQ-1",)
+    with pytest.raises(AttributeError):
+        w.cases.append(case)  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        w.cases = []  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        case.requirements = []  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        case.declared = ("REQ-2",)  # type: ignore[misc]
+    with pytest.raises(AttributeError):
+        case.requirements.clear()  # type: ignore[attr-defined]
+    with pytest.raises(TypeError):
+        case.properties["rr.scope"] = "target"  # type: ignore[index]
+    with pytest.raises(TypeError):
+        case.artifact["k"] = "v"  # type: ignore[index]
+    assert "requirement" in w.to_string() and "REQ-2" not in w.to_string()
