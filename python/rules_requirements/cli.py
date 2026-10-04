@@ -12,6 +12,7 @@
     rr case      --name "flash ok" --status passed --requirement REQ-21   # shell harnesses
     rr cases     --evidence bazel-testlogs        # every case key, to copy into the model
     rr migrate   plan --model requirements/ --evidence bazel-testlogs --out attribution.rrplan
+    rr migrate   verify --worksheet attribution.rrplan --evidence ci-testlogs --baseline old-testlogs
 
 Under ``bazel run``, relative paths resolve against the workspace root.
 """
@@ -264,22 +265,23 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
-def _collect_evidence(args: argparse.Namespace, command: str) -> ingest.Evidence | None:
-    """The evidence named by ``--evidence``; None (after saying why) when it holds no evidence at all.
+def _collect_evidence(args: argparse.Namespace, command: str, given: list[str] | None = None) -> ingest.Evidence | None:
+    """The evidence named by ``--evidence`` (or ``given``); None (after saying why) when it holds no evidence at all.
 
     A path that contributes no evidence file is a warning: a mistyped path
     must not read as "this target has no results".
     """
     for spec in getattr(args, "ingestor", None) or []:
         ingest.load_ingestor(spec)
-    paths = [_path(p) for p in args.evidence]
+    given = args.evidence if given is None else given
+    paths = [_path(p) for p in given]
     ev = ingest.collect(paths, only=args.format or None)
     used = set(ev.files)
-    for given, path in zip(args.evidence, paths):
+    for name, path in zip(given, paths):
         if not any(f in used for f in ingest.expand([path])):
-            print(f"warning: [no-evidence] {given}: no evidence file found there", file=sys.stderr)
+            print(f"warning: [no-evidence] {name}: no evidence file found there", file=sys.stderr)
     if not ev.files:
-        print(f"rr {command}: no evidence found in {' '.join(args.evidence) or '(nothing given)'}", file=sys.stderr)
+        print(f"rr {command}: no evidence found in {' '.join(given) or '(nothing given)'}", file=sys.stderr)
         return None
     return ev
 
@@ -384,16 +386,17 @@ def _symlinked_writes(root: str, paths: Iterable[str]) -> list[tuple[str, str]]:
     return out
 
 
-def cmd_migrate_apply(args: argparse.Namespace) -> int:
-    import difflib
-
-    from rules_requirements import migrate, tag_codemod
+def _decided_worksheet(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The worksheet ``args.worksheet``, checked (against ``--model``, else the
+    model it was planned with when that is still there); None, after saying
+    why, when it cannot be used."""
+    from rules_requirements import migrate
 
     try:
         doc = migrate.load_worksheet(_path(args.worksheet))
     except migrate.WorksheetError as exc:
         print(f"rr migrate: {exc}", file=sys.stderr)
-        return 2
+        return None
     model = None
     model_paths = list(args.model)
     if not model_paths:
@@ -406,11 +409,20 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
         model, ok = _load(model_paths, quiet=True)
         if not ok:
             print("rr: requirements model is invalid (see above)", file=sys.stderr)
-            return 2
+            return None
     problems = migrate.check_worksheet(doc, model)
     for problem in problems:
         print(f"rr migrate: {args.worksheet}: {problem}", file=sys.stderr)
-    if problems:
+    return None if problems else doc
+
+
+def cmd_migrate_apply(args: argparse.Namespace) -> int:
+    import difflib
+
+    from rules_requirements import migrate, tag_codemod
+
+    doc = _decided_worksheet(args)
+    if doc is None:
         return 2
     root = _path(args.root) if args.root else _root()
     decided = migrate.decisions(doc)
@@ -540,6 +552,56 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     else:
         print(f"{len(writes)} file(s) rewritten, {len(res.refused)} refused", file=sys.stderr)
     return 1 if res.blocked or check_refused else 0
+
+
+def cmd_migrate_verify(args: argparse.Namespace) -> int:
+    """Check test evidence from after ``rr migrate apply`` against the worksheet."""
+    from rules_requirements import migrate
+
+    doc = _decided_worksheet(args)
+    if doc is None:
+        return 2
+    evidence = _collect_evidence(args, "migrate verify")
+    if evidence is None:
+        return 2
+    baseline = None
+    if args.baseline:
+        baseline = _collect_evidence(args, "migrate verify --baseline", args.baseline)
+        if baseline is None:
+            return 2
+    res = migrate.verify(doc, evidence, baseline, allow_missing=args.allow_missing)
+    for off in res.offences:
+        print(off.describe())
+    if res.missing:
+        print(
+            f"warning: {len(res.missing)} decided case(s) have no result in the evidence (--allow-missing): "
+            "not verified",
+            file=sys.stderr,
+        )
+        for key in res.missing:
+            print(f"  {key}", file=sys.stderr)
+    if res.untagged:
+        print(
+            f"note: {len(res.untagged)} decided case(s) declare no id, before and after: they count only through "
+            "verified_by, so their owner is set in the model (see the verified_by edits rr migrate apply lists)",
+            file=sys.stderr,
+        )
+        for key in res.untagged:
+            print(f"  {key}", file=sys.stderr)
+    parts = [f"{res.decided} decided case(s) declare exactly their owner"]
+    if res.untagged:
+        parts.append(f"{len(res.untagged)} declare no id (owner set by verified_by)")
+    if baseline is not None:
+        parts.append(f"{res.unchanged} undecided case(s) kept their ids")
+        parts.append(f"{res.new} case(s) are new")
+    if res.offences:
+        print(
+            f"rr migrate verify: {len(res.offences)} case(s) contradict the worksheet; " + "; ".join(parts),
+            file=sys.stderr,
+        )
+        return 1
+    print("rr migrate verify: ok: " + "; ".join(parts), file=sys.stderr)
+    return 0
 
 
 def _collect_check(args: argparse.Namespace, root: str, res: Any, writes: set[str], decided: Mapping[Any, str]) -> bool:
@@ -852,6 +914,28 @@ def build_parser() -> argparse.ArgumentParser:
         "loads rr's plugin that way",
     )
     ma.set_defaults(func=cmd_migrate_apply)
+    mv = msub.add_parser(
+        "verify", help="check test evidence from after apply against the worksheet (the check for Bazel projects)"
+    )
+    mv.add_argument("--worksheet", required=True, help="the decided .rrplan (or .json) worksheet")
+    mv.add_argument(
+        "--evidence", nargs="+", required=True, help="evidence from after the rewrite (files/dirs/globs, e.g. CI's)"
+    )
+    mv.add_argument(
+        "--baseline",
+        nargs="+",
+        default=[],
+        help="evidence from before the rewrite: every undecided case must keep its ids, and no case may disappear",
+    )
+    mv.add_argument(
+        "--allow-missing",
+        action="store_true",
+        help="a decided case with no result in the evidence (a HITL or manual target) is a warning, not an error",
+    )
+    mv.add_argument("--model", "--requirements", nargs="+", default=[], help="check the decided owners exist")
+    mv.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
+    mv.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
+    mv.set_defaults(func=cmd_migrate_verify)
 
     d = sub.add_parser("diff", help="semantic diff of the model between two git refs")
     model_arg(d)

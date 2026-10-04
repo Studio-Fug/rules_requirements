@@ -298,6 +298,11 @@ def decisions(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
     return out
 
 
+def owner_ids(owner: str) -> list[str]:
+    """The ids a case decided ``owner`` must end up declaring: ``[owner]``, or none for ``none``."""
+    return [] if owner == NONE else [owner]
+
+
 def case_files(doc: Mapping[str, Any] | None) -> dict[CaseKey, str]:
     """Each contested case's test source (its row's ``file``), where the evidence named one."""
     out: dict[CaseKey, str] = {}
@@ -343,6 +348,129 @@ def model_edits(doc: Mapping[str, Any]) -> list[dict[str, str]]:
             else:
                 action, why = "keep", f"{req} owns every decided case"
             out.append({"target": target, "requirement": req, "action": action, "reason": why})
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# Verifying the result against test evidence                                  #
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class Offence:
+    """One case the new evidence contradicts the worksheet on."""
+
+    key: CaseKey
+    reason: str
+    expected: list[str]
+    found: list[str] | None  # None: no result of the case in the new evidence
+
+    def describe(self) -> str:
+        found = "no result" if self.found is None else _ids(self.found)
+        return f"{self.key}: {self.reason} (expected {_ids(self.expected)}, found {found})"
+
+
+def _ids(ids: Iterable[str]) -> str:
+    return "[" + ", ".join(ids) + "]"
+
+
+@dataclass
+class Verification:
+    """The outcome of :func:`verify`."""
+
+    offences: list[Offence] = field(default_factory=list)
+    decided: int = 0  # decided cases found in the new evidence with exactly their owner
+    missing: list[CaseKey] = field(default_factory=list)  # decided, absent, tolerated (allow_missing)
+    untagged: list[CaseKey] = field(default_factory=list)  # decided, declaring no id before or after
+    unchanged: int = 0  # undecided cases whose ids match the baseline
+    new: int = 0  # cases in the new evidence the baseline does not have
+
+    @property
+    def ok(self) -> bool:
+        return not self.offences
+
+
+def verify(
+    doc: Mapping[str, Any],
+    evidence: Evidence,
+    baseline: Evidence | None = None,
+    *,
+    allow_missing: bool = False,
+) -> Verification:
+    """Check test evidence produced after ``rr migrate apply`` against the
+    worksheet ``doc``.
+
+    Every case the worksheet decides must declare exactly its owner in
+    ``evidence`` (no id for ``none``); a decided case with no result there
+    is an offence unless ``allow_missing``. With a ``baseline`` (the
+    evidence from before the rewrite), every other case must declare the
+    same ids as before, and no case of the baseline may be missing from
+    ``evidence``. A target-scope result (a whole run's exit status) carries
+    the union of its cases' ids, which the decisions change: it must still
+    be there, its ids are not compared.
+
+    A decided case that declared no id before the rewrite and declares none
+    after is ``untagged``, not an offence: it counts toward its candidates
+    only through ``verified_by``, which ``rr migrate apply`` cannot edit
+    (it lists such cases too), so its owner is set in the model. "Before"
+    is the baseline when it has the case, else the worksheet: a group that
+    lists no ``tags`` has no tagged case.
+
+    Cases are matched by :class:`~rules_requirements.case_keys.CaseKey`
+    (:func:`~rules_requirements.case_keys.index_cases`), so the evidence of
+    a Bazel ``py_test``, ``rr_node_test``, ``rr_case.h`` test or anything
+    else rr ingests is checked alike.
+    """
+    out = Verification()
+    decided = {k: v for k, v in decisions(doc).items() if v != OPEN}
+    rows = index_cases(evidence)
+    before = index_cases(baseline) if baseline is not None else None
+    untagged_groups = {
+        CaseKey(str(g.get("target", "")), str(c["path"]))
+        for g in doc.get("groups", []) or []
+        if isinstance(g, dict) and not g.get("tags")
+        for c in g.get("cases", []) or []
+        if isinstance(c, dict) and c.get("path") is not None
+    }
+
+    def untagged_before(key: CaseKey) -> bool:
+        if before is not None and key in before:
+            return not before[key].declared
+        return key in untagged_groups
+
+    for key, owner in sorted(decided.items()):
+        want = owner_ids(owner)
+        row = rows.get(key)
+        if row is None:
+            if before is not None and key in before:
+                continue  # reported below: a case of the baseline went missing
+            if allow_missing:
+                out.missing.append(key)
+            else:
+                out.offences.append(Offence(key, "a decided case has no result in the evidence", want, None))
+            continue
+        found = list(row.declared)
+        if sorted(found) == want:
+            out.decided += 1
+        elif not found and untagged_before(key):
+            out.untagged.append(key)  # its owner is a verified_by edit, not a tag
+        else:
+            out.offences.append(Offence(key, "a decided case does not declare exactly its owner", want, found))
+    if before is not None:
+        for key, old in before.items():
+            row = rows.get(key)
+            expected = owner_ids(decided[key]) if key in decided else list(old.declared)
+            if row is None:
+                out.offences.append(
+                    Offence(key, "a case of the baseline has no result in the evidence", expected, None)
+                )
+            elif key not in decided and not old.target_scope:
+                if sorted(row.declared) != sorted(old.declared):
+                    out.offences.append(Offence(key, "an undecided case's ids changed", expected, list(row.declared)))
+                else:
+                    out.unchanged += 1
+        out.new = sum(1 for key in rows if key not in before)
+    out.offences.sort(key=lambda o: (natural_key(o.key.target), natural_key(o.key.path)))
     return out
 
 
