@@ -16,8 +16,11 @@ Decorate tests (or whole ``TestCase`` classes) with
 
 :func:`main` runs the module's tests (or discovers under a directory) with a
 result collector that writes JUnit XML — with ``requirement`` / ``level``
-properties — to ``$XML_OUTPUT_FILE`` (Bazel) or ``--junit-xml PATH``. The same
-decorators are honoured when pytest collects the ``TestCase``.
+properties, and ``rr.file`` (the test's source file) — to ``$XML_OUTPUT_FILE``
+(Bazel) or ``--junit-xml PATH``. The nearest declaration wins: a method's
+decorator replaces its class's. A class or module fixture error
+(``setUpClass``) and a failing subtest carry the same single id as their
+test. The same decorators are honoured when pytest collects the ``TestCase``.
 """
 
 from __future__ import annotations
@@ -31,21 +34,35 @@ import traceback
 import unittest
 from typing import Any
 
-from rules_requirements.hooks.junit_writer import JUnitWriter
+from rules_requirements.hooks.junit_writer import JUnitWriter, source_file
 
 
 def trace_of(test: unittest.TestCase) -> Any:
+    """``{"ids", "level", "artifact"}`` declared for ``test``: nearest wins.
+
+    The method's ``@rr.verifies`` replaces its class's (and a subclass's
+    replaces its base class's): ``ids`` is one id, or none; several only for
+    a deprecated multi-id declaration, recorded in full so attribution
+    quarantines the case. The nearest declaration naming a level wins, and
+    artifact keys resolve nearest-first.
+    """
     method = getattr(test, getattr(test, "_testMethodName", ""), None)
     ids: list[str] = []
     level = ""
     artifact: dict[str, str] = {}
     for holder in (getattr(method, "__func__", method), type(test)):
         rr = getattr(holder, "__rr__", None) or {}
-        ids.extend(rr.get("ids", ()))
+        ids = ids or list(rr.get("ids", ()))
         level = level or rr.get("level", "")
         for k, v in (rr.get("artifact") or {}).items():
             artifact.setdefault(k, v)
     return {"ids": list(dict.fromkeys(ids)), "level": level, "artifact": artifact}
+
+
+def _test_file(obj: Any) -> str:
+    """The workspace-relative source file defining ``obj`` (a class or module), or ``""``."""
+    module = sys.modules.get(obj.__module__ if isinstance(obj, type) else getattr(obj, "__name__", ""))
+    return source_file(getattr(module, "__file__", "") or "")
 
 
 def _module_name(module: str) -> str:
@@ -63,7 +80,7 @@ def _holder_trace(description: str) -> tuple[str, str, Any]:
 
     unittest reports ``setUpClass`` / ``setUpModule`` failures as an
     ``_ErrorHolder`` whose description is e.g. ``"setUpClass (pkg.mod.Cls)"``;
-    the class's ``@rr.verifies`` ids still apply to that failure.
+    the class's ``@rr.verifies`` id still applies to that failure.
     """
     m = _HOLDER.match(description or "")
     if not m:
@@ -81,7 +98,12 @@ def _holder_trace(description: str) -> tuple[str, str, Any]:
                 owner, module, attr = obj, ".".join(parts[:i]), ".".join(parts[i:])
                 break
     rr = getattr(owner, "__rr__", None) or {}
-    trace = {"ids": list(rr.get("ids", [])), "level": rr.get("level", ""), "artifact": dict(rr.get("artifact") or {})}
+    trace = {
+        "ids": list(rr.get("ids", [])),
+        "level": rr.get("level", ""),
+        "artifact": dict(rr.get("artifact") or {}),
+        "file": _test_file(owner) if owner is not None else "",
+    }
     classname = f"{_module_name(module)}.{attr}" if module else _module_name(path)
     return m.group("fixture"), classname, trace
 
@@ -117,8 +139,10 @@ class JUnitResult(unittest.TextTestResult):
             name = name or test._testMethodName
             classname = f"{_module_name(type(test).__module__)}.{type(test).__qualname__}"
             self._own_outcome = self._own_outcome or name == test._testMethodName
+            file = _test_file(type(test))
         else:  # a class/module fixture error
             name, classname, tr = _holder_trace(getattr(test, "description", str(test)))
+            file = tr.get("file", "")
         self.writer._append(
             name,
             tr["ids"],
@@ -128,6 +152,7 @@ class JUnitResult(unittest.TextTestResult):
             level=tr["level"],
             artifact=tr["artifact"],
             classname=classname,
+            file=file,
         )
 
     def addSuccess(self, test: unittest.TestCase) -> None:  # noqa: N802

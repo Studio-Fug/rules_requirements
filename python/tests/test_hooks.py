@@ -64,20 +64,23 @@ SAMPLE = textwrap.dedent(
 
 def _check_sample(xml):
     cases = {c.name: c for c in ingest.collect([str(xml)]).cases}
-    assert sorted(cases["test_marked"].requirements) == ["REQ-1", "REQ-2", "REQ-3"]
+    # The nearest scope naming an id wins (P2): the module's REQ-1 is replaced,
+    # never added. test_marked's own marker names two ids (deprecated): both
+    # are recorded, so attribution quarantines it.
+    assert cases["test_marked"].requirements == ("REQ-2", "REQ-3")
     assert cases["test_marked"].level == "hil"
     assert cases["test_marked"].artifact == {"fw": "7"}
     assert cases["test_legacy_alias"].status == "failed"
-    assert sorted(cases["test_legacy_alias"].requirements) == ["REQ-1", "REQ-4"]
+    assert cases["test_legacy_alias"].requirements == ("REQ-4",)
     assert cases["test_module_default"].status == "skipped"
+    assert cases["test_module_default"].requirements == ("REQ-1",)
     assert cases["test_module_default"].level == "sil"
-    assert sorted(cases["test_decorated"].requirements) == ["REQ-1", "REQ-5"]
+    assert cases["test_decorated"].requirements == ("REQ-5",)
     assert cases["test_decorated"].level == "inspection"  # the method's own decorator is nearest
     # a skip marker must not lose the traces (pytest skips before setup hooks)
-    assert cases["test_skip_marked"].status == "skipped" and cases["test_skip_marked"].requirements == (
-        "REQ-6",
-        "REQ-1",
-    )
+    assert cases["test_skip_marked"].status == "skipped" and cases["test_skip_marked"].requirements == ("REQ-6",)
+    # rr.file: the test file relative to the workspace (here: the run's cwd or an absolute path)
+    assert all(c.properties.get("rr.file", "").endswith("test_sample.py") for c in cases.values())
     # nearest level wins across both marker names
     assert cases["test_near_level"].level == "simulation"
 
@@ -140,7 +143,7 @@ def test_pytest_single_id_markers_do_not_warn(tmp_path):
     (tmp_path / "test_single.py").write_text(
         "import pytest\n"
         "pytestmark = pytest.mark.rr('REQ-1')\n"
-        "@pytest.mark.rr('REQ-2')\n"  # accumulates across scopes, as before: not a multi-id declaration
+        "@pytest.mark.rr('REQ-2')\n"  # the nearest scope wins: not a multi-id declaration
         "def test_a():\n    pass\n"
         "@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.rr('REQ-3')), 2])\n"
         "def test_b(x):\n    pass\n"
@@ -157,7 +160,8 @@ def test_pytest_single_id_markers_do_not_warn(tmp_path):
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     cases = {c.name: c.requirements for c in ingest.collect([str(xml)]).cases}
-    assert cases == {"test_a": ("REQ-2", "REQ-1"), "test_b[1]": ("REQ-3", "REQ-1"), "test_b[2]": ("REQ-1",)}
+    # nearest wins (P2): a param mark replaces the function's, which replaces the module's
+    assert cases == {"test_a": ("REQ-2",), "test_b[1]": ("REQ-3",), "test_b[2]": ("REQ-1",)}
 
 
 def test_pytest_multi_id_module_marker_warns_once(tmp_path):
@@ -218,9 +222,12 @@ def test_marked_subclass_of_marked_base_does_not_warn(tmp_path, form):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "MultipleRequirementsWarning" not in proc.stdout, proc.stdout
     cases = {(c.classname, c.name): set(c.requirements) for c in ingest.collect([str(xml)]).cases}
-    # The subclass's tests accumulate the base's id and its own, by nearest scope.
+    # The subclass's own declaration replaces its base's (nearest wins), for
+    # its own tests and the ones it inherits.
     sub = {name: ids for (cls, name), ids in cases.items() if cls.endswith("TestSub")}
-    assert sub["test_sub"] == {"REQ-1", "REQ-2"}
+    assert sub == {"test_sub": {"REQ-2"}, "test_base": {"REQ-2"}}
+    base = {name: ids for (cls, name), ids in cases.items() if cls.endswith("TestBase")}
+    assert base == {"test_base": {"REQ-1"}}
 
 
 @pytest.mark.parametrize("form", sorted(_CLASS_MARK_FORMS))
@@ -541,7 +548,7 @@ def test_rr_verifies_multi_id_is_deprecated_but_recorded():
         def test_y():
             pass
 
-        assert test_y.__rr__["ids"] == ["REQ-1", "REQ-2"]  # union semantics unchanged
+        assert test_y.__rr__["ids"] == ["REQ-1", "REQ-2"]  # all recorded: attribution quarantines it
 
     (w,) = _recorded(several)
     assert "test_y" in str(w.message) and "REQ-1, REQ-2" in str(w.message) and "RR-E101" in str(w.message)
@@ -557,9 +564,10 @@ def test_rr_verifies_multi_id_is_deprecated_but_recorded():
         def test_s():
             pass
 
-        assert test_s.__rr__["ids"] == ["REQ-1 REQ-2"]  # one (malformed) id, as before 0.2
+        assert test_s.__rr__["ids"] == ["REQ-1", "REQ-2"]  # whitespace separates ids from 0.3
 
-    assert _recorded(spaced) == []  # not "names REQ-1, REQ-2": only one id is recorded
+    (w,) = _recorded(spaced)
+    assert "names REQ-1, REQ-2" in str(w.message)
 
     def stacked():
         @rr.verifies("REQ-2")
@@ -774,8 +782,8 @@ def test_id_helpers():
     from rules_requirements.hooks.ids import check_id, split_ids
 
     assert split_ids("REQ-1, REQ-2,REQ-1") == ["REQ-1", "REQ-2"]
-    # whitespace does not separate ids: the hooks record "REQ-2 REQ-1" as one id
-    assert split_ids(" REQ-1 , REQ-2 REQ-1") == ["REQ-1", "REQ-2 REQ-1"]
+    # whitespace separates ids too (0.3), as ingest splits a declared value
+    assert split_ids(" REQ-1 , REQ-2 REQ-1") == ["REQ-1", "REQ-2"]
     assert split_ids(["REQ-1", ("REQ-2,", "")]) == ["REQ-1", "REQ-2"]
     assert check_id("PR-13") == "PR-13"
     with pytest.raises(TypeError):
@@ -1077,14 +1085,15 @@ def test_pytest_multi_id_warning_escalated_errors_one_test_per_declaration(tmp_p
     assert all(c.status == "passed" for name, c in cases.items() if name not in errored)
 
 
-def test_pytest_space_separated_marker_records_one_id_without_warning(tmp_path):
-    # As on origin/main, a marker string is split on commas only: "REQ-1 REQ-2"
-    # is one (malformed) id, so it must not warn that it names several ids.
+def test_pytest_space_separated_marker_names_two_ids(tmp_path):
+    # From 0.3 whitespace separates ids, as ingest splits a declared value:
+    # "REQ-1 REQ-2" is a multi-id declaration, warned about and recorded in
+    # full (attribution quarantines the case).
     (tmp_path / "test_space.py").write_text("import pytest\n@pytest.mark.rr('REQ-1 REQ-2')\ndef test_s():\n    pass\n")
-    proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
+    proc, out, cases = _run_pytest(tmp_path)
     assert proc.returncode == 0, out
-    assert cases["test_s"].requirements == ("REQ-1 REQ-2",)
-    assert "MultipleRequirementsWarning" not in out
+    assert cases["test_s"].requirements == ("REQ-1", "REQ-2")
+    assert "marker names REQ-1, REQ-2" in out and "RR-E101" in out
 
 
 def _keys(xml):
@@ -1230,7 +1239,7 @@ def test_pytest_param_mark_and_function_marker_do_not_warn(tmp_path):
     )
     proc, cases = _run_strict(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert set(cases["test_params[2]"].requirements) == {"REQ-1", "REQ-3"}  # both recorded, as in 0.1
+    assert cases["test_params[2]"].requirements == ("REQ-3",)  # the param mark is nearest (P2)
     (tmp_path / "test_p.py").write_text(
         "import pytest\n"
         "@pytest.mark.parametrize('x', [1, pytest.param(2, marks=pytest.mark.rr('REQ-3', 'REQ-4'))])\n"
@@ -1254,7 +1263,7 @@ def test_rr_verifies_on_a_subclass_of_a_decorated_class_does_not_warn(tmp_path):
     )
     proc, cases = _run_strict(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert cases["test_sub"].requirements == ("REQ-1", "REQ-2")  # recorded as in 0.1
+    assert cases["test_sub"].requirements == ("REQ-2",)  # the subclass's own declaration is nearest (P4)
 
     def stacked_on_a_subclass():
         @rr.verifies("REQ-1")
@@ -1334,3 +1343,144 @@ def test_source_file_on_another_drive_never_raises(tmp_path, monkeypatch):
     assert junit_writer.source_file(script) == script.replace(os.sep, "/")
     monkeypatch.setattr(sys, "argv", [script])
     assert junit_writer.JUnitWriter("bench").file == script.replace(os.sep, "/")
+
+
+# --------------------------------------------------------------------------- #
+# 0.3: one declared id per case (P2-P5, P7-P9)                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_pytest_raw_requirement_property_is_dropped_and_fails_the_test(tmp_path):
+    """P3: record_property("requirement") bypasses the marker rules: RR-E102."""
+    (tmp_path / "test_raw.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.rr('REQ-1')\n"
+        "def test_second_id(record_property):\n"
+        "    record_property('requirement', 'REQ-2')\n"
+        "def test_plural(record_property):\n"
+        "    record_property('requirements', 'REQ-3,REQ-4')\n"
+        "def test_failing_anyway(record_property):\n"
+        "    record_property('requirement', 'REQ-5')\n"
+        "    assert False, 'its own failure'\n"
+        "@pytest.fixture\n"
+        "def tagger(record_property):\n"
+        "    yield\n"
+        "    record_property('requirement', 'REQ-6')\n"
+        "def test_in_teardown(tagger):\n"
+        "    pass\n"
+        "@pytest.mark.rr('REQ-7')\n"
+        "def test_other_properties(record_property):\n"
+        "    record_property('dut', 'c6')\n"
+    )
+    proc, out, cases = _run_pytest(tmp_path)
+    assert proc.returncode == 1, out
+    assert "[RR-E102]" in out and "@pytest.mark.rr" in out
+    assert cases["test_second_id"].status == "failed" and cases["test_second_id"].requirements == ("REQ-1",)
+    assert "RR-E102" in cases["test_second_id"].message
+    assert cases["test_plural"].status == "failed" and cases["test_plural"].requirements == ()
+    assert cases["test_failing_anyway"].status == "failed" and cases["test_failing_anyway"].requirements == ()
+    assert "its own failure" in cases["test_failing_anyway"].message
+    assert cases["test_in_teardown"].status == "error" and cases["test_in_teardown"].requirements == ()
+    other = cases["test_other_properties"]
+    assert other.status == "passed" and other.requirements == ("REQ-7",) and other.properties["dut"] == "c6"
+
+
+def test_pytest_nearest_scope_wins_over_class_and_module(tmp_path):
+    """P2: one property per case, from the nearest scope that names an id."""
+    (tmp_path / "test_near.py").write_text(
+        "import pytest\n"
+        "from rules_requirements import rr\n"
+        "pytestmark = pytest.mark.rr('REQ-1', level='sil')\n"
+        "@pytest.mark.rr('REQ-2')\n"
+        "class TestOuter:\n"
+        "    def test_class(self):\n        pass\n"
+        "    @pytest.mark.rr('REQ-3')\n"
+        "    def test_method(self):\n        pass\n"
+        "    @rr.verifies('REQ-4')\n"
+        "    def test_verifies(self):\n        pass\n"
+        "    @pytest.mark.rr(level='hil')\n"
+        "    def test_level_only(self):\n        pass\n"
+        "def test_module():\n    pass\n"
+    )
+    proc, out, cases = _run_pytest(tmp_path, "-W", "error::DeprecationWarning")
+    assert proc.returncode == 0, out
+    got = {name: (c.requirements, c.level) for name, c in cases.items()}
+    assert got == {
+        "test_class": (("REQ-2",), "sil"),
+        "test_method": (("REQ-3",), "sil"),
+        "test_verifies": (("REQ-4",), "sil"),
+        "test_level_only": (("REQ-2",), "hil"),  # a level-only marker names no id: the class's id stays
+        "test_module": (("REQ-1",), "sil"),
+    }
+    assert {c.properties.get("rr.file") for c in cases.values()} == {"test_near.py"}
+
+
+def test_pytest_trace_of_gives_the_nearest_scope(tmp_path):
+    (tmp_path / "conftest.py").write_text(
+        "import json, os\n"
+        "from rules_requirements.hooks.pytest_plugin import trace_of\n"
+        "def pytest_collection_finish(session):\n"
+        "    out = {i.name: trace_of(i)[0] for i in session.items}\n"
+        "    open(os.environ['DUMP'], 'w').write(json.dumps(out))\n"
+    )
+    (tmp_path / "test_t.py").write_text(
+        "import pytest\npytestmark = pytest.mark.rr('REQ-1')\n"
+        "@pytest.mark.rr('REQ-2')\ndef test_a():\n    pass\n"
+        "@pytest.mark.rr('REQ-3', 'REQ-4')\ndef test_multi():\n    pass\n"
+        "def test_b():\n    pass\n"
+    )
+    dump = tmp_path / "dump.json"
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--collect-only", "-p",
+         "rules_requirements.hooks.pytest_plugin", str(tmp_path)],
+        env=_env(DUMP=str(dump)),
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    import json
+
+    assert json.loads(dump.read_text()) == {"test_a": ["REQ-2"], "test_multi": ["REQ-3", "REQ-4"], "test_b": ["REQ-1"]}
+
+
+def test_unittest_method_declaration_beats_the_class(tmp_path):
+    """P4: nearest wins; fixture errors and failing subtests carry that one id."""
+
+    @rr.verifies("REQ-1", level="hil")
+    class Suite(unittest.TestCase):
+        @rr.verifies("REQ-2")
+        def test_method(self):
+            pass
+
+        def test_class(self):
+            pass
+
+        @rr.verifies("REQ-3")
+        def test_subtests(self):
+            for i in range(2):
+                with self.subTest(i=i):
+                    self.assertEqual(i, 0)
+
+    @rr.verifies("REQ-4")
+    class Sub(Suite):
+        def test_sub(self):
+            pass
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)  # no multi-id declaration anywhere
+        suite = unittest.TestSuite([unittest.defaultTestLoader.loadTestsFromTestCase(c) for c in (Suite, Sub)])
+        xml = tmp_path / "u.xml"
+        rr_unittest.run(suite, str(xml), "near", verbosity=0)
+    got = {
+        (c.classname.rsplit(".", 1)[-1], c.name): (c.requirements, c.level) for c in ingest.collect([str(xml)]).cases
+    }
+    assert got[("Suite", "test_method")] == (("REQ-2",), "hil")
+    assert got[("Suite", "test_class")] == (("REQ-1",), "hil")
+    assert got[("Suite", "test_subtests")] == (("REQ-3",), "hil")
+    assert got[("Suite", "test_subtests (i=1)")] == (("REQ-3",), "hil")
+    assert got[("Sub", "test_sub")] == (("REQ-4",), "hil")  # the subclass's own, not its base's too
+    assert got[("Sub", "test_class")] == (("REQ-4",), "hil")
+    assert got[("Sub", "test_method")] == (("REQ-2",), "hil")
+    files = {c.properties.get("rr.file", "") for c in ingest.collect([str(xml)]).cases}
+    assert len(files) == 1 and files.pop().endswith("test_hooks.py")
