@@ -3,7 +3,7 @@
 This page is the detailed record of each release. `CHANGELOG.md` at the
 repository root summarises each version in a few lines and links here.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-04)
 
 Per-case runners and migration tooling, towards **one test case, one
 requirement**: a test case verifies at most one requirement, and a set of test

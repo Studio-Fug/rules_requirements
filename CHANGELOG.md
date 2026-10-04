@@ -5,10 +5,10 @@ behaviour — is the [release notes](docs/release-notes.md) (published at
 <https://studio-fug.github.io/rules_requirements/release-notes.html>); where
 the two differ, the release notes are right and this file is the bug.
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-04)
 
 Per-case runners and migration tooling, towards one test case, one
-requirement. [Details](docs/release-notes.md#020-unreleased).
+requirement. [Details](docs/release-notes.md#020-2026-10-04).
 
 ### Added
 
