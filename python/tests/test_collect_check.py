@@ -599,14 +599,20 @@ def test_a_symlinked_package_dir_is_covered_by_the_check(capsys, tmp_path):
 
 def test_a_symlinked_test_module_is_covered_by_the_check(capsys, tmp_path):
     """An in-tree file symlink to a rewritten test module is followed in both
-    trees; the alias's changed ids make the check refuse."""
+    trees; the alias's changed ids make the check refuse.
+
+    The static guards refuse the alias itself (its undecided tests name two
+    ids), so ``--partial`` would write ``test_m.py`` on the guards alone: only
+    the collection check, following the recreated link, sees that the alias
+    collects the rewritten tests with changed ids."""
     _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
     _symlink_or_skip(tmp_path / "pkg/test_alias.py", tmp_path / "pkg/test_m.py", directory=False)
     _ws(tmp_path / "ws.rrplan", _D2)
     before = (tmp_path / "pkg/test_m.py").read_bytes()
-    rc, _, err = _apply(capsys, tmp_path)
+    rc, _, err = _apply(capsys, tmp_path, "--partial")
     assert rc == 1, err
-    assert "test_alias" in err
+    assert "collection check refused" in err
+    assert "pkg/test_alias.py::test_a: an undecided item's ids changed" in err
     assert (tmp_path / "pkg/test_m.py").read_bytes() == before
 
 
@@ -630,6 +636,133 @@ def test_a_symlink_pointing_outside_the_root_refuses(capsys, tmp_path):
         shutil.rmtree(ext, ignore_errors=True)
 
 
+@pytest.fixture
+def ext_dir(tmp_path):
+    """A directory OUTSIDE the root (``tmp_path``), removed afterwards."""
+    ext = tmp_path.parent / f"{tmp_path.name}-ext"
+    ext.mkdir()
+    try:
+        yield ext
+    finally:
+        shutil.rmtree(ext, ignore_errors=True)
+
+
+# An in-tree plugin that adds rr("C") to every test naming exactly one id: a
+# config that loads it changes what the rewritten tests are attributed to.
+_PLUG_C = (
+    "import pytest\n\n\n"
+    "def pytest_collection_modifyitems(items):\n"
+    "    for item in items:\n"
+    "        ids = [a for m in item.iter_markers('rr') for a in m.args]\n"
+    "        if len(ids) == 1:\n"
+    "            item.add_marker(pytest.mark.rr('C'))\n"
+)
+
+
+@pytest.mark.parametrize(
+    "name, text",
+    [
+        ("pytest.ini", "[pytest]\naddopts = -p myplug\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\naddopts = "-p myplug"\n'),
+    ],
+    ids=["pytest.ini", "pyproject.toml"],
+)
+def test_an_out_of_tree_config_symlink_reaches_both_collections(capsys, tmp_path, ext_dir, name, text):
+    """A config file symlinked from outside the root (a shared monorepo
+    ``pytest.ini``) configures a real run from ``--root``: the copy must read
+    it too, or the two collections run under different configs. Here it loads
+    a plugin that adds an id to every single-id test, so the split cannot
+    leave each test with its owner alone: refuse, write nothing."""
+    (ext_dir / name).write_text(text, encoding="utf-8")
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2, "myplug.py": _PLUG_C})
+    _symlink_or_skip(tmp_path / name, ext_dir / name, directory=False)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "collection check refused" in err
+    assert "pkg/test_m.py::test_a: a decided case does not end with its owner" in err
+    assert (tmp_path / "pkg/test_m.py").read_bytes() == before
+
+
+def test_out_of_tree_dir_symlinks_pytest_never_reaches_do_not_refuse(capsys, tmp_path, ext_dir):
+    """nix-direnv keeps flake inputs as directory symlinks under ``.direnv``
+    (pytest's default ``norecursedirs`` has ``.*``), and a Nix ``result`` link
+    sits outside ``testpaths``: a real run reaches neither, so neither refuses."""
+    (ext_dir / "lib.py").write_text("x = 1\n", encoding="utf-8")
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2, "pytest.ini": "[pytest]\ntestpaths = pkg\n"})
+    (tmp_path / ".direnv/flake-inputs").mkdir(parents=True)
+    _symlink_or_skip(tmp_path / ".direnv/flake-inputs/abc-source", ext_dir, directory=True)
+    _symlink_or_skip(tmp_path / "result", ext_dir, directory=True)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 0, err
+    assert '@pytest.mark.rr("A")' in (tmp_path / "pkg/test_m.py").read_text(encoding="utf-8")
+
+
+def test_an_out_of_tree_dir_symlink_under_testpaths_still_refuses(capsys, tmp_path, ext_dir):
+    """The reach rule still fails closed on a link pytest does recurse into."""
+    (ext_dir / "test_sub.py").write_text("def test_z():\n    pass\n", encoding="utf-8")
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2, "pytest.ini": "[pytest]\ntestpaths = pkg\n"})
+    _symlink_or_skip(tmp_path / "pkg/shared", ext_dir, directory=True)
+    _ws(tmp_path / "ws.rrplan", _D2)
+    before = (tmp_path / "pkg/test_m.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "pkg/shared ->" in err and "symlink" in err
+    assert (tmp_path / "pkg/test_m.py").read_bytes() == before
+
+
+def test_reached_follows_pytests_args_and_norecursedirs(tmp_path):
+    root = tmp_path / "r"
+    (root / "pkg/sub").mkdir(parents=True)
+    (root / "build").mkdir()
+
+    def reached(rel, args, norecurse=(".*", "build"), is_dir=True):
+        got = collect_check._Collected(None, {}, [], "", 0, args=args, norecursedirs=list(norecurse))
+        return collect_check._reached(rel, is_dir, str(root), got)
+
+    everything = [str(root)]
+    assert reached("shared", everything)
+    assert not reached(".direnv/x", everything)  # a dot-dir: never recursed into
+    assert not reached("build/x", everything)
+    assert not reached(".hidden", everything)  # the link's own name is matched too
+    assert reached(".direnv/x", everything, norecurse=())  # unless norecursedirs leaves it out
+    assert not reached("shared", [str(root / "pkg")])  # outside testpaths
+    assert reached("pkg/shared", [str(root / "pkg")])
+    assert reached("pkg", [str(root / "pkg/sub")])  # an arg inside the link
+    assert reached(".direnv", [str(root / ".direnv")])  # an arg is collected even when norecursedirs names it
+    assert not reached("pkg/sub/x", everything, norecurse=("pkg/sub",))  # a pattern with a separator
+    assert reached("shared", None)  # args unknown (no dump): fail closed
+    assert reached("shared", ["pkg.tests"])  # --pyargs module name: fail closed
+    assert reached("shared", [str(tmp_path)])  # an arg above the root covers it
+    assert not reached("x/test_y.py", [str(root / "pkg")], is_dir=False)
+    assert reached("test_y.py", everything, is_dir=False)
+
+
+def test_a_symlink_swapped_in_after_the_check_is_never_written_through(capsys, tmp_path, ext_dir, monkeypatch):
+    """The write re-checks every path: a rewritten module replaced by a symlink
+    after the collection check passed (a concurrent change to the tree) is not
+    followed, so nothing outside the root is overwritten."""
+    victim = ext_dir / "victim.py"
+    victim.write_text("# outside the root\n", encoding="utf-8")
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
+    _ws(tmp_path / "ws.rrplan", _D2)
+    real_check = collect_check.check
+
+    def racing(*a, **k):
+        res = real_check(*a, **k)
+        (tmp_path / "pkg/test_m.py").unlink()
+        _symlink_or_skip(tmp_path / "pkg/test_m.py", victim, directory=False)
+        return res
+
+    monkeypatch.setattr(collect_check, "check", racing)
+    rc, _, err = _apply(capsys, tmp_path)
+    assert rc == 1, err
+    assert "pkg/test_m.py is reached through a symlink" in err and "nothing written" in err
+    assert victim.read_text(encoding="utf-8") == "# outside the root\n"
+
+
 def test_copy_tree_recreates_in_tree_symlinks_and_reports_outside_ones(tmp_path):
     src = tmp_path / "src"
     _tree(src, {"pkg/__init__.py": "", "pkg/test_m.py": _F2})
@@ -639,12 +772,17 @@ def test_copy_tree_recreates_in_tree_symlinks_and_reports_outside_ones(tmp_path)
     _symlink_or_skip(src / "pkgalias", src / "pkg", directory=True)
     _symlink_or_skip(src / "shared", ext, directory=True)
     _symlink_or_skip(src / "bazel-out", ext, directory=True)  # a bazel convenience link: still skipped
+    (ext / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    _symlink_or_skip(src / "pytest.ini", ext / "pytest.ini", directory=False)
     ignored, offenders = collect_check._copy_tree(str(src), str(tmp_path / "dst"))
     dst = tmp_path / "dst"
     assert (dst / "pkgalias").is_symlink()  # in-tree link recreated into the copy
     assert (dst / "pkgalias" / "test_m.py").exists()  # and it resolves inside the copy
-    assert [p for p, _ in offenders] == ["shared"]  # the out-of-tree link fails closed
+    assert [p for p, _ in offenders] == ["shared"]  # the out-of-tree link fails closed (when reached)
     assert "bazel-out" in ignored and not (dst / "bazel-out").exists()
+    # An out-of-tree config file is copied dereferenced, never dropped.
+    assert not (dst / "pytest.ini").is_symlink() and (dst / "pytest.ini").read_text(encoding="utf-8") == "[pytest]\n"
+    assert "pytest.ini" not in ignored
 
 
 def test_a_dir_named_like_a_venv_is_still_copied(capsys, tmp_path):

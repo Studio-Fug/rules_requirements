@@ -227,10 +227,17 @@ would write anything (with `--partial` and `--dry-run` too), apply:
    files. **Other symlinks are never skipped silently**, because a real pytest
    run from `--root` would follow them: a symlink whose target resolves *inside*
    the tree is recreated in the copy (so both collections follow it and the
-   check covers whatever it reaches, refusing if its attribution changes), and a
-   symlink that reaches a test *outside* the tree — a directory, or a `.py`
-   file — makes apply **refuse and name the path** (the copy cannot cover it).
-   Remove or redirect such a symlink, or pass `--no-collect-check`;
+   check covers whatever it reaches, refusing if its attribution changes); a
+   symlink to any other file *outside* the tree (a shared `pytest.ini`,
+   `pyproject.toml`, `setup.cfg` or `tox.ini`, a data file) is copied with its
+   content, so both collections run under the same config; and a symlink that
+   reaches a test *outside* the tree — a directory, or a `.py` file — makes
+   apply **refuse and name the path** (the copy cannot cover it) whenever the
+   original collection shows pytest would reach it. A link pytest never
+   recurses into is left alone: one outside the paths it collects (its
+   arguments, else `testpaths`) or under a directory `norecursedirs` excludes
+   (`.*` by default, so `.direnv`'s flake-input links). Remove or redirect a
+   link that refuses, or pass `--no-collect-check`;
 2. runs `python -m pytest --collect-only` in the original tree and in the copy,
    from `--root` with no path argument (so the project's ini, `testpaths`
    included, decides what is collected, exactly as a plain `pytest` run there
@@ -252,6 +259,11 @@ cannot: a `setattr`-installed method that would silently lose a shared marker,
 a factory-built subclass, an aliased test. If either collection records the
 same nodeid twice (a conftest that builds items by hand), apply refuses and
 names it: the check cannot tell the two cases apart.
+
+Apply **never writes through a symlink**: just before writing, it re-checks
+each file it would rewrite, and if one is (or lies under) a symlink — even one
+swapped in after the check ran — it refuses, names the path and where it
+resolves, and writes nothing. This holds with `--no-collect-check` too.
 
 Run apply where `python -m pytest --collect-only` works for the project — the
 same interpreter and dependencies the tests need. For a plain project that is

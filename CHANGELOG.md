@@ -31,8 +31,9 @@ requirement. [Details](docs/release-notes.md#020-unreleased).
   included, is first proven by a pytest collection check in a copy of the
   tree, and refused if any test's ids would change other than as decided;
   `--python` and `--pytest-args` set up that collection, `--no-collect-check`
-  skips it. Tests reached only through a symlink, or collected only in
-  another environment, are outside the check.
+  skips it. A symlink reaching a test outside the tree that pytest would
+  follow refuses; tests collected only in another environment are outside the
+  check.
 - `rr --version`.
 - `rr scan` recognises `RR_CASE(name, "ID")` as a verifies annotation.
 - Ingest: the public `TestCase.suite` field; Bazel's generated result, and our

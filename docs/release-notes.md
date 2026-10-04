@@ -143,10 +143,13 @@ byte-identical (the thermostat and integration report goldens are unchanged).
     `--python` interpreter, its packages, the current environment variables
     and the plugins named in `--pytest-args`): a test built only when `HW=1`
     is set, or a plugin your runner loads with `-p` that `--pytest-args`
-    leaves out, is not checked. Symlinked paths are skipped in both
-    collections, so tests reached only through a symlink are not checked
-    either. Collectors skipped at collection time (`pytest.importorskip`) are
-    listed in a warning.
+    leaves out, is not checked. Collectors skipped at collection time
+    (`pytest.importorskip`) are listed in a warning.
+  - Symlinks fail closed: one resolving inside the tree is followed in both
+    collections; one to a config or data file outside it is copied with its
+    content; one reaching a test outside it (a directory, a `.py` file) that
+    pytest would recurse into refuses and names the path. Apply never writes
+    through a symlink.
 - A draft guide, {doc}`guides/migrating-to-per-case`, walks through the
   steps: collect evidence, plan, decide, rewrite the tags, edit the model.
 - `rr migrate apply` resolves a case only to a module pytest collects

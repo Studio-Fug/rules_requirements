@@ -23,7 +23,7 @@ import json
 import os
 import shlex
 import sys
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
@@ -373,6 +373,17 @@ def _warn_no_evidence(edits: list[dict[str, str]]) -> None:
         )
 
 
+def _symlinked_writes(root: str, paths: Iterable[str]) -> list[tuple[str, str]]:
+    """``(path, realpath)`` of each path under ``root`` that is, or lies under, a symlink."""
+    root_real = os.path.realpath(root)
+    out = []
+    for path in sorted(paths):
+        real = os.path.realpath(os.path.join(root, path))
+        if real != os.path.join(root_real, os.path.normpath(path)):
+            out.append((path, real))
+    return out
+
+
 def cmd_migrate_apply(args: argparse.Namespace) -> int:
     import difflib
 
@@ -431,6 +442,16 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
             check_refused = True
             held = {**held, **{p: "the collection check refused the rewrite (see above)" for p in writes}}
             writes = set()
+    if writes and not args.dry_run:
+        # Never write through a symlink: the static guards and the collection
+        # check judged the file at this path, and a link (even one swapped in
+        # since) would send the rewrite somewhere else, possibly outside --root.
+        through = _symlinked_writes(root, writes)
+        if through:
+            for path, real in through:
+                print(f"rr migrate: {path} is reached through a symlink (it resolves to {real})", file=sys.stderr)
+            print("rr migrate: refusing to write through a symlink; nothing written", file=sys.stderr)
+            return 1
     for f in res.changed:
         if args.dry_run:
             sys.stdout.writelines(
@@ -442,7 +463,9 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
                 )
             )
         elif f.path in writes:
-            with open(os.path.join(root, f.path), "w", encoding=f.encoding, newline="") as fh:
+            # O_NOFOLLOW: a link swapped in after the check above is refused, not followed.
+            fd = os.open(os.path.join(root, f.path), os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "w", encoding=f.encoding, newline="") as fh:
                 fh.write(f.new_text)
         if f.path in writes:
             print(f"{'would rewrite' if args.dry_run else 'rewrote'} {f.path}:", file=sys.stderr)

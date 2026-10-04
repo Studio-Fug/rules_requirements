@@ -29,6 +29,7 @@ subprocess.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import shutil
@@ -48,8 +49,11 @@ from rules_requirements.migrate import NONE, OPEN
 # skipped is also ``--ignore``d in BOTH collections, so the two trees are
 # collected over the same files. Every OTHER symlink is NOT skipped silently:
 # one resolving inside the tree is recreated in the copy so both collections
-# follow it, and one resolving outside the tree makes apply refuse (a real
-# ``pytest`` run would follow it, changing attribution the check cannot cover).
+# follow it; one to a file outside the tree that pytest would not collect (an
+# ini file, data) is copied dereferenced, so both collections read the same
+# content; and one reaching a test outside the tree (a directory, a ``.py``
+# file) makes apply refuse when pytest would reach it (a real ``pytest`` run
+# would follow it, changing attribution the check cannot cover).
 _SKIP_DIRS = {
     ".git",
     ".hg",
@@ -130,10 +134,12 @@ def _copy_tree(src: str, dst: str) -> tuple[list[str], list[tuple[str, str]]]:
       (retargeted into the copy), so both collections follow it and the
       collection check covers whatever it reaches;
     * one whose target resolves OUTSIDE ``src`` and could be collected (a
-      directory, or a ``.py`` file) is returned in ``offenders`` as
-      ``(path, realpath)``: the caller fails closed on it. An out-of-tree
-      symlink to a non-``.py`` file is only ``ignored`` (pytest would not
-      collect it)."""
+      directory, or a ``.py`` file) is not copied and is returned in
+      ``offenders`` as ``(path, realpath)``: the caller fails closed on it
+      when pytest would reach it (:func:`_reached`);
+    * one to a non-``.py`` file OUTSIDE ``src`` (a shared ``pytest.ini`` or
+      ``pyproject.toml``, a data file) is copied dereferenced, so both
+      collections read the same content (the same config, above all)."""
     ignored: list[str] = []
     offenders: list[tuple[str, str]] = []
     src_real = os.path.realpath(src)
@@ -182,7 +188,10 @@ def _copy_tree(src: str, dst: str) -> tuple[list[str], list[tuple[str, str]]]:
                 elif name.endswith(".py"):
                     offenders.append((relpath, os.path.realpath(source)))  # fail closed
                 else:
-                    ignored.append(relpath)  # out-of-tree data file: pytest would not collect it
+                    try:  # out-of-tree config or data: copy its content (copy2 follows the link)
+                        shutil.copy2(source, os.path.join(target_dir, name))
+                    except OSError:
+                        pass  # a dangling link: pytest reads nothing from it either
                 continue
             try:
                 shutil.copy2(source, os.path.join(target_dir, name))
@@ -209,15 +218,24 @@ def _rr_pythonpath(tmp: str) -> str:
     return path
 
 
-def _collect(
-    tree: str, python: str, pytest_args: list[str], dump_path: str, rr_path: str
-) -> tuple[Optional[dict[str, list[str]]], dict[str, str], list[str], str, int]:
-    """Collect ``tree`` with the dump plugin: (items or None, skipped, duplicates, output, rc).
+@dataclass
+class _Collected:
+    """One ``--collect-only`` run: see :func:`_collect`."""
 
-    ``duplicates`` names any nodeid the dump recorded more than once (two
-    collected items the check cannot tell apart). No path argument is passed,
-    so pytest picks what to collect exactly as a plain ``pytest`` run from
-    ``tree`` would (``testpaths`` included)."""
+    items: Optional[dict[str, list[str]]]  # nodeid -> ids; None when the dump is missing or unreadable
+    skipped: dict[str, str]
+    duplicates: list[str]  # nodeids recorded more than once (items the check cannot tell apart)
+    output: str
+    rc: int
+    args: Optional[list[str]] = None  # the absolute paths pytest collected from; None if unknown
+    norecursedirs: list[str] = field(default_factory=list)
+
+
+def _collect(tree: str, python: str, pytest_args: list[str], dump_path: str, rr_path: str) -> _Collected:
+    """Collect ``tree`` with the dump plugin.
+
+    No path argument is passed, so pytest picks what to collect exactly as a
+    plain ``pytest`` run from ``tree`` would (``testpaths`` included)."""
     if os.path.exists(dump_path):
         os.remove(dump_path)
     env = dict(os.environ)
@@ -240,32 +258,93 @@ def _collect(
         *pytest_args,
     ]
     proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
-    output = proc.stdout + proc.stderr
-    items: Optional[dict[str, list[str]]] = None
-    skipped: dict[str, str] = {}
-    duplicates: list[str] = []
+    out = _Collected(None, {}, [], proc.stdout + proc.stderr, proc.returncode)
     if os.path.exists(dump_path):
         try:
             with open(dump_path, encoding="utf-8") as fh:
                 loaded = json.load(fh)
             got = loaded.get("items")
             if isinstance(got, list):
-                items = {}
-                seen: set[str] = set()
+                items: dict[str, list[str]] = {}
                 dups: set[str] = set()
                 for pair in got:
                     nid, ids = str(pair[0]), list(pair[1])
-                    if nid in seen:
+                    if nid in items:
                         dups.add(nid)
-                    seen.add(nid)
                     items[nid] = ids
-                duplicates = sorted(dups)
+                out.items, out.duplicates = items, sorted(dups)
             sk = loaded.get("skipped")
             if isinstance(sk, dict):
-                skipped = {str(k): str(v) for k, v in sk.items()}
+                out.skipped = {str(k): str(v) for k, v in sk.items()}
+            args = loaded.get("args")
+            if isinstance(args, list):
+                out.args = [str(a) for a in args]
+            norecurse = loaded.get("norecursedirs")
+            if isinstance(norecurse, list):
+                out.norecursedirs = [str(p) for p in norecurse]
         except (OSError, ValueError, TypeError, IndexError):
-            items = None
-    return items, skipped, duplicates, output, proc.returncode
+            out.items = None
+    return out
+
+
+def _norecurse(path: str, patterns: Iterable[str]) -> bool:
+    """Whether pytest's ``norecursedirs`` keeps it out of directory ``path``
+    (its ``fnmatch_ex``: a pattern without a separator matches the name, one
+    with a separator the path)."""
+    name = os.path.basename(path)
+    for pattern in patterns:
+        pattern = pattern.replace("/", os.sep)
+        if os.sep not in pattern:
+            if fnmatch.fnmatch(name, pattern):
+                return True
+        elif fnmatch.fnmatch(path, pattern if os.path.isabs(pattern) else f"*{os.sep}{pattern}"):
+            return True
+    return False
+
+
+def _reached(rel: str, is_dir: bool, root: str, collected: _Collected) -> bool:
+    """Whether a plain ``pytest`` run from ``root``, as ``collected`` shows it
+    configured, would reach the symlink at ``rel`` (``/``-separated).
+
+    pytest starts from its args (the command line's, else ``testpaths``, else
+    the directory it runs in) and recurses into every directory but those
+    ``norecursedirs`` names (``.*`` by default). So a link is reached when it
+    is an arg, an arg lies inside it, or it lies under an arg with no directory
+    on the way (the link itself included, when it is one) that
+    ``norecursedirs`` excludes. Anything unknown counts as reached (fail
+    closed): no args in the dump, an arg that is no path (``--pyargs``)."""
+    if collected.args is None:
+        return True
+    parts = rel.split("/")
+    bases = sorted({os.path.abspath(root), os.path.realpath(root)})
+    for arg in collected.args or [bases[0]]:
+        if not os.path.exists(arg):
+            return True
+        start: Optional[list[str]] = None
+        for base in bases:
+            if arg == base or arg.startswith(base + os.sep):
+                start = [p for p in os.path.relpath(arg, base).replace(os.sep, "/").split("/") if p != "."]
+                break
+            if base.startswith(arg.rstrip(os.sep) + os.sep):
+                start = []  # an arg above the root covers all of it
+        if start is None:
+            continue  # this arg collects elsewhere
+        if start[: len(parts)] == parts:
+            return True  # the arg is the link, or lies inside it
+        if parts[: len(start)] != start:
+            continue
+        below = parts[len(start) :]
+        dirs = below if is_dir else below[:-1]
+        here = os.path.join(bases[0], *start)
+        blocked = False
+        for d in dirs:
+            here = os.path.join(here, d)
+            if _norecurse(here, collected.norecursedirs):
+                blocked = True
+                break
+        if not blocked:
+            return True
+    return False
 
 
 def _relocate(items: Mapping[str, list[str]], copy: str, root: str) -> dict[str, list[str]]:
@@ -363,15 +442,6 @@ def check(
     try:
         copy = os.path.join(tmp, "after")
         ignored, symlink_offenders = _copy_tree(root, copy)
-        if symlink_offenders:
-            listing = ", ".join(f"{p} -> {real}" for p, real in symlink_offenders)
-            return CollectCheck(
-                False,
-                error=(
-                    "a symlink reaches a test outside the tree, which a real pytest run would follow "
-                    f"but the collection check cannot cover: {listing}"
-                ),
-            )
         for rel, (new_text, encoding) in rewrites.items():
             dest = os.path.join(copy, rel)
             os.makedirs(os.path.dirname(dest) or copy, exist_ok=True)
@@ -379,46 +449,63 @@ def check(
                 fh.write(new_text)
         rr_path = _rr_pythonpath(tmp)
         extra = [*(f"--ignore={p}" for p in ignored), *extra]
-        before, before_skipped, before_dups, before_out, before_rc = _collect(
-            root, python, extra, os.path.join(tmp, "before.json"), rr_path
-        )
-        after, after_skipped, after_dups, after_out, after_rc = _collect(
-            copy, python, extra, os.path.join(tmp, "after.json"), rr_path
-        )
-        if after is not None:
-            after = _relocate(after, copy, root)
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-    skipped = {**after_skipped, **before_skipped}
-    has_decided = any(owner != OPEN for owner in decided.values())
-    for label, items, dups, out, rc in (
-        ("original", before, before_dups, before_out, before_rc),
-        ("rewritten", after, after_dups, after_out, after_rc),
-    ):
-        if items is None:
-            reason = "the dump plugin wrote no items (not loaded?)" if rc == 0 else f"pytest --collect-only exited {rc}"
-            return CollectCheck(False, error=f"collection failed in the {label} tree: {reason}", output=out)
-        if rc != 0:
-            return CollectCheck(
-                False, error=f"collection failed in the {label} tree: pytest --collect-only exited {rc}", output=out
-            )
-        if dups:
+        before = _collect(root, python, extra, os.path.join(tmp, "before.json"), rr_path)
+        # A symlink to a test outside the tree is not in the copy. Fail closed
+        # on each one this pytest run would reach (the original collection
+        # shows its args and norecursedirs); one it never reaches (inside a
+        # dot-dir, outside testpaths) changes nothing a real run collects.
+        reached = [
+            (p, real)
+            for p, real in symlink_offenders
+            if _reached(p, os.path.isdir(os.path.join(root, p)), root, before)
+        ]
+        if reached:
+            listing = ", ".join(f"{p} -> {real}" for p, real in reached)
             return CollectCheck(
                 False,
                 error=(
-                    f"the {label} collection has the nodeid {dups[0]!r} more than once, so the check cannot tell "
-                    "the two cases apart"
+                    "a symlink reaches a test outside the tree, which a real pytest run would follow "
+                    f"but the collection check cannot cover: {listing}"
                 ),
-                output=out,
             )
-        if has_decided and not items:
+        after = _collect(copy, python, extra, os.path.join(tmp, "after.json"), rr_path)
+        if after.items is not None:
+            after.items = _relocate(after.items, copy, root)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    skipped = {**after.skipped, **before.skipped}
+    has_decided = any(owner != OPEN for owner in decided.values())
+    for label, run in (("original", before), ("rewritten", after)):
+        if run.items is None:
+            reason = (
+                "the dump plugin wrote no items (not loaded?)"
+                if run.rc == 0
+                else f"pytest --collect-only exited {run.rc}"
+            )
+            return CollectCheck(False, error=f"collection failed in the {label} tree: {reason}", output=run.output)
+        if run.rc != 0:
+            return CollectCheck(
+                False,
+                error=f"collection failed in the {label} tree: pytest --collect-only exited {run.rc}",
+                output=run.output,
+            )
+        if run.duplicates:
+            return CollectCheck(
+                False,
+                error=(
+                    f"the {label} collection has the nodeid {run.duplicates[0]!r} more than once, so the check "
+                    "cannot tell the two cases apart"
+                ),
+                output=run.output,
+            )
+        if has_decided and not run.items:
             return CollectCheck(
                 False,
                 error=f"collection found no tests in the {label} tree, but the worksheet has decided cases",
-                output=out,
+                output=run.output,
             )
 
-    assert before is not None and after is not None  # guarded above
-    offenders = compare(before, after, decided)
+    assert before.items is not None and after.items is not None  # guarded above
+    offenders = compare(before.items, after.items, decided)
     return CollectCheck(not offenders, offenders=offenders, skipped=skipped)

@@ -16,13 +16,17 @@ The dump is written to the file named by the ``RR_COLLECT_DUMP`` environment
 variable when collection finishes::
 
     {"items": [["pkg/test_m.py::test_a", ["REQ-1"]], ...],
-     "skipped": {"pkg/test_hw.py": "could not import 'hwlib'..."}}
+     "skipped": {"pkg/test_hw.py": "could not import 'hwlib'..."},
+     "args": ["/abs/project/pkg"], "norecursedirs": [".*", "build", ...]}
 
 ``items`` is a list of ``[nodeid, ids]`` pairs, not a mapping, so two items
 that share a nodeid are both recorded (the check refuses on the duplicate
 rather than silently keeping only the last). ``skipped`` names the collectors
 pytest skipped at collection time
 (``importorskip``, a module-level ``pytest.skip``): tests the check cannot see.
+``args`` are the paths pytest started collecting from (the command line's, or
+``testpaths``), made absolute, and ``norecursedirs`` the patterns it does not
+recurse into: the check uses them to tell whether pytest reaches a symlink.
 
 Stdlib only (``rules_requirements`` stays importable without pytest); the
 ``pytest`` import happens through :mod:`rules_requirements.hooks.pytest_plugin`.
@@ -60,5 +64,12 @@ def pytest_collection_finish(session: Any) -> None:
     path = os.environ.get("RR_COLLECT_DUMP")
     if not path:
         return
+    config = session.config
+    base = str(getattr(getattr(config, "invocation_params", None), "dir", "") or os.getcwd())
+    args = [os.path.abspath(os.path.join(base, str(a).split("::")[0])) for a in (getattr(config, "args", None) or [])]
+    try:
+        norecurse = [str(p) for p in config.getini("norecursedirs")]
+    except (ValueError, KeyError):  # pragma: no cover - pytest always defines it
+        norecurse = []
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump({"items": _ITEMS, "skipped": _SKIPPED}, fh, sort_keys=True)
+        json.dump({"items": _ITEMS, "skipped": _SKIPPED, "args": args, "norecursedirs": norecurse}, fh, sort_keys=True)
