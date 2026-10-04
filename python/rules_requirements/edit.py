@@ -33,6 +33,7 @@ from typing import Any, Mapping
 from rules_requirements import config as cfg
 from rules_requirements._vendor import yaml
 from rules_requirements.model import (
+    CLAIM_FIELDS,
     FIELDS,
     Entity,
     Location,
@@ -40,9 +41,13 @@ from rules_requirements.model import (
     Note,
     VerifiedBy,
     _LineLoader,
+    _parse_verified_by,
+    claim_items,
     parse_documents,
     parse_entity,
 )
+
+_CLAIM_KEYS = frozenset(CLAIM_FIELDS.values())
 
 
 class EditError(ValueError):
@@ -61,7 +66,7 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
         value = getattr(ent, key, None)
         if key == "notes":
             value = [_note_dict(n) for n in ent.notes]
-        elif key == "verified_by":
+        elif key in _CLAIM_KEYS:
             value = [_verified_by_item(v) for v in value or ()]
         elif isinstance(value, tuple):
             value = list(value)
@@ -72,11 +77,19 @@ def entity_to_dict(ent: Entity) -> dict[str, Any]:
 
 
 def _verified_by_item(v: VerifiedBy) -> Any:
-    if not v.level and not v.extra:
-        return v.target
-    item: dict[str, Any] = {"target": v.target}
+    """A ``verified_by`` / ``validated_by`` item as plain data: the target as
+    written, in canonical key order (target, cases | whole, level, reason)."""
+    if v.legacy and not v.level and not v.extra:
+        return v.label
+    item: dict[str, Any] = {"target": v.label}
+    if v.cases or (v.problem and not v.whole):
+        item["cases"] = list(v.cases)
+    if v.whole and not v.legacy:
+        item["whole"] = True
     if v.level:
         item["level"] = v.level
+    if v.reason:
+        item["reason"] = v.reason
     item.update(dict(v.extra))
     return item
 
@@ -101,6 +114,9 @@ def dict_to_entity(
     errors: list[str] = []
     unknown: list[str] = []
     ent = parse_entity(kind, dict(data), location or Location(), errors, unknown, nested=[])
+    if ent is not None:  # a malformed claim item is never written (bad-selector)
+        rel = CLAIM_FIELDS.get(kind, "")
+        errors += [f"{ent.id}: {rel} {vb.label}: {vb.problem}" for vb in claim_items(ent) if vb.problem]
     return ent, errors + unknown
 
 
@@ -247,6 +263,8 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
                 lines += [f"{pad}    {ln}" if ln else "" for ln in block[1:]]
                 first = False
         return lines
+    if key in _CLAIM_KEYS and isinstance(value, (list, tuple)):
+        return _claim_block(key, list(value), pad)
     if isinstance(value, (list, tuple)):
         items = list(value)
         flow = f"{pad}{key}: {_flow_list(items)}"
@@ -260,6 +278,37 @@ def render_field(key: str, value: Any, pad: str) -> list[str]:
                 out.append(f"{pad}  - {_scalar(item)}")
         return out
     return [f"{pad}{key}: {_scalar(value)}"]
+
+
+def _claim_block(key: str, items: list[Any], pad: str) -> list[str]:
+    """``verified_by`` / ``validated_by``: one flow line if it fits, else one
+    entry per item — a flow mapping if it fits, else a block mapping with the
+    selectors as a block list (long case names stay readable in diffs)."""
+    flow = f"{pad}{key}: {_flow_list(items)}"
+    if len(flow) <= WIDTH and _reads_back(f"{key}: {_flow_list(items)}\n", {key: items}):
+        return [flow]
+    out = [f"{pad}{key}:"]
+    for item in items:
+        if not isinstance(item, Mapping):
+            out.append(f"{pad}  - {_scalar(item)}")
+            continue
+        line = f"{pad}  - " + _flow_list([item])[1:-1]
+        if len(line) <= WIDTH or "cases" not in item or not isinstance(item["cases"], list):
+            out.append(line)
+            continue
+        first = True
+        for k, v in item.items():
+            lead = f"{pad}  - " if first else f"{pad}    "
+            first = False
+            if k == "cases" and v:
+                out.append(f"{lead}cases:")
+                out += [f"{pad}      - {_value(c)}" for c in v]
+            else:
+                out.append(f"{lead}{k}: {_value(v)}")
+    snippet = "\n".join(ln[len(pad) :] for ln in out) + "\n"
+    if _reads_back(snippet, {key: items}):
+        return out
+    return [f"{pad}{key}:"] + [f"{pad}  - {_value(item)}" for item in items]
 
 
 def render_entity(
@@ -855,12 +904,11 @@ def is_blank(text: str) -> bool:
         return False
 
 
-def verified_by_from(items: Any) -> tuple[VerifiedBy, ...]:
-    out = []
-    for item in items or []:
-        if isinstance(item, str):
-            out.append(VerifiedBy(item))
-        else:
-            extra = tuple((k, v) for k, v in item.items() if k not in ("target", "level"))
-            out.append(VerifiedBy(str(item["target"]), str(item.get("level", "")), extra))
-    return tuple(out)
+def verified_by_from(items: Any, main_repo: str = "") -> tuple[VerifiedBy, ...]:
+    """``verified_by`` / ``validated_by`` items from plain data, read the way
+    the model reads them; raises :class:`EditError` on an item without a target."""
+    errors: list[str] = []
+    out = _parse_verified_by(list(items or []), "verified_by", errors, [], main_repo)
+    if errors:
+        raise EditError("; ".join(errors))
+    return out

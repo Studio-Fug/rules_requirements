@@ -134,7 +134,15 @@ def test_entity_dict_roundtrip_on_full_model():
     for ent in m.entities():
         back, problems = edit.dict_to_entity(ent.kind, edit.entity_to_dict(ent))
         assert not problems and edit.entity_to_dict(back) == edit.entity_to_dict(ent)
-    assert edit.verified_by_from(["a", {"target": "b", "level": "hil"}])[1].level == "hil"
+    vbs = edit.verified_by_from(["//a", {"target": "//b", "level": "hil"}, {"target": "@x//c", "cases": ["m::*"]}])
+    assert [(v.target, v.level, v.cases, v.legacy) for v in vbs] == [
+        ("//a:a", "", (), True),
+        ("//b:b", "hil", (), True),
+        ("@x//c:c", "", ("m::*",), False),
+    ]
+    assert edit.verified_by_from([{"target": "//x:y", "cases": ["a"]}], main_repo="x")[0].target == "//x:y"
+    with pytest.raises(edit.EditError):
+        edit.verified_by_from([{"cases": ["a"]}])
 
 
 # --- adversarial-review regressions ------------------------------------------------
@@ -405,3 +413,110 @@ def test_append_document():
     out = edit.append_document(text, "user_need", {"id": "UN-2", "title": "two"})
     edit.verify(text, out, {"UN-2": {"id": "UN-2", "title": "two", "kind": "user_need"}})
     assert out == "kind: user_need\nid: UN-1\ntitle: one\n---\nkind: user_need\nid: UN-2\ntitle: two\n"
+
+
+# --- claims: verified_by / validated_by items round-trip ---------------------------
+
+CLAIMS = """config: {main_repo: splanc}
+user_needs:
+  - id: UN-5
+    title: Usable
+    validated_by: [{target: "record:usability_study", cases: ["*"]}]
+requirements:
+  - id: REQ-1
+    title: R
+    satisfies: [UN-5]
+    verified_by:
+      - //pkg:t  # legacy
+      - {target: "@splanc//pkg", level: hil}
+      - target: "@@//web:clocksync_test"
+        cases:
+          - "clocksync::bestSample keeps the min-RTT sample"
+          - clocksync::offset*
+      - {target: //req:model_test, whole: true, reason: rr validate runs as one test}
+mitigations:
+  - id: MIT-4
+    title: M
+    mitigates: [RISK-1]
+    implemented_by: [REQ-1]
+    verified_by: [{target: //pi:bench, cases: ["bench::cutoff"], level: hil}]
+"""
+
+
+def test_claim_items_round_trip_as_plain_data():
+    m = parse(CLAIMS)
+    req = edit.entity_to_dict(m.get("REQ-1"))
+    assert req["verified_by"] == [
+        "//pkg:t",
+        {"target": "@splanc//pkg", "level": "hil"},  # the spelling, not the normalized label
+        {
+            "target": "@@//web:clocksync_test",
+            "cases": ["clocksync::bestSample keeps the min-RTT sample", "clocksync::offset*"],
+        },
+        {"target": "//req:model_test", "whole": True, "reason": "rr validate runs as one test"},
+    ]
+    assert edit.entity_to_dict(m.get("UN-5"))["validated_by"] == [{"target": "record:usability_study", "cases": ["*"]}]
+    assert edit.entity_to_dict(m.get("MIT-4"))["verified_by"] == [
+        {"target": "//pi:bench", "cases": ["bench::cutoff"], "level": "hil"}
+    ]
+    for ent in m.entities():
+        back, problems = edit.dict_to_entity(ent.kind, edit.entity_to_dict(ent))
+        assert not problems and edit.entity_to_dict(back) == edit.entity_to_dict(ent)
+
+
+def test_unrelated_edits_keep_claim_text_byte_for_byte():
+    data = edit.entity_to_dict(parse(CLAIMS).get("REQ-1"))
+    data["title"] = "R, renamed"
+    out = edit.update_entity(CLAIMS, "REQ-1", data)
+    edit.verify(CLAIMS, out, {"REQ-1": data})
+    assert out == CLAIMS.replace("    title: R\n", "    title: R, renamed\n")
+
+
+def test_adding_selectors_renders_readable_blocks():
+    m = parse(CLAIMS)
+    data = edit.entity_to_dict(m.get("REQ-1"))
+    long_case = "improv_provision::provisionViaBle: survives Android's first-attempt GATT flake via retry"
+    data["verified_by"].append({"target": "//web:improv_provision_test", "cases": [long_case, "x\\*y"]})
+    out = edit.update_entity(CLAIMS, "REQ-1", data)
+    edit.verify(CLAIMS, out, {"REQ-1": data})
+    assert "      - target: //web:improv_provision_test\n        cases:\n" in out
+    assert '          - "' + long_case + '"\n' in out
+    vb = parse(out).get("REQ-1").verified_by[-1]
+    assert vb.cases == (long_case, "x\\*y") and not vb.legacy
+    assert [v.label for v in parse(out).get("REQ-1").verified_by[:3]] == [
+        "//pkg:t",
+        "@splanc//pkg",
+        "@@//web:clocksync_test",
+    ]
+
+
+def test_claims_on_needs_and_mitigations_can_be_inserted_and_edited():
+    text = "user_needs:\n  - id: UN-1\n    title: n\nmitigations:\n  - id: MIT-1\n    title: m\n"
+    un = {"id": "UN-1", "title": "n", "validated_by": [{"target": "record:study", "cases": ["*"]}]}
+    out = edit.update_entity(text, "UN-1", un)
+    edit.verify(text, out, {"UN-1": un})
+    mit = {"id": "MIT-2", "title": "m2", "verified_by": [{"target": "//a:b", "whole": True, "reason": "one binary"}]}
+    out2 = edit.insert_entity(out, "mitigation", mit)
+    edit.verify(out, out2, {"MIT-2": {**mit, "kind": "mitigation"}})
+    m = parse(out2)
+    assert m.get("UN-1").validated_by[0].cases == ("*",)
+    assert m.get("MIT-2").verified_by[0].whole and m.get("MIT-2").verified_by[0].reason == "one binary"
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {"target": "//a:b", "cases": ["x"], "whole": True},
+        {"target": "//a:b", "cases": []},
+        {"target": "//a:b", "whole": False},
+        {"target": "//a:b", "reason": "r"},
+    ],
+)
+def test_malformed_claim_items_are_never_written(item):
+    data = {"id": "REQ-1", "title": "t", "verified_by": [item]}
+    _, problems = edit.dict_to_entity("requirement", data)
+    assert problems
+    with pytest.raises(edit.EditError):
+        edit.normalize("requirement", data)
+    with pytest.raises(edit.EditError):
+        edit.insert_entity("requirements: []\n", "requirement", data)

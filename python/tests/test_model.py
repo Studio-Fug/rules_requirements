@@ -75,6 +75,10 @@ def test_parse_errors(tmp_path):
           - id: MIT-1
             title: m
             verified_by: 3
+        test_methods:
+          - id: TM-1
+            title: t
+            verified_by: [//a:b]
         mystery: 1
         """,
     )
@@ -88,8 +92,9 @@ def test_parse_errors(tmp_path):
     assert "notes[0] needs a 'text'" in text
     assert "notes[1].kind must be one of" in text
     assert "notes[1].status must be one of" in text
+    assert "MIT-1: verified_by items must be a label or a mapping with a 'target'" in text
     unknown = "\n".join(m.unknown_fields)
-    assert "unknown field 'verified_by'" in unknown
+    assert "TM-1: unknown field 'verified_by'" in unknown  # test methods and risks claim no cases
     assert "unknown top-level key 'mystery'" in unknown
     assert warnings == []
 
@@ -230,3 +235,129 @@ def test_load_model_raises_with_all_errors(tmp_path):
         load_model(path)
     assert any("UN-9" in e for e in exc.value.errors)
     assert "requirements model is invalid" in str(exc.value)
+
+
+# --- claims: verified_by / validated_by items (one owner per test case) -----------
+
+CLAIMS = """
+config: {main_repo: splanc}
+user_needs:
+  - id: UN-5
+    title: Usable
+    validated_by: [{target: "record:usability_study", cases: ["*"]}]
+requirements:
+  - id: REQ-1
+    title: R
+    satisfies: [UN-5]
+    verified_by:
+      - //pkg:t
+      - {target: "@splanc//pkg", level: hil}
+      - target: "@@//web:clocksync_test"
+        level: sil
+        cases: ["clocksync::offset*", "clocksync::bestSample keeps the min-RTT sample"]
+      - {target: //req:model_test, whole: true, reason: rr validate runs as one test}
+mitigations:
+  - id: MIT-4
+    title: M
+    implemented_by: [REQ-1]
+    verified_by: [{target: //pi:bench, cases: ["bench::cutoff"]}]
+"""
+
+
+def test_claim_item_shapes(tmp_path):
+    m, _ = read_model(write(tmp_path, "m.yaml", CLAIMS))
+    assert m.parse_errors == () and m.unknown_fields == ()
+    legacy, legacy_level, cases, whole = m.requirements["REQ-1"].verified_by
+    assert (legacy.target, legacy.whole, legacy.legacy, legacy.cases) == ("//pkg:t", True, True, ())
+    # targets are normalized; the spelling is kept for rewrites
+    assert (legacy_level.target, legacy_level.spelling, legacy_level.level) == ("//pkg:pkg", "@splanc//pkg", "hil")
+    assert legacy_level.legacy and legacy_level.whole
+    assert cases.target == "//web:clocksync_test" and cases.label == "@@//web:clocksync_test"
+    assert cases.cases == ("clocksync::offset*", "clocksync::bestSample keeps the min-RTT sample")
+    assert not cases.whole and not cases.legacy and cases.level == "sil"
+    assert whole.whole and not whole.legacy and whole.reason == "rr validate runs as one test" and whole.cases == ()
+    assert cases.location.path.endswith("m.yaml") and cases.location.line == 13
+    assert m.user_needs["UN-5"].validated_by[0].target == "record:usability_study"
+    assert m.mitigations["MIT-4"].verified_by[0].cases == ("bench::cutoff",)
+
+
+def test_claims_cover_every_verifiable_kind_in_a_stable_order(tmp_path):
+    m, _ = read_model(write(tmp_path, "m.yaml", CLAIMS))
+    got = [(c.entity, c.kind, c.relation, c.target, c.pattern, c.literal, c.index) for c in m.claims()]
+    assert got == [
+        ("UN-5", "user_need", "validated_by", "record:usability_study", "*", False, 0),
+        ("REQ-1", "requirement", "verified_by", "//pkg:t", None, False, 0),
+        ("REQ-1", "requirement", "verified_by", "//pkg:pkg", None, False, 1),
+        ("REQ-1", "requirement", "verified_by", "//web:clocksync_test", "clocksync::offset*", False, 2),
+        (
+            "REQ-1",
+            "requirement",
+            "verified_by",
+            "//web:clocksync_test",
+            "clocksync::bestSample keeps the min-RTT sample",
+            True,
+            2,
+        ),
+        ("REQ-1", "requirement", "verified_by", "//req:model_test", None, False, 3),
+        ("MIT-4", "mitigation", "verified_by", "//pi:bench", "bench::cutoff", True, 0),
+    ]
+    claims = m.claims()
+    assert claims[1].legacy and not claims[5].legacy
+    assert claims[3].level == "sil" and claims[3].location.line == 13
+    # a whole claim selects every path; a selector never selects the synthetic result
+    assert claims[5].matches("[target]") and claims[5].matches("anything")
+    assert claims[3].matches("clocksync::offset") and not claims[3].matches("[target]")
+    assert not m.claims()[0].matches("[target]")
+    assert m.is_verifiable("UN-5") and m.is_verifiable("MIT-4") and not m.is_verifiable("RISK-1")
+
+
+@pytest.mark.parametrize(
+    "item, problem",
+    [
+        ("{target: //a:b, cases: [x], whole: true}", "either cases or whole"),
+        ("{target: //a:b, cases: []}", "cases is empty"),
+        ("{target: //a:b, cases: x}", "must be a list"),
+        ("{target: //a:b, cases: [1]}", "must be a list"),
+        ("{target: //a:b, whole: false}", "whole must be true"),
+        ("{target: //a:b, reason: why}", "reason belongs to a whole"),
+    ],
+)
+def test_malformed_items_claim_the_whole_target(tmp_path, item, problem):
+    m, _ = read_model(write(tmp_path, "m.yaml", f"requirements: [{{id: REQ-1, title: r, verified_by: [{item}]}}]\n"))
+    (vb,) = m.requirements["REQ-1"].verified_by
+    assert problem in vb.problem
+    (claim,) = m.claims()
+    assert claim.whole  # fail closed: it can only add conflicts, never hide one
+
+
+def test_items_without_a_target_are_parse_errors(tmp_path):
+    m, _ = read_model(
+        write(tmp_path, "m.yaml", "user_needs: [{id: UN-1, title: u, validated_by: [{cases: [x]}, '', 3]}]\n")
+    )
+    assert len([e for e in m.parse_errors if "validated_by items must be a label" in e]) == 3
+
+
+def test_risks_and_test_methods_cannot_claim(tmp_path):
+    m, _ = read_model(
+        write(
+            tmp_path,
+            "m.yaml",
+            "risks: [{id: RISK-1, title: r, verified_by: [//a:b]}]\n"
+            "test_methods: [{id: TM-1, title: t, level: hil, validated_by: [//a:b]}]\n",
+        )
+    )
+    assert m.claims() == []
+    unknown = "\n".join(m.unknown_fields)
+    assert "RISK-1: unknown field 'verified_by'" in unknown and "TM-1: unknown field 'validated_by'" in unknown
+
+
+def test_lock_path_is_relative_to_the_config_file(tmp_path):
+    (tmp_path / "req").mkdir()
+    write(tmp_path, "req/a.yaml", "requirements: [{id: REQ-1, title: r}]\n")
+    write(tmp_path, "req/config.yaml", "config: {sets_lock: verification.rrlock}\n")
+    m, _ = read_model(str(tmp_path / "req"), root=str(tmp_path))
+    assert m.config_file == "req/config.yaml"
+    assert m.lock_path(shown=True) == "req/verification.rrlock"
+    assert m.lock_path() == str(tmp_path / "req" / "verification.rrlock")
+    m, _ = read_model(str(tmp_path / "req"))
+    assert m.lock_path() == str(tmp_path / "req" / "verification.rrlock")
