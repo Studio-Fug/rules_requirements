@@ -108,6 +108,9 @@ def test_parses_units(): ...
 - A raw `record_property("requirement", ...)` (or `"requirements"`) bypasses
   these rules: the plugin drops the property and fails the test with
   **RR-E102**. Declare the id with the marker.
+  `record_testsuite_property("requirement", ...)` is written on the
+  `<testsuite>`; ingest gives a suite-level requirement to no case and warns
+  (`suite-level-requirement`).
 - `unittest.TestCase` methods collected by pytest honour `@rr.verifies(...)`
   (below); the decorator's level applies only when no marker names one.
 

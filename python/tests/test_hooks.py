@@ -1517,6 +1517,39 @@ def test_pytest_raw_requirement_property_is_dropped_and_fails_the_test(tmp_path)
     assert bench.status == "passed" and bench.properties["bench"] == "rig-2"
 
 
+def test_pytest_suite_property_requirement_reaches_no_case(tmp_path):
+    """P3/P12 across hooks and ingest: record_testsuite_property("requirement", X)
+    writes X on the <testsuite>, where the RR-E102 guard cannot see it; before
+    0.3 ingest gave it to every case of the session (an unmarked case declared
+    X alone, a marked one became X plus its own id). Since 0.3 a suite-level
+    requirement is not inherited: no case declares X, and ingest warns."""
+    (tmp_path / "test_suite_prop.py").write_text(
+        "import pytest\n"
+        "def test_sets_suite_prop(record_testsuite_property):\n"
+        "    record_testsuite_property('requirement', 'REQ-X')\n"
+        "def test_unmarked_other():\n"
+        "    pass\n"
+        "@pytest.mark.rr('REQ-A')\n"
+        "def test_marked_other():\n"
+        "    pass\n"
+    )
+    proc, out, cases = _run_pytest(tmp_path)
+    assert proc.returncode == 0, out
+    suite = ET.parse(tmp_path / "out.xml").getroot().find("testsuite")
+    written = [(p.get("name"), p.get("value")) for p in suite.find("properties")]
+    assert written == [("requirement", "REQ-X")]  # the property is written on the suite...
+    assert {name: c.declared for name, c in cases.items()} == {  # ...and reaches no case
+        "test_sets_suite_prop": (),
+        "test_unmarked_other": (),
+        "test_marked_other": ("REQ-A",),
+    }
+    assert all(c.status == "passed" for c in cases.values())
+    ev = ingest.collect([str(tmp_path / "out.xml")])
+    assert ev.for_id("REQ-X") == []
+    assert [(i.code, i.ids) for i in ev.issues] == [("suite-level-requirement", ("REQ-X",))]
+    assert "not inherited" in str(ev.issues[0])
+
+
 def test_pytest_nearest_scope_wins_over_class_and_module(tmp_path):
     """P2: one property per case, from the nearest scope that names an id."""
     (tmp_path / "test_near.py").write_text(

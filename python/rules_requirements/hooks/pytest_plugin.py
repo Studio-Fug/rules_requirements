@@ -27,7 +27,9 @@ requirement the case verifies is decided by attribution, never by the hook.
   alone.
 * A raw ``record_property("requirement", ...)`` (or ``"requirements"``)
   bypasses these rules: the property is dropped and the test fails with
-  RR-E102. Use the marker.
+  RR-E102. Use the marker. ``record_testsuite_property("requirement", ...)``
+  lands on the ``<testsuite>``, which ingest gives to no case
+  (``suite-level-requirement`` warning).
 * The marker is also available as ``@pytest.mark.requirements(...)``.
 * ``unittest.TestCase`` methods decorated with
   :func:`rules_requirements.rr.verifies` are honoured too.

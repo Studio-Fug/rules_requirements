@@ -972,6 +972,8 @@ print("test parse::two_ids ... ok")
 print("test parse::single ... ok")
 if mode == "crash":
     print("test parse::dies ... ", flush=True)
+    import resource
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # no core file in the working directory
     os.abort()
 print("test result: ok. 4 passed; 0 failed")
 sys.exit(3 if mode == "leak" else 0)
@@ -1003,6 +1005,7 @@ def test_producer_rust_hook_through_rr_wrap(tmp_path, monkeypatch, capsys):
     leak = _wrap(tmp_path, monkeypatch, "leak")
     (exit_status,) = [r for r in leak.values() if r.key.path.endswith("exit-status")]
     assert exit_status.target_scope and exit_status.status == "error"
+    assert exit_status.declared == ()  # not the union of the ids the run traced (B5)
     # The test that was running when the binary died keeps its own one id.
     crash = _wrap(tmp_path, monkeypatch, "crash")
     dies = crash[t + "parse::dies"]
@@ -1088,6 +1091,7 @@ def test_producer_rr_evidence(tmp_path, monkeypatch):
     assert rows["//p:leaky#ok"].declared == ("REQ-1",) and rows["//p:leaky#ok2"].declared == ("REQ-2",)
     (exit_status,) = [r for k, r in rows.items() if k.endswith("exit-status")]
     assert exit_status.target_scope and exit_status.status == "error"
+    assert exit_status.declared == ()  # not REQ-1 and REQ-2 (B5)
 
 
 def test_producer_rr_case_cli(capsys, tmp_path, monkeypatch):
