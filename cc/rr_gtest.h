@@ -14,11 +14,17 @@
 // googletest writes JUnit XML to $XML_OUTPUT_FILE under `bazel test` (or to
 // --gtest_output=xml:PATH), and RecordProperty() values land on the test
 // case — as <property> elements in current releases, as attributes in older
-// ones; the rules_requirements JUnit ingestor reads both. RecordProperty keeps
-// one value per key, so the ids are recorded as a comma-separated
-// "requirements" property. A test case verifies at most one requirement:
-// several ids on one test (in one call, or over several calls) are still all
-// recorded in 0.2, but deprecated, and warn on stderr [RR-E101].
+// ones; the rules_requirements JUnit ingestor reads both. The id is recorded
+// as the "requirement" property (0.2 wrote "requirements"; ingest reads both
+// names). It is a declared tag: which requirement the case verifies is decided
+// by attribution.
+//
+// A test case verifies at most one requirement. Several ids on one test (in
+// one call, or over several calls) are deprecated: they warn on stderr
+// [RR-E101] and are all recorded, as a comma list (RecordProperty keeps one
+// value per key), so attribution quarantines the case and it counts for none
+// of them. RR_VERIFIES in SetUpTestSuite, an Environment or main is still
+// recorded on the suite, but no test case inherits a suite-level requirement.
 
 #ifndef RULES_REQUIREMENTS_RR_GTEST_H_
 #define RULES_REQUIREMENTS_RR_GTEST_H_
@@ -69,7 +75,7 @@ inline std::vector<std::string> Distinct(const std::string& list) {
 }
 }  // namespace internal
 
-// Records `ids` as verified by the currently running test.
+// Declares `ids` (ONE id; several are deprecated) for the currently running test.
 inline void Verifies(std::initializer_list<const char*> ids) {
   std::string& all = internal::CurrentIds();
   const std::vector<std::string>::size_type before = internal::Distinct(all).size();
@@ -87,11 +93,14 @@ inline void Verifies(std::initializer_list<const char*> ids) {
     for (const std::string& id : named) names += (names.empty() ? "" : ", ") + id;
     std::fprintf(stderr,
                  "rr_gtest: warning: %s names %s; a test case verifies at most one requirement [RR-E101]. "
-                 "Every id is still recorded for now, but multi-id declarations are deprecated: from 0.3 such a "
-                 "case counts for no requirement, and 0.4 rejects it. Split the test, or keep one id.\n",
+                 "Multi-id declarations are deprecated: every id is still recorded, so the case is quarantined "
+                 "and counts for none of them (each reads INVALID), and 0.4 rejects it. Split the test, or keep "
+                 "one id.\n",
                  test.c_str(), names.c_str());
   }
-  ::testing::Test::RecordProperty("requirements", all);
+  std::string distinct;
+  for (const std::string& id : named) distinct += (distinct.empty() ? "" : ",") + id;
+  ::testing::Test::RecordProperty("requirement", distinct);
 }
 
 // Records the verification level (rigor) the current test provides.

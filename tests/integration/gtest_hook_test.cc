@@ -7,6 +7,9 @@ TEST(GtestHook, VerifiesIsTraced) {
   EXPECT_EQ(3 * 3, 9);
 }
 
+// Quarantine case: two ids in one test are deprecated but still all recorded
+// (declared_ids_check asserts both reach the evidence), so attribution
+// quarantines the case and it verifies neither requirement.
 TEST(GtestHook, IdsAccumulateAcrossCalls) {
   RR_VERIFIES("REQ-3");
   RR_VERIFIES("REQ-1");
@@ -15,8 +18,8 @@ TEST(GtestHook, IdsAccumulateAcrossCalls) {
 
 TEST(GtestHook, UntracedTestHasNoIds) { EXPECT_TRUE(true); }
 
-// Suite-level recording applies to every test in the suite and must not leak
-// into the next suite's tests.
+// Suite-level recording is written on the suite and must not leak into the
+// next suite's tests (from 0.3 no test case inherits a suite-level id).
 class SuiteLevel : public ::testing::Test {
  protected:
   static void SetUpTestSuite() { RR_VERIFIES("REQ-3"); }

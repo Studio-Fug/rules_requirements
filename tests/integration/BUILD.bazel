@@ -117,6 +117,17 @@ rr_evidence(
     ],
 )
 
+# Quarantine inputs: the multi-id cases above reach the evidence with every id
+# they name (attribution then quarantines them); no other case names two.
+py_test(
+    name = "declared_ids_check_test",
+    srcs = ["declared_ids_check.py"],
+    args = ["$(rootpaths :evidence)"],
+    data = [":evidence"],
+    main = "declared_ids_check.py",
+    deps = ["//python"],
+)
+
 rr_report(
     name = "report",
     evidence = [":evidence"],

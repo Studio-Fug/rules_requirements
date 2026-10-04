@@ -510,10 +510,12 @@ def test_wrap_nocapture_and_spawned_threads(tmp_path, monkeypatch, capsys):
     assert set(cases) == {"flash_and_boot"} and cases["flash_and_boot"].status == "passed"
     assert cases["flash_and_boot"].requirements == ("REQ-1",)
     assert "tokio-runtime-worker" in capsys.readouterr().err
-    # the same run exiting non-zero: the unattributable ids ride on the exit-status error
+    # the same run exiting non-zero: the exit-status error declares no id (P8),
+    # neither the traced ones nor the spawned thread's, which are dropped
     assert wrap.main(["--junit-xml", str(xml), "--", str(fake), "3"]) == 3
     (exit_case,) = [c for c in ingest.collect([str(xml)]).cases if c.name == "exit-status"]
-    assert set(exit_case.requirements) == {"REQ-1", "REQ-2"}
+    assert exit_case.requirements == () and exit_case.properties.get("rr.scope") == "target"
+    assert "dropped" in capsys.readouterr().err
 
 
 def test_control_characters_do_not_hide_failures(tmp_path):
@@ -764,7 +766,8 @@ def test_wrap_junit_format(tmp_path, monkeypatch):
 
     rc, cases = run("pass", 3)  # every case passed, yet the runner failed: the exit taint
     assert rc == 3 and cases["exit-status"].status == "error"
-    assert cases["exit-status"].requirements == ("REQ-1", "REQ-2")  # as the libtest path does in 0.2
+    assert cases["exit-status"].requirements == ()  # no ids: target-scope taint (P8)
+    assert cases["exit-status"].properties.get("rr.scope") == "target"
     assert "exited with 3" in cases["exit-status"].message
 
     rc, cases = run("fail", 1)  # a reported failure explains the exit code
@@ -1165,7 +1168,7 @@ def test_wrap_marks_whole_run_results(tmp_path, monkeypatch):
     )
     rows = run(two, 3)
     exit_row = rows["suite:t#t::exit-status"]
-    assert exit_row.target_scope and exit_row.declared == ("REQ-1", "REQ-2")  # ids kept for 0.2 verdicts
+    assert exit_row.target_scope and exit_row.declared == ()  # no ids: the target-scope taint (P8)
     assert not rows["suite:bench#bench::a"].target_scope
 
 
@@ -1517,3 +1520,39 @@ def test_junit_writer_cases_are_read_only():
     with pytest.raises(TypeError):
         case.artifact["k"] = "v"  # type: ignore[index]
     assert "requirement" in w.to_string() and "REQ-2" not in w.to_string()
+
+
+def test_rust_trace_lines_singular_and_list_forms(tmp_path, monkeypatch):
+    """P7: the 0.3 singular form, the 0.2 list form, and two calls in one test."""
+    fake = tmp_path / "traced"
+    fake.write_text(
+        "#!" + sys.executable + "\n"
+        "import json, os\n"
+        "with open(os.environ['RR_TRACE_FILE'], 'a') as fh:\n"
+        "    for rec in ({'test': 't::one', 'requirement': 'REQ-1', 'level': 'sil'},\n"
+        "                {'test': 't::old', 'requirements': ['REQ-2']},\n"
+        "                {'test': 't::list', 'requirements': ['REQ-3', 'REQ-4']},\n"
+        "                {'test': 't::twice', 'requirement': 'REQ-5'},\n"
+        "                {'test': 't::twice', 'requirement': 'REQ-6'}):\n"
+        "        fh.write(json.dumps(rec) + '\\n')\n"
+        "print('running 4 tests')\n"
+        "for t in ('one', 'old', 'list', 'twice'):\n"
+        "    print(f'test t::{t} ... ok')\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    xml = tmp_path / "r.xml"
+    assert wrap.main(["--junit-xml", str(xml), "--", str(fake)]) == 0
+    got = {c.name: (c.requirements, c.level) for c in ingest.collect([str(xml)]).cases}
+    assert got == {
+        "one": (("REQ-1",), "sil"),
+        "old": (("REQ-2",), ""),
+        "list": (("REQ-3", "REQ-4"), ""),  # every id recorded: attribution quarantines it
+        "twice": (("REQ-5", "REQ-6"), ""),
+    }
+    # the same lines through the libtest ingestor (a .libtest file plus its trace)
+    from rules_requirements.ingest.libtest import merge_trace, parse_libtest
+
+    cases = parse_libtest("running 1 test\ntest t::one ... ok\n")
+    merge_trace(cases, '{"test": "t::one", "requirement": "REQ-1"}\n["not", "a", "record"]\n')
+    assert [c.requirements for c in cases] == [("REQ-1",)]

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """rr_gtest.h's RR_VERIFIES, compiled against a stand-in for googletest's API
-(data/fake_gtest): several ids on one test are recorded, with RR-E101 on stderr."""
+(data/fake_gtest): one id is recorded as the singular ``requirement``
+property; several ids on one test are all recorded, with RR-E101 on stderr."""
 
 import os
 import shutil
@@ -52,13 +53,16 @@ def test_several_ids_on_one_test_warn_once_and_are_all_recorded(tmp_path):
     assert build.returncode == 0, build.stderr
     run = subprocess.run([str(tmp_path / "t")], capture_output=True, text=True)
     assert run.returncode == 0
+    # 0.3 records the singular "requirement" property (ingest reads both
+    # names), each distinct id once; several ids stay a comma list, which
+    # attribution quarantines.
     assert run.stdout.splitlines() == [
-        "requirements=REQ-4,REQ-5",
-        "requirements=REQ-1",
-        "requirements=REQ-1,REQ-1",
-        "requirements=REQ-2",
-        "requirements=REQ-2,REQ-3",
-        "requirements=REQ-2,REQ-3,REQ-6",
+        "requirement=REQ-4,REQ-5",
+        "requirement=REQ-1",
+        "requirement=REQ-1",
+        "requirement=REQ-2",
+        "requirement=REQ-2,REQ-3",
+        "requirement=REQ-2,REQ-3,REQ-6",
     ]
     warnings = run.stderr.splitlines()
     assert len(warnings) == 2, run.stderr  # once per test, when it gains a second id

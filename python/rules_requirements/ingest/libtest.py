@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 from rules_requirements.ingest import (
     FAILED,
@@ -131,12 +131,24 @@ def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCas
     return list(cases.values())
 
 
+def trace_ids(rec: dict[str, Any]) -> list[str]:
+    """The ids one ``rr::verifies!`` trace line declares: ``"requirement":
+    "<id>"`` (0.3), or the list form ``"requirements": [...]`` (0.2, and a
+    deprecated call naming several ids, which attribution quarantines)."""
+    one = rec.get("requirement")
+    many = rec.get("requirements")
+    ids = [one] if isinstance(one, str) else []
+    return ids + ([str(i) for i in many] if isinstance(many, list) else [])
+
+
 def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
     """Apply ``rr::verifies!`` trace lines to the matching cases.
 
-    Each line is JSON ``{"test": "<module::name>", "requirements": [...],
-    "level": "...", "artifact": {...}}``; ``test`` is the libtest thread name,
-    which is the test's full path.
+    Each line is JSON ``{"test": "<module::name>", "requirement": "<id>",
+    "level": "...", "artifact": {...}}`` (the 0.2 list form
+    ``"requirements": [...]`` is read too); ``test`` is the libtest thread
+    name, which is the test's full path. Several lines for one test (two
+    calls) declare every id they name.
     """
     by_name = {(f"{c.classname}::{c.name}" if c.classname else c.name): c for c in cases}
     for line in trace_text.splitlines():
@@ -147,10 +159,12 @@ def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(rec, dict):
+            continue
         case = by_name.get(str(rec.get("test", "")))
         if case is None:
             continue
-        props = [("requirement", r) for r in rec.get("requirements", [])]
+        props = [("requirement", r) for r in trace_ids(rec)]
         if rec.get("level"):
             props.append(("level", str(rec["level"])))
         props += [(f"artifact.{k}", str(v)) for k, v in (rec.get("artifact") or {}).items()]
