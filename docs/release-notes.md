@@ -3,7 +3,7 @@
 This page is the detailed record of each release. `CHANGELOG.md` at the
 repository root summarises each version in a few lines and links here.
 
-## 0.2.1 (2026-10-05)
+## 0.2.1 (2026-10-04)
 
 A patch release for projects migrating to one requirement per test case
 whose tests run under Bazel. Nothing else changes: verdicts, reports and the

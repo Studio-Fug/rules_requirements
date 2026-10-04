@@ -5,10 +5,10 @@ behaviour — is the [release notes](docs/release-notes.md) (published at
 <https://studio-fug.github.io/rules_requirements/release-notes.html>); where
 the two differ, the release notes are right and this file is the bug.
 
-## 0.2.1 (2026-10-05)
+## 0.2.1 (2026-10-04)
 
 Unblocks applying a worksheet in Bazel projects.
-[Details](docs/release-notes.md#021-2026-10-05).
+[Details](docs/release-notes.md#021-2026-10-04).
 
 ### Added
 
