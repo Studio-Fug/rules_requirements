@@ -157,7 +157,17 @@ def _multi_id_declarations(item: Any) -> Iterator[tuple[Hashable, str, list[str]
     if len(param_ids) > 1:
         yield (item.nodeid, tuple(param_ids)), f"{item.nodeid}: pytest.param marks", param_ids, _location(item, item)
 
-    by_node: dict[int, tuple[Any, list[str]]] = {}
+    fn = getattr(item, "obj", None)
+    fn = getattr(fn, "__func__", fn)
+    cls_node = item.getparent(pytest.Class) if pytest is not None else None
+    cls_obj = getattr(cls_node, "obj", None) if cls_node is not None else None
+    # pytest (>=7.2) merges a base class's pytestmark into the subclass's Class
+    # node, so its markers are yielded against the subclass node. Group each by
+    # the class that actually declares it, so a base's own declaration is a
+    # separate site the nearest-scope rule resolves, not a multi-id declaration.
+    mark_owner = _own_class_marks(cls_obj)
+
+    by_node: dict[Any, tuple[Any, list[str]]] = {}
     unclaimed = list(param_marks)  # the param's marks sit on the function node too
     for node, marker in item.iter_markers_with_node():
         if marker.name not in MARKERS:
@@ -165,10 +175,12 @@ def _multi_id_declarations(item: Any) -> Iterator[tuple[Hashable, str, list[str]
         if node is item and marker in unclaimed:
             unclaimed.remove(marker)
             continue
-        by_node.setdefault(id(node), (node, []))[1].extend(split_ids(list(marker.args)))
-    fn = getattr(item, "obj", None)
-    fn = getattr(fn, "__func__", fn)
-    cls_node = item.getparent(pytest.Class) if pytest is not None else None
+        key: Any = id(node)
+        if cls_node is not None and node is cls_node:
+            owner = mark_owner.get(id(marker))
+            if owner is not None and owner is not cls_obj:
+                key = (id(node), id(owner))  # a base class's own declaration site
+        by_node.setdefault(key, (node, []))[1].extend(split_ids(list(marker.args)))
     own_rr = {
         id(item): _own_rr_ids(fn),
         **({id(cls_node): _own_rr_ids(getattr(cls_node, "obj", None))} if cls_node is not None else {}),
@@ -191,6 +203,24 @@ def _multi_id_declarations(item: Any) -> Iterator[tuple[Hashable, str, list[str]
             # One scope, two declarations: a marker and @rr.verifies on the
             # same function (or class) name different ids.
             yield (nodeid, "rr.verifies", tuple(both)), f"{nodeid}: marker and rr.verifies", both, _location(node, item)
+
+
+def _own_class_marks(cls_obj: Any) -> dict[int, Any]:
+    """Map ``id(Mark) -> owning class`` for the ``rr`` / ``requirements``
+    markers each class in the MRO declares in its OWN ``pytestmark`` (not
+    inherited). Lets a subclass tell its own markers from a base class's, which
+    pytest merges onto the subclass's Class node."""
+    owner: dict[int, Any] = {}
+    for klass in getattr(cls_obj, "__mro__", ()) or ():
+        try:
+            marks = vars(klass).get("pytestmark")
+        except TypeError:  # pragma: no cover - a class always has __dict__
+            continue
+        if isinstance(marks, (list, tuple)):
+            for m in marks:
+                if getattr(m, "name", None) in MARKERS:
+                    owner.setdefault(id(m), klass)
+    return owner
 
 
 def _own_rr_ids(obj: Any) -> list[str]:

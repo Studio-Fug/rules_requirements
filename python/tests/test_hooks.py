@@ -178,6 +178,65 @@ def test_pytest_multi_id_module_marker_warns_once(tmp_path):
     assert {c.requirements for c in ingest.collect([str(tmp_path / "out.xml")]).cases} == {("REQ-1", "REQ-2")}
 
 
+def test_marked_subclass_of_marked_base_does_not_warn(tmp_path):
+    """pytest (>=7.2) merges a base class's pytestmark into the subclass's
+    Class node. Two declaration sites (the base's marker and the subclass's)
+    that the nearest-scope rule resolves must not look like one declaration
+    naming several ids: no MultipleRequirementsWarning."""
+    (tmp_path / "test_inh.py").write_text(
+        "import pytest\n\n\n"
+        "@pytest.mark.rr('REQ-1')\n"
+        "class TestBase:\n"
+        "    def test_base(self):\n        pass\n\n\n"
+        "@pytest.mark.rr('REQ-2')\n"
+        "class TestSub(TestBase):\n"
+        "    def test_sub(self):\n        pass\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
+    )
+    xml = tmp_path / "out.xml"
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "main.py"), "-q", "-W", "error::DeprecationWarning"],
+        env=_env(XML_OUTPUT_FILE=str(xml)),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "MultipleRequirementsWarning" not in proc.stdout, proc.stdout
+    cases = {(c.classname, c.name): set(c.requirements) for c in ingest.collect([str(xml)]).cases}
+    # The subclass's tests accumulate the base's id and its own, by nearest scope.
+    sub = {name: ids for (cls, name), ids in cases.items() if cls.endswith("TestSub")}
+    assert sub["test_sub"] == {"REQ-1", "REQ-2"}
+
+
+def test_subclass_pytestmark_naming_several_ids_still_warns(tmp_path):
+    """A single declaration site that names several ids still warns — even on a
+    subclass whose base is also marked — and names that site's ids, not the
+    base's id merged in."""
+    (tmp_path / "test_inh2.py").write_text(
+        "import pytest\n\n\n"
+        "@pytest.mark.rr('REQ-1')\n"
+        "class TestBase:\n"
+        "    def test_base(self):\n        pass\n\n\n"
+        "@pytest.mark.rr('REQ-2', 'REQ-3')\n"
+        "class TestSub(TestBase):\n"
+        "    def test_sub(self):\n        pass\n"
+    )
+    (tmp_path / "main.py").write_text(
+        "from rules_requirements.hooks.pytest_runner import main\nraise SystemExit(main(__file__))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, str(tmp_path / "main.py"), "-q"],
+        env=_env(XML_OUTPUT_FILE=str(tmp_path / "out.xml")),
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "marker names REQ-2, REQ-3" in proc.stdout, proc.stdout
+    assert "REQ-1, REQ-2" not in proc.stdout  # not the false base-plus-subclass merge
+
+
 def _sample_cases():
     class _Sample(unittest.TestCase):
         @rr.verifies("REQ-1", level="sil")
