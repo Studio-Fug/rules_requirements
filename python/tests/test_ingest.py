@@ -1,12 +1,25 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
 import os
+import shutil
+import sys
+import unittest
 
 import pytest
 from conftest import junit, write
 
-from rules_requirements import ingest
-from rules_requirements.case_keys import CaseKey, index_cases, is_target_scope, key_of
+# Producer harnesses of other test modules, reused by the producer matrix below.
+from test_hooks import _run_pytest
+from test_node_runner import needs_reporters, run_fixture  # noqa: F401  (a fixture)
+from test_rr_case import _run as _run_rr_case
+from test_rr_case import binary  # noqa: F401  (a fixture)
+
+from rules_requirements import bazel, ingest, rr
+from rules_requirements.case_keys import SYNTHETIC_PATH, CaseKey, index_cases, is_target_scope, key_of
+from rules_requirements.hooks import unittest as rr_unittest
+from rules_requirements.hooks import wrap
+from rules_requirements.hooks.checkplan import CheckPlan
+from rules_requirements.hooks.junit_writer import JUnitWriter
 from rules_requirements.ingest import IngestIssue, Ingestor, TestCase, apply_properties, split_ids
 from rules_requirements.ingest.junit import JUnitIngestor, target_from_path
 from rules_requirements.ingest.libtest import merge_trace, parse_libtest
@@ -613,3 +626,352 @@ def test_file_and_line(tmp_path):
 def test_a_bare_testcase_report(tmp_path):
     (case,) = JUnitIngestor().ingest(write(tmp_path, "bazel-testlogs/p/t/test.xml", '<testcase name="only"/>'))
     assert key_of(case) == CaseKey("//p:t", "only") and case.status == "passed"
+
+
+# --- Every producer M1 ships, read back the v0.3 way -------------------------
+#
+# Each producer's real output is placed where Bazel would put it
+# (bazel-testlogs/<pkg>/<name>/...) and folded by key. The invariants checked
+# for every producer: a case declares ids only as tags (never owners), a case
+# its producer tagged once declares exactly that one id, whole-run results are
+# target-scope or synthetic (never members), and the key does not depend on
+# tags or execution dimensions.
+
+
+def _testlogs(tmp_path, label, xml_source, rel="test.xml"):
+    """Copy a report to bazel-testlogs/<pkg>/<name>/<rel>; returns the testlogs root."""
+    pkg, name = label.lstrip("/").split(":")
+    dest = tmp_path / "bazel-testlogs" / pkg / name / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(str(xml_source), str(dest))
+    return tmp_path / "bazel-testlogs"
+
+
+def _rows(*roots):
+    return {str(k): r for k, r in index_cases(ingest.collect([str(r) for r in roots])).items()}
+
+
+@needs_reporters
+def test_producer_node_reporter(run_fixture, tmp_path):  # noqa: F811
+    diag = run_fixture("diagnostics")
+    fail = run_fixture("failures")
+    _testlogs(tmp_path, "//tests/node:diagnostics_test", diag.xml)
+    rows = _rows(_testlogs(tmp_path, "//tests/node:failures_test", fail.xml))
+    raw = rows["//tests/node:diagnostics_test#diagnostics::raw diagnostics"]
+    assert raw.declared == ("REQ-1",) and raw.level == "hil"
+    assert raw.file == "tests/node/diagnostics.test.cjs" and raw.line > 0
+    # The verifies helper refused a second id inside the test: one id, a failed case.
+    second = rows["//tests/node:diagnostics_test#diagnostics::verifies refuses a second id"]
+    assert second.declared == ("REQ-3",) and second.status == "failed"
+    assert rows["//tests/node:diagnostics_test#diagnostics > after a sibling's diagnostics::second"].declared == ()
+    hooks = rows["//tests/node:failures_test#failures > before hook fails::<hooks>"]
+    assert hooks.target_scope and hooks.status == "error" and hooks.declared == ()
+    assert all(len(r.declared) <= 1 for r in rows.values())
+
+
+def test_producer_rr_case_h(binary, tmp_path):  # noqa: F811
+    _, xml = _run_rr_case(binary, tmp_path)
+    rows = _rows(_testlogs(tmp_path, "//fw:rr_case_fixture", xml))
+    check = rows["//fw:rr_case_fixture#fixture::check_fails"]
+    assert check.status == "failed" and check.declared == ("REQ-2",)
+    assert rows["//fw:rr_case_fixture#fixture::passes"].declared == ("REQ-1",)
+    # rr_case.h refuses "REQ-1,REQ-2" itself (RR-E104): an error case with no id.
+    assert rows["//fw:rr_case_fixture#fixture::comma_id"].declared == ()
+    assert all(len(r.declared) <= 1 for r in rows.values())
+    assert not any(r.target_scope or r.synthetic for r in rows.values())
+    # RR_CASE definitions also write their source (file/line attributes).
+    (tmp_path / "registry").mkdir()
+    _, xml = _run_rr_case(binary, tmp_path / "registry", RR_FIXTURE_FORM="registry")
+    rows = _rows(_testlogs(tmp_path / "registry", "//fw:rr_case_registry", xml))
+    tagged = next(r for k, r in rows.items() if k.endswith("::registered_tagged"))
+    assert tagged.declared == ("REQ-9",) and tagged.file.endswith("rr_case_fixture.cc") and tagged.line > 0
+
+
+def test_producer_junit_writer_and_checkplan(tmp_path):
+    report = JUnitWriter("hitl_e2e", default_level="hitl", file="pi/hitl/harness/hitl_e2e.py")
+    plan = CheckPlan(
+        report,
+        {"flash_boot": ("ble_advertising",), "websocket_checks": ("ws_connect", "rename")},
+        tags={"flash_boot.ble_advertising": "REQ-13", "websocket_checks.rename": "REQ-35"},
+    )
+    with pytest.raises(RuntimeError), plan.run():
+        plan.setup_done()
+        with plan.step("flash_boot"), plan.check("ble_advertising"):
+            pass
+        with plan.step("websocket_checks"):
+            raise RuntimeError("DUT rebooted")  # a device failure
+    with pytest.warns(DeprecationWarning):
+        report.add("legacy_two_ids", ["REQ-1", "REQ-2"])  # the deprecated list form
+    xml = tmp_path / "e2e.xml"
+    report.write(str(xml))
+    rows = _rows(_testlogs(tmp_path, "//pi/hitl/harness:e2e_netstack", xml))
+    t = "//pi/hitl/harness:e2e_netstack#"
+    ble = rows[t + "hitl_e2e.flash_boot::ble_advertising"]
+    assert (ble.status, ble.declared, ble.level) == ("passed", ("REQ-13",), "hitl")
+    assert ble.file == "pi/hitl/harness/hitl_e2e.py"
+    rename = rows[t + "hitl_e2e.websocket_checks::rename"]
+    assert rename.status == "failed" and rename.declared == ("REQ-35",)  # "not reached": its own one id
+    assert rows[t + "hitl_e2e.websocket_checks::ws_connect"].declared == ()
+    # A list of two ids is written, and read as two declared ids: a multi-tag case.
+    assert rows[t + "hitl_e2e::legacy_two_ids"].declared == ("REQ-1", "REQ-2")
+
+
+def test_producer_pytest_plugin(tmp_path):
+    (tmp_path / "test_mod.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.rr('REQ-2', level='sil')\n"
+        "@pytest.mark.parametrize('x', ['a', 'b'])\n"
+        "def test_x(x):\n    pass\n"
+        "@pytest.mark.rr('REQ-3', 'REQ-4')\n"
+        "def test_two():\n    pass\n"
+        "def test_untagged():\n    pass\n"
+    )
+    proc, out, _ = _run_pytest(tmp_path)
+    assert proc.returncode == 0, out
+    rows = _rows(_testlogs(tmp_path, "//pkg:mod_test", tmp_path / "out.xml"))
+    assert rows["//pkg:mod_test#test_mod::test_x[a]"].declared == ("REQ-2",)
+    assert rows["//pkg:mod_test#test_mod::test_x[b]"].level == "sil"
+    assert rows["//pkg:mod_test#test_mod::test_two"].declared == ("REQ-3", "REQ-4")  # multi-tag
+    assert rows["//pkg:mod_test#test_mod::test_untagged"].declared == ()
+
+
+def test_producer_unittest_hook(tmp_path):
+    class Hooked(unittest.TestCase):
+        @rr.verifies("REQ-5", level="inspection")
+        def test_a(self):
+            pass
+
+        def test_b(self):
+            self.fail("nope")
+
+    xml = tmp_path / "unit.xml"
+    rr_unittest.run(unittest.defaultTestLoader.loadTestsFromTestCase(Hooked), str(xml), "unit", verbosity=0)
+    rows = _rows(_testlogs(tmp_path, "//pkg:unit_test", xml))
+    (a,) = [r for k, r in rows.items() if k.endswith("Hooked::test_a")]
+    (b,) = [r for k, r in rows.items() if k.endswith("Hooked::test_b")]
+    assert a.declared == ("REQ-5",) and a.level == "inspection" and a.status == "passed"
+    assert b.declared == () and b.status == "failed"
+
+
+def test_producer_googletest_with_rr_gtest(tmp_path):
+    """googletest's own XML for rr_gtest.h: RecordProperty in a test lands on the
+    case (the 0.2 `requirements` name, a comma list for several ids); in
+    SetUpTestSuite it lands on the suite, which no case inherits any more."""
+    xml = write(
+        tmp_path,
+        "bazel-testlogs/tests/integration/gtest_hook_test/test.xml",
+        """<?xml version="1.0" encoding="UTF-8"?>
+        <testsuites tests="3" failures="0" disabled="0" errors="0" time="0." name="AllTests">
+          <testsuite name="Interlock" tests="2" failures="0" disabled="0" skipped="0" errors="0" time="0.">
+            <testcase name="CutsHeaterAtLimit" file="tests/integration/gtest_hook_test.cc" line="4"
+                      status="run" result="completed" time="0." classname="Interlock">
+              <properties><property name="requirements" value="REQ-3"/></properties>
+            </testcase>
+            <testcase name="TwoIds" file="tests/integration/gtest_hook_test.cc" line="10"
+                      status="run" result="completed" time="0." classname="Interlock">
+              <properties><property name="requirements" value="REQ-3,REQ-1"/></properties>
+            </testcase>
+          </testsuite>
+          <testsuite name="SuiteLevel" tests="1" failures="0" disabled="0" skipped="0" errors="0" time="0.">
+            <properties><property name="requirements" value="REQ-3"/></properties>
+            <testcase name="Inherits" file="tests/integration/gtest_hook_test.cc" line="24"
+                      status="run" result="completed" time="0." classname="SuiteLevel"/>
+            <testcase name="Disabled" status="notrun" result="suppressed" time="0." classname="SuiteLevel"/>
+          </testsuite>
+        </testsuites>""",
+    )
+    ev = ingest.collect([xml])
+    rows = {str(k): r for k, r in index_cases(ev).items()}
+    t = "//tests/integration:gtest_hook_test#"
+    cut = rows[t + "Interlock::CutsHeaterAtLimit"]
+    assert cut.declared == ("REQ-3",) and (cut.file, cut.line) == ("tests/integration/gtest_hook_test.cc", 4)
+    assert rows[t + "Interlock::TwoIds"].declared == ("REQ-3", "REQ-1")  # multi-tag
+    assert rows[t + "SuiteLevel::Inherits"].declared == ()  # suite level: not inherited
+    assert rows[t + "SuiteLevel::Disabled"].status == "skipped"
+    assert [(i.code, i.scope, i.ids) for i in ev.issues] == [("suite-level-requirement", "SuiteLevel", ("REQ-3",))]
+
+
+_FAKE_LIBTEST = """#!/usr/bin/env python3
+import json, os, sys
+trace = open(os.environ["RR_TRACE_FILE"], "a")
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+if mode == "silent":
+    print("thread 'main' panicked before any test ran")
+    sys.exit(101)
+# What the shipped crate writes (rr::trace_line: a "requirements" list), and
+# the single "requirement" form of 0.3.
+lines = [
+    {"test": "parse::rejects_empty", "requirements": ["REQ-4"], "level": "sil"},
+    {"test": "parse::two_calls", "requirements": ["REQ-4"]},
+    {"test": "parse::two_calls", "requirements": ["REQ-1"]},
+    {"test": "parse::two_ids", "requirements": ["REQ-4", "REQ-1"]},
+    {"test": "parse::single", "requirement": "REQ-7"},
+]
+if mode == "crash":
+    lines.append({"test": "parse::dies", "requirements": ["REQ-6"]})
+for rec in lines:
+    trace.write(json.dumps(rec) + "\\n")
+trace.flush()
+print("running 4 tests")
+print("test parse::rejects_empty ... ok")
+print("test parse::two_calls ... ok")
+print("test parse::two_ids ... ok")
+print("test parse::single ... ok")
+if mode == "crash":
+    print("test parse::dies ... ", flush=True)
+    os.abort()
+print("test result: ok. 4 passed; 0 failed")
+sys.exit(3 if mode == "leak" else 0)
+"""
+
+
+def _wrap(tmp_path, monkeypatch, mode, label="//rust:parse_test"):
+    fake = tmp_path / "fake_libtest"
+    fake.write_text(_FAKE_LIBTEST)
+    fake.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path / f"tmp_{mode or 'ok'}"))
+    (tmp_path / f"tmp_{mode or 'ok'}").mkdir()
+    xml = tmp_path / f"{mode or 'ok'}.xml"
+    wrap.main(["--target", label, "--junit-xml", str(xml), "--", str(fake), *([mode] if mode else [])])
+    return _rows(_testlogs(tmp_path / (mode or "ok"), label, xml))
+
+
+def test_producer_rust_hook_through_rr_wrap(tmp_path, monkeypatch, capsys):
+    rows = _wrap(tmp_path, monkeypatch, "")
+    t = "//rust:parse_test#"
+    ok = rows[t + "parse::rejects_empty"]
+    assert ok.declared == ("REQ-4",) and ok.level == "sil"
+    # Two rr::verifies! calls with different ids, or one call with two: every id, a multi-tag case.
+    assert rows[t + "parse::two_calls"].declared == ("REQ-4", "REQ-1")
+    assert rows[t + "parse::two_ids"].declared == ("REQ-4", "REQ-1")
+    assert rows[t + "parse::single"].declared == ("REQ-7",)
+    # A run that exits non-zero after passing: the exit status is about the
+    # target (taint), never a member.
+    leak = _wrap(tmp_path, monkeypatch, "leak")
+    (exit_status,) = [r for r in leak.values() if r.key.path.endswith("exit-status")]
+    assert exit_status.target_scope and exit_status.status == "error"
+    # The test that was running when the binary died keeps its own one id.
+    crash = _wrap(tmp_path, monkeypatch, "crash")
+    dies = crash[t + "parse::dies"]
+    assert dies.status == "error" and dies.declared == ("REQ-6",) and not dies.target_scope
+    # Nothing parseable: whole-run results only (synthetic or target-scope), no member.
+    silent = _wrap(tmp_path, monkeypatch, "silent")
+    assert silent and all(r.synthetic or r.target_scope for r in silent.values())
+    assert all(r.status == "error" for r in silent.values())
+    capsys.readouterr()
+
+
+def test_producer_rr_wrap_junit_format(tmp_path, monkeypatch, capsys):
+    runner = tmp_path / "runner"
+    runner.write_text(
+        "#!/bin/sh\n"
+        'mkdir -p "$TEST_TMPDIR/r"\n'
+        'printf \'%s\' \'<testsuite name="go"><testcase classname="pkg" name="TestA [rr:REQ-1]">'
+        '<testcase name="sub"/></testcase></testsuite>\' > "$TEST_TMPDIR/r/junit.xml"\n'
+        'exit "$1"\n'
+    )
+    runner.chmod(0o755)
+    monkeypatch.setenv("TEST_TMPDIR", str(tmp_path))
+    rows = {}
+    for code in ("0", "3"):
+        xml = tmp_path / f"out{code}.xml"
+        args = ["--format", "junit", "--junit-in", "$TEST_TMPDIR/r/junit.xml", "--target", "//go:a_test"]
+        wrap.main([*args, "--junit-xml", str(xml), "--", str(runner), code])
+        rows[code] = _rows(_testlogs(tmp_path / code, "//go:a_test", xml))
+    # The nested case is a case under its parent's scope; the parent's tag is not inherited.
+    assert rows["0"]["//go:a_test#pkg > TestA::sub"].declared == ()
+    assert not any(r.target_scope for r in rows["0"].values())
+    assert any(r.target_scope and r.status == "error" for r in rows["3"].values())
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_producer_bazel_generated_xml(tmp_path, failed):
+    """Bazel's generate-xml.sh output (7.x and 8.x) for a target that writes no JUnit."""
+    body = '<error message="exited with error code 1"></error>' if failed else ""
+    write(
+        tmp_path,
+        "bazel-testlogs/web/flashEnv_test/test.xml",
+        '<?xml version="1.0" encoding="UTF-8"?>\n<testsuites>\n'
+        f'  <testsuite name="web/flashEnv_test_/flashEnv_test" tests="1" failures="0" errors="{int(failed)}">\n'
+        f'    <testcase name="web/flashEnv_test_/flashEnv_test" status="run" duration="1" time="1">{body}</testcase>\n'
+        "      <system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n"
+        '<![CDATA[exec ${PAGER:-/usr/bin/less} "$0" || exit 1\n]]>\n      </system-out>\n'
+        "    </testsuite>\n</testsuites>\n",
+    )
+    (row,) = _rows(tmp_path / "bazel-testlogs").values()
+    assert row.key == CaseKey("//web:flashEnv_test", SYNTHETIC_PATH)
+    assert row.synthetic and not row.target_scope and row.declared == ()
+    assert row.status == ("error" if failed else "passed")
+
+
+def test_producer_rr_evidence(tmp_path, monkeypatch):
+    """bazel.py's rr_evidence runner: a [target] result for a test without JUnit,
+    and a target-scope exit status after a passing report."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bin").mkdir()
+    for name, src in (
+        ("plain", "print('ok')\n"),
+        (
+            "leaky",
+            "import os, sys\n"
+            "open(os.environ['XML_OUTPUT_FILE'],'w').write('<testsuite><testcase name=\"ok\"/></testsuite>')\n"
+            "sys.exit(23)\n",
+        ),
+    ):
+        exe = tmp_path / "bin" / name
+        exe.write_text("#!" + sys.executable + "\n" + src)
+        exe.chmod(0o755)
+    out = tmp_path / "ev" / "testlogs"
+    bazel.main(
+        ["run-tests", "--out", str(out), "--test", "//p:plain=bin/plain=_main", "--test", "//p:leaky=bin/leaky=_main"]
+    )
+    rows = _rows(out)
+    assert rows["//p:plain#" + SYNTHETIC_PATH].synthetic
+    assert rows["//p:leaky#ok"].status == "passed" and not rows["//p:leaky#ok"].target_scope
+    (exit_status,) = [r for k, r in rows.items() if k.endswith("exit-status")]
+    assert exit_status.target_scope and exit_status.status == "error"
+
+
+def _write_report(path, cases):
+    """Write a JUnitWriter report of ``(name, status, id)`` cases to ``path``."""
+    w = JUnitWriter("suite", file="")
+    for name, status, req in cases:
+        w.add(name, req, status=status)
+    os.makedirs(os.path.dirname(str(path)), exist_ok=True)
+    w.write(str(path))
+
+
+def test_sharded_and_runs_per_test_layouts_and_attempts(tmp_path):
+    root = tmp_path / "bazel-testlogs"
+    # --test_sharding: shards are unioned.
+    for shard, cases in ((1, [("a", "passed", "REQ-1")]), (2, [("b", "passed", "REQ-2")])):
+        _write_report(root / "pkg" / "sharded_test" / f"shard_{shard}_of_2" / "test.xml", cases)
+    # --runs_per_test=3: the worst run wins.
+    for run, status in ((1, "passed"), (2, "failed"), (3, "passed")):
+        _write_report(root / "pkg" / "rep_test" / f"run_{run}_of_3" / "test.xml", [("r", status, "REQ-3")])
+    # sharded and repeated: shard_i_of_n_run_k_of_m.
+    for shard in (1, 2):
+        for run in (1, 2):
+            status = "failed" if (shard, run) == (2, 2) else "passed"
+            dims = f"shard_{shard}_of_2_run_{run}_of_2"
+            _write_report(root / "pkg" / "both_test" / dims / "test.xml", [(f"s{shard}", status, None)])
+    # --flaky_test_attempts: the final test.xml wins; an earlier failure makes it flaky.
+    t = root / "pkg" / "flaky_test"
+    _write_report(t / "test_attempts" / "attempt_1.xml", [("f", "failed", "REQ-4"), ("g", "passed", "REQ-5")])
+    _write_report(t / "test.xml", [("f", "passed", "REQ-4"), ("g", "passed", "REQ-6")])
+    rows = _rows(root)
+    assert rows["//pkg:sharded_test#suite::a"].declared == ("REQ-1",)
+    assert rows["//pkg:sharded_test#suite::b"].status == "passed"
+    assert not rows["//pkg:sharded_test#suite::a"].duplicate
+    assert rows["//pkg:rep_test#suite::r"].status == "failed"
+    assert rows["//pkg:both_test#suite::s1"].status == "passed" and rows["//pkg:both_test#suite::s2"].status == "failed"
+    f = rows["//pkg:flaky_test#suite::f"]
+    assert (f.status, f.flaky, f.attempts, f.declared) == ("passed", True, 2, ("REQ-4",))
+    # Attempts that declare different ids for one key: the union, fail-closed (multi-tag).
+    assert set(rows["//pkg:flaky_test#suite::g"].declared) == {"REQ-5", "REQ-6"}
+    # Execution dimensions are not identity: one key per case.
+    assert sorted(k for k in rows if k.startswith("//pkg:flaky_test#")) == [
+        "//pkg:flaky_test#suite::f",
+        "//pkg:flaky_test#suite::g",
+    ]
