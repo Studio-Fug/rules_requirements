@@ -912,9 +912,18 @@ def test_P23_a_bare_suffix_match_must_be_unambiguous(tmp_path, monkeypatch):
     )
     att = build_matrix(model_at(tmp_path / "amb", reqs), ev).attribution
     # Ambiguous: /ci/ws/pi/h/t.py ends with both pi/h/t.py and h/t.py, which
-    # are two files; nothing is merged (the fallback warning stays).
+    # are two files; nothing is merged, but the ambiguity fails closed: an
+    # ambiguous-source error (not the same-path-multiple-owners warning).
     assert not att.quarantined and len(att.owner) == 3
-    assert issues(att, "same-path-multiple-owners")
+    (amb,) = issues(att, "ambiguous-source")
+    assert amb.severity == "error" and amb.entities == ("REQ-1", "REQ-2", "REQ-3")
+    assert "/ci/ws/pi/h/t.py may be h/t.py or pi/h/t.py" in amb.message
+    assert not issues(att, "same-path-multiple-owners")
+    # One owner throughout: no two requirements at stake, no issue.
+    solo = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //h:a, cases: ['*']}, " \
+           "{target: //h:b, cases: ['*']}, {target: //h:c, cases: ['*']}]}\n"  # fmt: skip
+    att1 = build_matrix(model_at(tmp_path / "solo", solo), ev).attribution
+    assert len(att1.owner) == 3 and not issues(att1, "ambiguous-source")
     # Not at a path boundary: /ci/ws/xh/t.py does not end with "/h/t.py".
     att = _two_owners_one_path(tmp_path / "edge", "/ci/ws/xh/t.py", "h/t.py")
     assert not att.quarantined and len(att.owner) == 2

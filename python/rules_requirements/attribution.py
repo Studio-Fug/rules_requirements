@@ -98,6 +98,9 @@ _FIXED_SEVERITY = {
     "unscoped-evidence": "warning",
     "misdirected-evidence": "warning",
     "unknown-id": "warning",
+    # A source file outside the root that may be either of two recorded files:
+    # whether two owners share test code is unknown, so it fails closed.
+    "ambiguous-source": "error",
 }
 
 
@@ -612,7 +615,10 @@ def attribute(
        absolute path matches the one relative path it unambiguously ends
        with (at a path boundary). Equal paths with
        different owners whose source files are unknown or differ are
-       ``same-path-multiple-owners``.
+       ``same-path-multiple-owners``; when one of their files is such an
+       absolute path that ends with two recorded relative ones (it may be
+       either file), the issue is ``ambiguous-source``, always an error:
+       an ambiguity fails closed.
     5. Members: each entity's owned keys; a pseudo-member per selector that
        matched nothing (``missing`` if the target ran, ``not-run`` if not,
        ``error`` if it is tainted or its only result is a failed synthetic
@@ -905,6 +911,20 @@ class _Attributor:
                     f"{k} ({self.owner[k]}, {self.cases[k].file or 'source unknown'})"
                     for k in sorted(keys, key=_key_order)
                 )
+                recorded = sorted({_in_workspace(self.cases[k].file, root) for k in keys if self.cases[k].file})
+                candidates = {f: _suffixes(f, relative) for f in recorded}
+                ambiguous = {f: c for f, c in candidates.items() if len(c) > 1}
+                if ambiguous:
+                    which = "; ".join(f"{f} may be {' or '.join(c)}" for f, c in ambiguous.items())
+                    self.issue(
+                        "ambiguous-source",
+                        f"case path {path!r} is owned by {', '.join(owners_)} in different targets: {listed}; "
+                        f"{which}, so whether they run the same test code is unknown and they may verify two "
+                        "requirements; record the source below the workspace root (rr.file), or declare the "
+                        "targets in config.variants",
+                        entities=tuple(owners_),
+                    )
+                    continue
                 self.issue(
                     "same-path-multiple-owners",
                     f"case path {path!r} is owned by {', '.join(owners_)} in different targets: {listed}; if it "
@@ -1180,6 +1200,14 @@ def _one_source(a: str, b: str, relative: Collection[str] = ()) -> bool:
     if rel.startswith("../") or not absolute.endswith("/" + rel):
         return False
     return not any(other != rel and absolute.endswith("/" + other) for other in relative)
+
+
+def _suffixes(path: str, relative: Collection[str]) -> list[str]:
+    """The recorded relative source paths an absolute ``path`` ends with (at a
+    path boundary): more than one, and it may be any of them."""
+    if not _is_absolute(path):
+        return []
+    return sorted((rel for rel in relative if not rel.startswith("../") and path.endswith("/" + rel)), key=natural_key)
 
 
 def _same_source(
