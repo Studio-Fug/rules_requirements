@@ -214,6 +214,12 @@ def render_markdown(matrix: Matrix, title: str = "") -> str:
             mark = {"passed": "✓", "failed": "✗", "error": "✗", "skipped": "–"}.get(e["status"], "?")
             stale = " (stale)" if e.get("stale") else ""
             parts.append(f"{mark} {e['name']} [{e['level']}]{stale}")
+        # A quarantined case is why an entity is INVALID: never leave it out
+        # of the row (it counts for nobody, so it is no evidence above).
+        verdict = matrix.verdicts.get(item["id"])
+        for member in verdict.members if verdict is not None else ():
+            if member.state == "quarantined" and member.key is not None:
+                parts.append(f"⛔ {member.key.path} ({member.reason})")
         return "<br>".join(parts) or "—"
 
     table(

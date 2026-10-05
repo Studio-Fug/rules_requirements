@@ -71,6 +71,17 @@ def test_markdown(tmp_path, model):
     assert "## Implementation" not in md
 
 
+def test_markdown_shows_the_quarantined_case_beside_invalid(tmp_path, model):
+    """An INVALID row names the case that made it INVALID, not only its passes."""
+    cases = [("heat", "passed", ["REQ-1"], ""), ("both", "passed", ["REQ-1", "REQ-2"], "")]
+    path = junit(tmp_path, "bazel-testlogs/pkg/t/test.xml", cases)
+    md = report.render_markdown(build_matrix(model, ingest.collect([path])))
+    (row,) = [line for line in md.splitlines() if line.startswith("| REQ-1 |")]
+    assert "✓ suite::heat [simulation]<br>⛔ suite::both (multi-tag) | ❌ INVALID |" in row
+    (row,) = [line for line in md.splitlines() if line.startswith("| REQ-2 |")]
+    assert "| ⛔ suite::both (multi-tag) | ❌ INVALID |" in row
+
+
 def test_markdown_implementation_section(model):
     refs = [
         Reference(("REQ-1",), "implements", "src/c.py", 4, "", "def heat"),
