@@ -604,3 +604,229 @@ def plan_paths(paths: Iterable[str]) -> list[str]:
         ap = os.path.abspath(p)
         out.append(os.path.relpath(ap, here) if ap.startswith(here + os.sep) else p)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# `rr migrate apply --stage model`: explicit selectors for every owner        #
+# --------------------------------------------------------------------------- #
+
+WHOLE_REASON = "migrated from tag ownership: the target reports no per-case results"
+
+
+@dataclass
+class ModelStage:
+    """What ``rr migrate apply --stage model`` writes, and why it may not.
+
+    ``additions`` maps each entity to ``{target: [selector, ...]}``: the
+    selectors that make every case it owns through a tag (``attribution:
+    hybrid``) a case it claims; ``whole`` the targets it owns only through
+    their synthetic ``[target]`` result. ``data`` is each changed entity's
+    new plain form (:func:`rules_requirements.edit.entity_to_dict`), and
+    ``model`` the model with those entities, in ``attribution: model``, whose
+    owner table :func:`check_model_stage` proved unchanged. ``refused`` lists
+    why nothing may be written (a quarantine, a worksheet decision the
+    evidence does not show, a changed owner, a static claim error).
+    """
+
+    additions: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    whole: dict[str, list[str]] = field(default_factory=dict)
+    data: dict[str, dict[str, Any]] = field(default_factory=dict)
+    model: Model | None = None
+    owners: int = 0
+    refused: list[str] = field(default_factory=list)
+    unseen: list[str] = field(default_factory=list)  # decided cases the evidence does not hold
+
+
+def _decided_against(doc: Mapping[str, Any] | None, owner: Mapping[CaseKey, str], cases: Iterable[CaseKey],
+                     main_repo: str) -> tuple[list[str], list[str]]:  # fmt: skip
+    """Worksheet decisions the attribution disagrees with, and decided cases it does not hold."""
+    from rules_requirements.case_keys import normalize_target
+
+    present = set(cases)
+    wrong, unseen = [], []
+    for key, decision in decisions(doc).items():
+        if decision == OPEN:
+            continue
+        norm = CaseKey(normalize_target(key.target, main_repo), key.path)
+        if norm not in present:
+            unseen.append(str(norm))
+            continue
+        got = owner.get(norm)
+        if (decision == NONE and got is not None) or (decision != NONE and got != decision):
+            wrong.append(
+                f"{norm}: the worksheet decided {decision}, the evidence makes it "
+                f"{'owned by ' + got if got else 'owned by nobody'} (apply --stage tags and re-run the tests first)"
+            )
+    return wrong, unseen
+
+
+def _compress(
+    paths: list[str],
+    target_keys: list[CaseKey],
+    owned_by_ent: set[CaseKey],
+    skipped: set[CaseKey],
+    others: list[Any],
+    own: list[Any],
+) -> list[str]:
+    """Selectors for ``paths`` (one entity, one target): a ``*`` glob where it
+    selects exactly cases the entity owns, none of them skipped, overlaps no
+    other entity's claim and none of its own; literals for the rest."""
+    from rules_requirements import case_selectors as cs
+
+    wanted = set(paths)
+
+    def safe(glob: str) -> bool:
+        hit = [k for k in target_keys if cs.matches(glob, k.path)]
+        if len([k for k in hit if k.path in wanted]) < 2:
+            return False
+        if any(k not in owned_by_ent or k in skipped for k in hit):
+            return False
+        return not any(c.pattern is None or cs.witness(glob, c.pattern) is not None for c in others + own)
+
+    out: list[str] = []
+    left = list(paths)
+    if safe("*") and all(k in owned_by_ent for k in target_keys):
+        covered = {k.path for k in target_keys if cs.matches("*", k.path)}
+        out.append("*")
+        left = [p for p in left if p not in covered]
+    groups: dict[str, list[str]] = {}
+    for path in left:
+        prefix, sep, _ = path.rpartition("::")
+        if sep:
+            groups.setdefault(prefix + "::", []).append(path)
+    for prefix, members in sorted(groups.items()):
+        glob = cs.escape(prefix) + "*"
+        if len(members) > 1 and safe(glob):
+            out.append(glob)
+            left = [p for p in left if not cs.matches(glob, p)]
+    out.extend(cs.escape(p) for p in sorted(left, key=natural_key))
+    return out
+
+
+def model_stage(
+    model: Model,
+    evidence: Evidence,
+    doc: Mapping[str, Any] | None = None,
+    *,
+    compress: bool = False,
+) -> ModelStage:
+    """Explicit selectors for every current owner (``rr migrate apply --stage model``).
+
+    The owners are decided by :func:`rules_requirements.attribution.attribute`
+    over ``evidence``; nothing here assigns one. Every case owned through a
+    tag gets a selector of its owner (a literal per case, or with
+    ``compress`` a ``*`` glob where that is exact), then
+    :func:`check_model_stage` proves the owner table unchanged under
+    ``attribution: model`` and the claims statically disjoint.
+    """
+    from rules_requirements import case_selectors as cs
+    from rules_requirements import edit
+    from rules_requirements.attribution import attribute
+
+    stage = ModelStage()
+    before = attribute(model, evidence)
+    stage.owners = len(before.owner)
+    for q in before.quarantined:
+        stage.refused.append(f"{q.code}: {q.detail}")
+    wrong, stage.unseen = _decided_against(doc, before.owner, before.cases, model.config.main_repo)
+    stage.refused.extend(wrong)
+    if stage.refused:
+        return stage
+
+    tagged: dict[str, dict[str, list[str]]] = {}
+    for key, via in before.via.items():
+        if via == "tag":
+            tagged.setdefault(before.owner[key], {}).setdefault(key.target, []).append(key.path)
+    claims = model.claims()
+    for ent_id in sorted(tagged, key=natural_key):
+        for target in sorted(tagged[ent_id], key=natural_key):
+            paths = sorted(tagged[ent_id][target], key=natural_key)
+            if paths == ["[target]"]:
+                stage.whole.setdefault(ent_id, []).append(target)
+                continue
+            paths = [p for p in paths if p != "[target]"]
+            keys = [k for k in before.cases if k.target == target and not before.cases[k].synthetic]
+            if compress:
+                selectors = _compress(
+                    paths,
+                    keys,
+                    {k for k in keys if before.owner.get(k) == ent_id},
+                    {k for k in keys if before.cases[k].status == "skipped"},
+                    [c for c in claims if c.target == target and c.entity != ent_id],
+                    [c for c in claims if c.target == target and c.entity == ent_id],
+                )
+            else:
+                selectors = [cs.escape(p) for p in paths]
+            stage.additions.setdefault(ent_id, {})[target] = selectors
+
+    new_model = model
+    for ent_id in sorted(set(stage.additions) | set(stage.whole), key=natural_key):
+        ent = model.get(ent_id)
+        if ent is None:  # pragma: no cover - an owner is always an entity of the model
+            continue
+        data = edit.entity_to_dict(ent)
+        rel = CLAIM_RELATION.get(ent.kind, "verified_by")
+        items = list(data.get(rel, []))
+        for target, selectors in stage.additions.get(ent_id, {}).items():
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and item.get("cases")
+                    and not item.get("whole")
+                    and _same_target(item.get("target"), target, model.config.main_repo)
+                    and set(item) <= {"target", "cases"}
+                ):
+                    item["cases"] = list(item["cases"]) + selectors
+                    break
+            else:
+                items.append({"target": target, "cases": selectors})
+        for target in stage.whole.get(ent_id, []):
+            items.append({"target": target, "whole": True, "reason": WHOLE_REASON})
+        data[rel] = items
+        stage.data[ent_id] = data
+        built, problems = edit.dict_to_entity(ent.kind, data, ent.location)
+        if built is None or problems:
+            stage.refused.append(f"{ent_id}: the new claims do not read back: {'; '.join(problems)}")
+            return stage
+        new_model = new_model.with_entity(built)
+    stage.model = new_model
+    stage.refused.extend(check_model_stage(model, new_model, evidence))
+    return stage
+
+
+CLAIM_RELATION = {cfg.USER_NEED: "validated_by", cfg.REQUIREMENT: "verified_by", cfg.MITIGATION: "verified_by"}
+
+
+def _same_target(label: Any, target: str, main_repo: str) -> bool:
+    from rules_requirements.labels import try_normalize
+
+    return isinstance(label, str) and try_normalize(label, main_repo) == target
+
+
+def check_model_stage(before: Model, after: Model, evidence: Evidence) -> list[str]:
+    """Why ``after`` may not replace ``before``: an owner that changed (the
+    model-mode attribution of ``after`` must give every case the owner the
+    attribution of ``before`` gave it, through a claim), a quarantine, or a
+    static claim error (``check_claims``: shared-case, same-code, a bad
+    selector or target)."""
+    from dataclasses import replace
+
+    from rules_requirements.attribution import attribute
+    from rules_requirements.validate import validate
+
+    problems = []
+    old = attribute(before, evidence)
+    model_mode = replace(after, config=replace(after.config, attribution="model"))
+    new = attribute(model_mode, evidence)
+    for key in sorted(set(old.owner) | set(new.owner), key=lambda k: (natural_key(k.target), natural_key(k.path))):
+        if old.owner.get(key) != new.owner.get(key):
+            problems.append(f"owner of {key} would change: {old.owner.get(key)} -> {new.owner.get(key)}")
+        elif key in new.via and new.via[key] != "model":
+            problems.append(f"{key} would still be owned through its tag, not a claim")
+    problems.extend(f"{q.code}: {q.detail}" for q in new.quarantined)
+    hard = ("shared-case", "same-code-multiple-owners", "bad-selector", "bad-target")
+    old_errors = {(i.code, i.message) for i in validate(before) if i.severity == "error"}
+    for issue in validate(model_mode):
+        if issue.severity == "error" and issue.code in hard and (issue.code, issue.message) not in old_errors:
+            problems.append(f"check_claims: {issue}")
+    return problems

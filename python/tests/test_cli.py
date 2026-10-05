@@ -537,9 +537,12 @@ def test_report_gates_on_invalid_and_incomplete(capsys, model_path, tmp_path):
     logs = tmp_path / "bazel-testlogs"
     junit(logs, "p/t/test.xml", [("both", "passed", ["REQ-1", "REQ-2"], ""), ("skip", "skipped", ["REQ-3"], "")])
     rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
-    assert rc == 1 and "INVALID: REQ-1, REQ-2" in err
+    assert rc == 3 and "INVALID: REQ-1, REQ-2" in err  # a quarantine exits 3 (it wins over --fail-on's 1)
     assert "ATTRIBUTION ERROR: multi-tag: //p:t#suite::both declares REQ-1, REQ-2;" in err
     assert "(0 failed, 0 unverified, 0 under-verified, 2 invalid, 1 incomplete)" in err
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed",
+                     "--on-attribution-error", "warn")  # fmt: skip
+    assert rc == 1 and "ATTRIBUTION ERROR: multi-tag" in err  # warn changes the exit status, never a verdict
     junit(logs, "p/t/test.xml", [("one", "passed", ["REQ-1"], ""), ("skip", "skipped", ["REQ-3"], "")])
     rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
     assert rc == 0 and "ATTRIBUTION ERROR" not in err
