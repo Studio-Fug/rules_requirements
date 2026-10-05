@@ -634,6 +634,18 @@ def test_no_lock_reads_no_lock_whatever_the_config_names(tmp_path):
     assert configured.status("REQ-1") == INCOMPLETE and "unpinned-sets" not in kinds(configured)
     empty = matrix_for(tmp_path, model, [("a", "passed", ["REQ-1"], "")], lock=Lock())
     assert "unlocked-member" in kinds(empty) and "unpinned-sets" not in kinds(empty)
+    # Carry-over (d): NO_LOCK is a flag, not an identity; a copy or a pickled
+    # round trip of it still reads no lock (it used to pin every set to nothing).
+    import copy
+    import pickle
+
+    from rules_requirements.lock import is_no_lock
+
+    for clone in (copy.copy(NO_LOCK), copy.deepcopy(NO_LOCK), pickle.loads(pickle.dumps(NO_LOCK))):
+        assert clone is not NO_LOCK and is_no_lock(clone) and clone == NO_LOCK
+        again = matrix_for(tmp_path, model, [("a", "passed", ["REQ-1"], "")], lock=clone)
+        assert again.attribution.lock is None and kinds(again) == ["unpinned-sets"]
+    assert not is_no_lock(Lock()) and not is_no_lock(None) and Lock() != NO_LOCK
 
 
 def test_tags_are_read_through_the_attribution_only(tmp_path, model):

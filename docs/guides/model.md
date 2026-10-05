@@ -271,7 +271,9 @@ a removal — a case missing from a target that ran, or an entry no claim
 selects any more — is kept in the lock until removals are allowed.
 {py:func}`rules_requirements.trace.build_matrix` reads the configured lock
 unless it is passed one; `lock=rules_requirements.lock.NO_LOCK` reads none
-(the sets are not pinned).
+(the sets are not pinned). `NO_LOCK` is recognised by its `none` flag
+(`rules_requirements.lock.is_no_lock`), so a copy or a pickled round trip of
+it still means "no lock".
 
 (config-reference)=
 ## The `config:` section
