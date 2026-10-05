@@ -1255,6 +1255,8 @@ def test_fuzz_one_owner_invariant_static_witness_and_invalid():
                             assert any(a in m and b in m for m in _pairs(static_issues, "shared-case")), (trial, q)
             elif q.code == MULTI_TAG:
                 seen["multi-tag"] += 1
+                # Rule (a) wins over (b): every declared verifiable id is named.
+                assert {d for d in q.declared if d in _ENTS} <= set(q.entities), (trial, q)
             else:
                 seen["same-code"] += 1
         for ent in att.entities:
@@ -1353,6 +1355,51 @@ def test_member_levels_and_level_mismatch(tmp_path):
     (mismatch,) = issues(att, "level-mismatch")
     assert "provides simulation but REQ-1's claim says hil; counted as simulation" in mismatch.message
     assert mx.status("REQ-1") == VERIFIED and mx.verdicts["REQ-1"].provided == "hil"
+
+
+def test_multi_tag_wins_over_attribution_conflict(tmp_path):
+    """A case that declares REQ-3 and REQ-4 and that REQ-1 and REQ-2 both claim is
+    a multi-tag (rule a before b): it names all four, and all four read INVALID."""
+    reqs = REQS.replace("{id: REQ-1, title: r1, satisfies: [UN-1]}", "{id: REQ-1, title: r1, satisfies: [UN-1], "
+                        "verified_by: [{target: //w:t, cases: ['c::*']}]}").replace(
+        "{id: REQ-2, title: r2, satisfies: [UN-1]}", "{id: REQ-2, title: r2, satisfies: [UN-1], "
+        "verified_by: [{target: //w:t, cases: ['c::m']}]}")  # fmt: skip
+    mx = build_matrix(model_at(tmp_path, reqs), evidence(tc("m", target="//w:t", declared=("REQ-3", "REQ-4"))))
+    att = mx.attribution
+    assert quarantines(att) == {"//w:t#c::m": (MULTI_TAG, ("REQ-1", "REQ-2", "REQ-3", "REQ-4"))}
+    assert [mx.status(f"REQ-{i}") for i in (1, 2, 3, 4)] == [INVALID] * 4
+    assert {m.via for m in att.members_of("REQ-3")} == {"tag"} and {m.via for m in att.members_of("REQ-1")} == {"model"}
+
+
+def test_unlocked_member_is_one_issue_and_one_gap_per_unlocked_key(tmp_path):
+    reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //w:t, cases: ['c::*']}]}\n"
+    lock = rr_lock.Lock((rr_lock.LockEntry("//w:t", "c::a", "REQ-1"),), "verification.rrlock")
+    mx = build_matrix(model_at(tmp_path, reqs), evidence(tc("a", target="//w:t"), tc("b", target="//w:t")), lock=lock)
+    (unlocked,) = issues(mx.attribution, "unlocked-member")
+    assert unlocked.key == CaseKey("//w:t", "c::b") and unlocked.entities == ("REQ-1",)
+    assert "not in the lock verification.rrlock" in unlocked.message
+    assert [(g.kind, g.entity) for g in mx.gaps if g.kind == "unlocked-member"] == [("unlocked-member", "REQ-1")]
+    assert mx.status("REQ-1") == VERIFIED  # an addition is reviewed, not a failure
+
+
+@pytest.mark.parametrize("mode", ["model", "hybrid"])
+def test_report_time_lock_stale(tmp_path, mode):
+    """attribution: model — a lock entry no claim of its owner selects is lock-stale
+    at report time too (not only statically); hybrid mode tolerates it (tag-owned)."""
+    reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //w:t, cases: ['c::a']}]}\n"
+    lock = rr_lock.Lock(
+        (rr_lock.LockEntry("//w:t", "c::a", "REQ-1"), rr_lock.LockEntry("//w:t", "c::old", "REQ-1")),
+        "verification.rrlock",
+    )
+    mx = build_matrix(model_at(tmp_path, reqs, config=f"{{attribution: {mode}}}"), evidence(tc("a", target="//w:t")),
+                      lock=lock)  # fmt: skip
+    stale = issues(mx.attribution, "lock-stale")
+    if mode == "hybrid":
+        assert stale == []
+        return
+    (only,) = stale
+    assert only.key == CaseKey("//w:t", "c::old") and only.entities == ("REQ-1",) and only.severity == "error"
+    assert ("lock-stale", "REQ-1") in {(g.kind, g.entity) for g in mx.gaps}
 
 
 def test_multi_tag_names_only_verifiable_ids_and_claimants(tmp_path):
