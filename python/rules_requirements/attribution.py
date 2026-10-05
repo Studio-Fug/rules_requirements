@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from rules_requirements import case_selectors
 from rules_requirements.case_keys import (
@@ -46,7 +46,7 @@ from rules_requirements.case_keys import (
 from rules_requirements.config import Config
 from rules_requirements.ingest import ERROR, FAILED, PASSED, SKIPPED, Evidence, TestCase
 from rules_requirements.ingest.junit import target_from_path
-from rules_requirements.lock import NO_LOCK, Lock
+from rules_requirements.lock import Lock, is_no_lock
 from rules_requirements.model import VERIFIABLE_KINDS, Claim, Model
 from rules_requirements.util import dedupe, natural_key
 
@@ -606,8 +606,10 @@ def attribute(
     4. Owned keys of one test code (the same source file and path, or one
        ``config.variants`` group and path) in different targets with
        different owners are quarantined ``same-code-multiple-owners``. A
-       source file is compared in its canonical spelling, and an absolute
-       path matches the relative path it ends with. Equal paths with
+       source file is compared in its canonical spelling, relative to the
+       workspace root (``model.root``) when it lies below it; another
+       absolute path matches the one relative path it unambiguously ends
+       with (at a path boundary). Equal paths with
        different owners whose source files are unknown or differ are
        ``same-path-multiple-owners``.
     5. Members: each entity's owned keys; a pseudo-member per selector that
@@ -622,7 +624,7 @@ def attribute(
     no files). ``current_build`` marks members
     stamped with another build ``stale``.
     """
-    if lock is NO_LOCK:
+    if is_no_lock(lock):
         lock = None
     attribution = _Attributor(model, evidence, current_build, lock).run()
     attribution.check_invariant()
@@ -847,8 +849,12 @@ class _Attributor:
         for key in self.owner:
             if self.cases[key].file:
                 with_file.setdefault(key.path, []).append(key)
+        root = self.m.root
+        relative = {
+            _in_workspace(res.file, root) for res in self.cases.values() if res.file and not _is_absolute(res.file)
+        }
         for keys in with_file.values():
-            for same in _same_source(keys, lambda k: self.cases[k].file):
+            for same in _same_source(keys, lambda k: _in_workspace(self.cases[k].file, root), relative):
                 if len({k.target for k in same}) > 1 and len({self.owner[k] for k in same}) > 1:
                     files = sorted({self.cases[k].file for k in same}, key=natural_key)
                     spelled = f" (spelled {', '.join(files[1:])})" if len(files) > 1 else ""
@@ -1140,22 +1146,51 @@ def _is_absolute(path: str) -> bool:
     return path.startswith("/") or (len(path) > 2 and path[1] == ":" and path[2] == "/")
 
 
-def _one_source(a: str, b: str) -> bool:
-    """Whether two recorded (canonical) source paths are one file: equal, or
-    one absolute and ending in ``/`` plus the other, relative, one (a
-    producer that ran outside the workspace root records the absolute path)."""
+def _in_workspace(path: str, root: str) -> str:
+    """``path`` relative to the workspace ``root`` when it is an absolute path
+    below it (a producer that ran outside the root records the absolute
+    path); otherwise unchanged."""
+    if not root or not _is_absolute(path):
+        return path
+    base = root.replace("\\", "/").rstrip("/")
+    if base and path.startswith(base + "/"):
+        return path[len(base) + 1 :]
+    return path
+
+
+def _one_source(a: str, b: str, relative: Collection[str] = ()) -> bool:
+    """Whether two recorded (canonical) source paths are one file.
+
+    Equal paths are. Otherwise only an absolute path (one outside the
+    workspace root, when that is known: :func:`_in_workspace` made the others
+    relative) and a relative one can be: when the absolute path ends in
+    ``/`` plus the relative one -- a match at a path boundary -- and that
+    match is unambiguous, i.e. no other relative source path recorded in the
+    evidence (``relative``) is such a suffix of it as well
+    (``/ws/pi/h/t.py`` may be ``pi/h/t.py`` or ``h/t.py``: then it is
+    neither). Two relative paths, or two absolute ones, that differ are two
+    files.
+    """
     if a == b:
         return True
     if _is_absolute(a) == _is_absolute(b):
         return False
-    absolute, relative = (a, b) if _is_absolute(a) else (b, a)
-    return not relative.startswith("../") and absolute.endswith("/" + relative)
+    absolute, rel = (a, b) if _is_absolute(a) else (b, a)
+    if rel.startswith("../") or not absolute.endswith("/" + rel):
+        return False
+    return not any(other != rel and absolute.endswith("/" + other) for other in relative)
 
 
-def _same_source(keys: Sequence[CaseKey], file_of: Callable[[CaseKey], str]) -> list[list[CaseKey]]:
+def _same_source(
+    keys: Sequence[CaseKey], file_of: Callable[[CaseKey], str], relative: Collection[str] = ()
+) -> list[list[CaseKey]]:
     """``keys`` (one case path) grouped by source file: the connected
-    components of :func:`_one_source` over their files."""
+    components of :func:`_one_source` over their files. Only an absolute
+    path joins a relative one, and only the one relative path it
+    unambiguously ends with, so two different relative files never end up
+    in one group."""
     files = dedupe([file_of(k) for k in keys])
+    relative = set(relative) | {f for f in files if not _is_absolute(f)}
     parent = {f: f for f in files}
 
     def root(f: str) -> str:
@@ -1165,7 +1200,7 @@ def _same_source(keys: Sequence[CaseKey], file_of: Callable[[CaseKey], str]) -> 
 
     for i, a in enumerate(files):
         for b in files[i + 1 :]:
-            if _one_source(a, b):
+            if _one_source(a, b, relative):
                 parent[root(b)] = root(a)
     groups: dict[str, list[CaseKey]] = {}
     for key in keys:

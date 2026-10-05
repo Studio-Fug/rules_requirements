@@ -868,6 +868,70 @@ def test_P23_same_code_however_its_file_is_spelled(tmp_path, monkeypatch, second
     assert mx.status("REQ-1") == mx.status("REQ-2") == INVALID and not att.owner
 
 
+def _two_owners_one_path(tmp_path, file_a, file_b, root=""):
+    reqs = (
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //h:a, cases: ['*']}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //h:b, cases: ['*']}]}\n"
+    )
+    model = model_at(tmp_path, reqs)
+    if root:
+        model = dataclasses.replace(model, root=root)
+    ev = evidence(
+        tc("run", target="//h:a", properties={"rr.file": file_a}),
+        tc("run", target="//h:b", properties={"rr.file": file_b}),
+    )
+    return build_matrix(model, ev).attribution
+
+
+def test_P23_an_absolute_path_is_compared_below_the_workspace_root(tmp_path, monkeypatch):
+    """Carry-over (c): with the workspace root known, ``/home/ci/ws/pi/h/t.py``
+    is ``pi/h/t.py``, not ``h/t.py`` (which it merely ends with): two files,
+    no quarantine; the same file spelled from the root is still one."""
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    att = _two_owners_one_path(tmp_path / "x", "/home/ci/ws/pi/h/t.py", "h/t.py", root="/home/ci/ws")
+    assert not att.quarantined and owners(att) == {"//h:a#c::run": "REQ-1", "//h:b#c::run": "REQ-2"}
+    assert issues(att, "same-path-multiple-owners")  # still visible, never silent
+    same = _two_owners_one_path(tmp_path / "y", "/home/ci/ws/pi/h/t.py", "pi/h/t.py", root="/home/ci/ws")
+    assert {q.code for q in same.quarantined} == {SAME_CODE} and not same.owner
+
+
+def test_P23_a_bare_suffix_match_must_be_unambiguous(tmp_path, monkeypatch):
+    """Without a root, an absolute path joins the relative path it ends with
+    only at a path boundary, and only when no other recorded relative path is
+    also such a suffix: it can never join two different files."""
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    reqs = (
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //h:a, cases: ['*']}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //h:b, cases: ['*']}]}\n"
+        "  - {id: REQ-3, title: c, satisfies: [UN-1], verified_by: [{target: //h:c, cases: ['*']}]}\n"
+    )
+    ev = evidence(
+        tc("run", target="//h:a", properties={"rr.file": "/ci/ws/pi/h/t.py"}),
+        tc("run", target="//h:b", properties={"rr.file": "pi/h/t.py"}),
+        tc("run", target="//h:c", properties={"rr.file": "h/t.py"}),
+    )
+    att = build_matrix(model_at(tmp_path / "amb", reqs), ev).attribution
+    # Ambiguous: /ci/ws/pi/h/t.py ends with both pi/h/t.py and h/t.py, which
+    # are two files; nothing is merged (the fallback warning stays).
+    assert not att.quarantined and len(att.owner) == 3
+    assert issues(att, "same-path-multiple-owners")
+    # Not at a path boundary: /ci/ws/xh/t.py does not end with "/h/t.py".
+    att = _two_owners_one_path(tmp_path / "edge", "/ci/ws/xh/t.py", "h/t.py")
+    assert not att.quarantined and len(att.owner) == 2
+    # Unambiguous: merged (fail closed).
+    att = _two_owners_one_path(tmp_path / "one", "/ci/ws/pi/h/t.py", "pi/h/t.py")
+    assert {q.code for q in att.quarantined} == {SAME_CODE}
+
+
+def test_same_source_never_joins_two_relative_files():
+    from rules_requirements.attribution import _same_source
+
+    keys = [CaseKey(f"//t:{i}", "c::run") for i in range(3)]
+    files = {keys[0]: "/abs/pi/h/t.py", keys[1]: "pi/h/t.py", keys[2]: "h/t.py"}
+    groups = _same_source(keys, files.__getitem__)
+    assert sorted(len(g) for g in groups) == [1, 1, 1]
+
+
 def test_P23_differing_files_at_one_path_still_warn(tmp_path):
     """Two recorded files that do not resolve to one (another checkout's
     absolute path, say) may still be one source: same-path-multiple-owners."""
