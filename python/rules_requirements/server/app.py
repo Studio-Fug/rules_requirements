@@ -27,15 +27,19 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from rules_requirements import config as cfg
+from rules_requirements import edit
 from rules_requirements import graph as rr_graph
 from rules_requirements import report as rr_report
 from rules_requirements.agents import JobManager
+from rules_requirements.agents import worksheet as rr_worksheet
 from rules_requirements.agents.llm import LLM, LLMError, llm_status
-from rules_requirements.agents.workflows import WORKFLOWS, Context
+from rules_requirements.agents.workflows import OWNERSHIP_FIELDS, WORKFLOWS, Context
+from rules_requirements.agents.worksheet import WorksheetPathError
 from rules_requirements.diff import summarize
 from rules_requirements.model import NOTE_KINDS, NOTE_STATUSES
 from rules_requirements.server.workspace import Workspace, WorkspaceError, entity_payload, summary_rows
 
+CASE_OWNER = "case_owner"  # an assign_cases proposal
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
 
@@ -43,9 +47,10 @@ Handler = Callable[["Api", dict[str, str], dict[str, list[str]], Any], Any]
 
 
 class HttpError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, data: dict[str, Any] | None = None):
         super().__init__(message)
         self.status = status
+        self.data = dict(data or {})  # returned next to "error" (the conflicts of a refused save)
 
 
 class Api:
@@ -69,6 +74,10 @@ class Api:
         r("POST", r"/api/entities/(?P<id>[^/]+)/notes", Api.add_note)
         r("PATCH", r"/api/entities/(?P<id>[^/]+)/notes/(?P<note>[^/]+)", Api.update_note)
         r("DELETE", r"/api/entities/(?P<id>[^/]+)/notes/(?P<note>[^/]+)", Api.delete_note)
+        r("POST", r"/api/entities/(?P<id>[^/]+)/precheck", Api.precheck)
+        r("GET", r"/api/cases", Api.list_cases)
+        r("POST", r"/api/cases/move", Api.move_case)
+        r("GET", r"/api/attribution", Api.attribution)
         r("GET", r"/api/next-id", Api.next_id)
         r("GET", r"/api/graph", Api.graph)
         r("GET", r"/api/report", Api.report)
@@ -102,7 +111,9 @@ class Api:
                 try:
                     return fn(self, params, query, body)
                 except WorkspaceError as exc:
-                    raise HttpError(exc.status, str(exc)) from exc
+                    raise HttpError(exc.status, str(exc), exc.data) from exc
+                except WorksheetPathError as exc:
+                    raise HttpError(400, str(exc)) from exc
                 except (KeyError, ValueError) as exc:
                     raise HttpError(400, str(exc).strip("'\"")) from exc
                 except LLMError as exc:
@@ -131,6 +142,7 @@ class Api:
     def state(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         snap = self.ws.snapshot()
         c = snap.model.config
+        att = snap.attribution
         return {
             "project": dict(snap.model.project),
             "root": self.ws.root,
@@ -155,6 +167,8 @@ class Api:
                 "acceptable_risk_score": c.acceptable_risk_score,
             },
             "counts": snap.matrix.counts(),
+            # The one-owner invariant at a glance (the overview's tile).
+            "attribution": {"mode": att.mode, **self.ws.cases()["summary"]} if att is not None else None,
             "issues": [
                 {
                     "severity": i.severity,
@@ -227,6 +241,36 @@ class Api:
     def delete_note(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         self.ws.delete_note(params["id"], params["note"])
         return entity_payload(self.ws, params["id"])
+
+    def precheck(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        """A dry run of saving a draft: what the save guard would refuse, and
+        the entity's verification set as it would be. ``_new`` (or an id not
+        in the model, with ``kind``) prechecks a create."""
+        body = _obj(body)
+        eid = "" if params["id"] == "_new" else params["id"]
+        data = _obj(body.get("data"))
+        return self.ws.precheck(
+            eid or str(data.get("id", "")), data, str(body.get("kind", "")), str(body.get("file", ""))
+        )
+
+    def list_cases(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        """The case ledger, from the attribution: ``?target=&q=&state=`` (``unowned=1`` is ``state=unowned``)."""
+        state = self._q(query, "state") or ("unowned" if self._q(query, "unowned") in ("1", "true") else "")
+        return self.ws.cases(self._q(query, "target"), self._q(query, "q"), state)
+
+    def move_case(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        """Give a case to another owner (or none) through a model edit that passes the checks."""
+        body = _obj(body)
+        result = self.ws.move_case(
+            str(body.get("case", "")),
+            str(body.get("to", "")),
+            expand=bool(body.get("expand")),
+            dry_run=bool(body.get("dry_run")),
+        )
+        return result
+
+    def attribution(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        return self.ws.attribution_payload()
 
     def next_id(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         kind = self._q(query, "kind")
@@ -345,7 +389,7 @@ class Api:
         """Elevate a finding: a note on its entity, or the proposed object."""
         body = _obj(body)
         action = str(body.get("action", "note"))
-        if action not in ("note", "create", "update"):
+        if action not in ("note", "create", "update", "worksheet"):
             raise HttpError(400, f"unknown action {action!r}")
         # Claim it first, so that a double-click applies it once.
         try:
@@ -372,8 +416,21 @@ class Api:
             text = str(body.get("text") or (finding.title + (f"\n\n{finding.detail}" if finding.detail else "")))
             self.ws.add_note(target, text, kind if kind in NOTE_KINDS else "gap", author=author)
             return {"entity": entity_payload(self.ws, target)}
+        proposal = finding.proposal or {}
+        if action == "worksheet" or proposal.get("kind") == CASE_OWNER:
+            # A proposed case owner: only ever recorded in the worksheet, for a
+            # person to decide. Never a model edit.
+            if action != "worksheet" or proposal.get("kind") != CASE_OWNER:
+                raise HttpError(
+                    400,
+                    "a proposed case owner is recorded in the attribution worksheet (action: worksheet); "
+                    "agents never edit ownership in the model",
+                )
+            job = next((j for j in self.jobs.jobs.values() if finding in j.findings), None)
+            rel = str(body.get("worksheet") or (job.params.get("worksheet") if job else "") or rr_worksheet.DEFAULT)
+            written, _ = rr_worksheet.record(self.ws.root, rel, [proposal], by=author)
+            return {"worksheet": written, "case": proposal.get("case"), "proposed": proposal.get("owner")}
         if action in ("create", "update"):
-            proposal = finding.proposal or {}
             data = _obj(body.get("data")) or dict(proposal.get("data", {}))
             kind = str(body.get("kind") or proposal.get("kind", ""))
             if action == "update" or proposal.get("op") == "update":
@@ -383,13 +440,33 @@ class Api:
                     raise HttpError(404, f"{target} does not exist")
                 # A proposal only carries the fields it changes: merge it over
                 # the entity instead of replacing fields it cannot express.
-                merged = {**edit_to_dict(current), **{k: v for k, v in data.items() if k != "id"}, "id": target}
+                now = edit_to_dict(current)
+                merged = {**now, **{k: v for k, v in data.items() if k != "id"}, "id": target}
+                self._keep_ownership(finding, now, merged)
                 self.ws.update(target, merged, version=str(body.get("version") or ""))
                 eid = target
             else:
+                self._keep_ownership(finding, {}, data)
                 eid = self.ws.create(kind, data, str(body.get("file", "")))
             return {"entity": entity_payload(self.ws, eid)}
         raise HttpError(400, f"unknown action {action!r}")
+
+    @staticmethod
+    def _keep_ownership(finding: Any, now: dict[str, Any], data: dict[str, Any]) -> None:
+        """An agent finding never changes which test cases an entity claims:
+        those edits go through the editor (and its checks) or the worksheet."""
+        for name in OWNERSHIP_FIELDS:
+            try:
+                same = edit.verified_by_from(data.get(name)) == edit.verified_by_from(now.get(name))
+            except edit.EditError:
+                same = False
+            if not same:
+                raise HttpError(
+                    409,
+                    f"applying an agent finding cannot change {name} (which test cases the entity claims); "
+                    "save the other changes here, then edit the verification set in the editor, or record "
+                    "case owners in the attribution worksheet",
+                )
 
     def dismiss_finding(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         try:
@@ -491,7 +568,7 @@ def make_handler(api: Api, token: str = "", allowed_hosts: set[str] | None = Non
                     author = unquote(self.headers.get("X-RR-Author", "")).strip()
                     result = api.dispatch(method, url.path, parse_qs(url.query), body, author=author)
                 except HttpError as exc:
-                    return self._json(exc.status, {"error": str(exc)})
+                    return self._json(exc.status, {**exc.data, "error": str(exc)})
                 except Exception as exc:
                     return self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
                 return self._json(200, result)

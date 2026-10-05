@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import json
+import os
+import pathlib
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -10,7 +12,8 @@ from conftest import MODEL, junit, write
 from rules_requirements.agents import Finding, JobManager
 from rules_requirements.agents import llm as rr_llm
 from rules_requirements.agents.workflows import WORKFLOWS, Context, linked_tests
-from rules_requirements.server.app import Api
+from rules_requirements.case_keys import CaseKey
+from rules_requirements.server.app import Api, HttpError
 from rules_requirements.server.workspace import Workspace
 
 
@@ -425,3 +428,177 @@ def test_llm_availability(monkeypatch):
 def test_evidence_mapping_used_by_workflows(ws):
     assert json.dumps(ctx_of(ws).matrix.verdicts["REQ-1"].status) == '"VERIFIED"'
     assert subprocess.run(["true"]).returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# Agents read the attribution, and only propose case owners (P26, P31)        #
+# --------------------------------------------------------------------------- #
+
+OWNED_MODEL = MODEL.replace(
+    "  - id: REQ-3\n    title: Cut the heater at 35 C\n",
+    "  - id: REQ-3\n    title: Cut the heater at 35 C\n"
+    "    verified_by: [{target: //t:agent_test, cases: ['tests.test_ctl::test_unrelated']}]\n",
+)
+
+
+@pytest.fixture
+def owned_ws(tmp_path):
+    write(tmp_path, "req/model.yaml", OWNED_MODEL)
+    write(
+        tmp_path,
+        "tests/test_ctl.py",
+        "def test_heat():\n    assert heat(10)\n\n\ndef test_unrelated():\n    assert cut(40)\n\n\n"
+        "def test_both():\n    assert heat(10) and accept(20)\n\n\ndef test_orphan():\n    assert accept(5)\n",
+    )
+
+    def case(name, *ids):
+        props = "".join(f'<property name="requirement" value="{i}"/>' for i in ids)
+        return (
+            f'<testcase classname="tests.test_ctl" name="{name}" file="tests/test_ctl.py">'
+            f"<properties>{props}</properties></testcase>"
+        )
+
+    xml = (
+        case("test_heat", "REQ-1")  # hybrid: its tag owns it
+        + case("test_unrelated", "REQ-2")  # REQ-3 claims it: the model wins (tag-mismatch)
+        + case("test_both", "REQ-1", "REQ-2")  # multi-tag: quarantined
+        + case("test_orphan")  # nobody's
+    )
+    write(
+        tmp_path,
+        "bazel-testlogs/t/agent_test/test.xml",
+        f'<?xml version="1.0"?><testsuites><testsuite name="s">{xml}</testsuite></testsuites>',
+    )
+    return Workspace(root=str(tmp_path), model_paths=["req"], evidence_paths=["bazel-testlogs"], scan=False)
+
+
+def _no_raw_tags(monkeypatch):
+    from rules_requirements import ingest
+
+    def boom(self, entity_id):
+        raise AssertionError(f"an agent read raw tags: Evidence.for_id({entity_id!r})")
+
+    monkeypatch.setattr(ingest.Evidence, "for_id", boom)
+
+
+def test_agent_context_is_the_verification_set_never_the_tags(owned_ws, monkeypatch):
+    _no_raw_tags(monkeypatch)
+    ctx = ctx_of(owned_ws)
+    labels = lambda rid: [label for label, _ in linked_tests(ctx, rid)]  # noqa: E731
+    assert [x.split(" (")[0] for x in labels("REQ-1")] == ["//t:agent_test#tests.test_ctl::test_heat"]
+    # REQ-2 is tagged on test_unrelated (owned by REQ-3) and on the quarantined test_both: no test of it.
+    assert labels("REQ-2") == []
+    assert [x.split(" (")[0] for x in labels("REQ-3")] == ["//t:agent_test#tests.test_ctl::test_unrelated"]
+    assert "set 0/1 passed · 1 quarantined" in ctx.set_line("REQ-2")
+    assert "REQ-2 [INVALID; set 0/1 passed · 1 quarantined]" in ctx.digest()
+    llm = FakeLLM([{"tests": [], "missing_checks": [], "summary": ""}] * 3)
+    run(owned_ws, "test_adequacy", llm)
+    prompts = "\n".join(p for _, p, _ in llm.prompts)
+    assert "test_unrelated" in prompts and "verification set:" in prompts
+    reviewed = [p for _, p, _ in llm.prompts if p.split("\n")[1].startswith("REQ-2")]
+    assert reviewed == []  # REQ-2 has no test to review: skipped, not fed its tags
+
+
+def test_agent_proposals_never_carry_ownership(owned_ws):
+    from rules_requirements.agents.workflows import to_proposal
+
+    raw = {
+        "kind": "requirement",
+        "title": "t",
+        "verified_by": [{"target": "//t:agent_test", "cases": ["*"]}],
+        "validated_by": ["//x:y"],
+    }
+    prop = to_proposal(raw, owned_ws.model)
+    assert prop == {"kind": "requirement", "data": {"title": "t"}}
+
+
+def test_assign_cases_proposes_one_owner_into_the_worksheet(owned_ws, monkeypatch):
+    _no_raw_tags(monkeypatch)
+    model_text = pathlib.Path(os.path.join(owned_ws.root, "req/model.yaml")).read_text(encoding="utf-8")
+    both = "//t:agent_test#tests.test_ctl::test_both"
+    orphan = "//t:agent_test#tests.test_ctl::test_orphan"
+    llm = FakeLLM(
+        [
+            {
+                "assignments": [
+                    {"case": both, "owner": "REQ-1", "rationale": "asserts heating"},
+                    {"case": orphan, "owner": "REQ-1, REQ-2", "rationale": "greedy"},  # never two
+                    {"case": both, "owner": "REQ-2", "rationale": "second answer ignored"},
+                    {"case": "//t:x#y", "owner": "REQ-2", "rationale": "not asked"},
+                ]
+            }
+        ]
+    )
+    job = run(owned_ws, "assign_cases", llm, worksheet="plans/attribution.rrplan")
+    (f,) = job.findings
+    assert f.proposal["kind"] == "case_owner" and f.proposal["case"] == both and f.proposal["owner"] == "REQ-1"
+    assert f.refs == ["REQ-2"] and f.status == "applied"
+    _, prompt, schema = llm.prompts[0]
+    assert both in prompt and orphan in prompt and "quarantined (multi-tag)" in prompt and "def test_both" in prompt
+    enum = schema["properties"]["assignments"]["items"]["properties"]["owner"]["enum"]
+    assert "none" in enum and "RISK-1" not in enum and "TM-1" not in enum
+    assert any("not one entity id" in line for line in job.log)
+    # The worksheet holds a proposal; the decision stays open, the model untouched.
+    from rules_requirements import migrate
+
+    doc = migrate.load_worksheet(os.path.join(owned_ws.root, "plans/attribution.rrplan"))
+    assert migrate.check_worksheet(doc, owned_ws.model) == []
+    (group,) = doc["groups"]
+    (entry,) = group["cases"]
+    assert entry["path"] == "tests.test_ctl::test_both" and entry["proposed"] == "REQ-1"
+    assert entry["proposed_by"] == "rr-agent/assign_cases" and "owner" not in entry and group["owner"] == "?"
+    assert migrate.decisions(doc) == {CaseKey("//t:agent_test", "tests.test_ctl::test_both"): "?"}
+    assert pathlib.Path(os.path.join(owned_ws.root, "req/model.yaml")).read_text(encoding="utf-8") == model_text
+    # Its open rows are what a second run assigns.
+    from rules_requirements.agents.workflows import cases_to_assign
+
+    keys = [str(k) for k, _ in cases_to_assign(ctx_of(owned_ws), worksheet="plans/attribution.rrplan")]
+    assert keys == [both]
+    assert {str(k) for k, _ in cases_to_assign(ctx_of(owned_ws))} == {both, orphan}
+
+
+def test_a_case_owner_finding_only_goes_to_the_worksheet(owned_ws):
+    api = Api(owned_ws, llm=FakeLLM([]), author="Ada <ada@x>")
+    orphan = "//t:agent_test#tests.test_ctl::test_orphan"
+    api.llm.answers.append({"assignments": [{"case": orphan, "owner": "REQ-2", "rationale": "accepts 5 C"}]})
+    job = api.dispatch("POST", "/api/agents/run", {}, {"workflow": "assign_cases", "params": {}, "wait": True})
+    (f,) = job["findings"]
+    assert f["status"] == "open" and f["proposal"]["owner"] == "REQ-2"
+    for action in ("update", "create"):
+        with pytest.raises(HttpError) as exc:
+            api.dispatch("POST", f"/api/findings/{f['id']}/apply", {}, {"action": action})
+        assert exc.value.status == 400 and "worksheet" in str(exc.value)
+    with pytest.raises(HttpError):
+        api.dispatch("POST", f"/api/findings/{f['id']}/apply", {}, {"action": "worksheet", "worksheet": "../x.rrplan"})
+    r = api.dispatch("POST", f"/api/findings/{f['id']}/apply", {}, {"action": "worksheet"})
+    assert r["worksheet"] == "attribution.rrplan" and r["proposed"] == "REQ-2"
+    text = pathlib.Path(os.path.join(owned_ws.root, "attribution.rrplan")).read_text(encoding="utf-8")
+    assert "proposed: REQ-2" in text and "rr-agent/assign_cases" in text
+    snap = owned_ws.snapshot()
+    assert snap.attribution.owner_of(CaseKey.parse(orphan)) is None  # still nobody's: a person decides
+
+
+def test_applying_an_agent_update_cannot_change_claims(owned_ws):
+    api = Api(owned_ws, author="Ada <ada@x>")
+    job = api.dispatch(
+        "POST", "/api/agents/run", {}, {"workflow": "completeness", "params": {"use_llm": False}, "wait": True}
+    )
+    finding = Finding(
+        "assistant",
+        "info",
+        "assistant:update",
+        "t",
+        entity="REQ-3",
+        proposal={"kind": "requirement", "op": "update", "data": {"title": "Cut the heater at 35 C, always"}},
+        source="llm",
+    )
+    finding.id = "x-1"
+    api.jobs.jobs[job["id"]].findings.append(finding)
+    steal = {"title": "x", "verified_by": [{"target": "//t:agent_test", "cases": ["*"]}]}
+    with pytest.raises(HttpError) as exc:
+        api.dispatch("POST", "/api/findings/x-1/apply", {}, {"action": "update", "data": steal})
+    assert exc.value.status == 409 and "verified_by" in str(exc.value)
+    r = api.dispatch("POST", "/api/findings/x-1/apply", {}, {"action": "update"})
+    assert r["entity"]["data"]["verified_by"] == [
+        {"target": "//t:agent_test", "cases": ["tests.test_ctl::test_unrelated"]}
+    ]

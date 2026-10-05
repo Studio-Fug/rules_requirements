@@ -500,3 +500,108 @@ def test_static_files_may_be_symlinks_but_never_escape(api, tmp_path, monkeypatc
             assert http(base, "GET", path)[0] == 404, path
     finally:
         httpd.shutdown()
+
+
+# --------------------------------------------------------------------------- #
+# One owner per test case: the 409 guard, precheck and the case ledger        #
+# --------------------------------------------------------------------------- #
+
+LEDGER = MODEL.replace(
+    "  - id: REQ-1\n    title: Heat below setpoint\n",
+    "  - id: REQ-1\n    title: Heat below setpoint\n"
+    "    verified_by: [{target: //t:ctl_test, cases: ['suite::a', 'suite::b']}]\n",
+)
+
+
+@pytest.fixture
+def ledger_api(tmp_path):
+    write(tmp_path, "req/model.yaml", LEDGER)
+    cases = "".join(f'<testcase classname="suite" name="{n}"/>' for n in "abc")
+    write(
+        tmp_path,
+        "bazel-testlogs/t/ctl_test/test.xml",
+        f'<?xml version="1.0"?><testsuites><testsuite name="s">{cases}</testsuite></testsuites>',
+    )
+    ws = Workspace(root=str(tmp_path), model_paths=["req"], evidence_paths=["bazel-testlogs"])
+    return Api(ws, author="Ada <ada@x>")
+
+
+def _claims(*cases):
+    return {"title": "Accept setpoints between 5 and 30 C", "satisfies": ["UN-2"], "modules": ["controller"]} | {
+        "verified_by": [{"target": "//t:ctl_test", "cases": list(cases)}]
+    }
+
+
+def test_a_shared_case_save_is_a_409_naming_the_case_and_its_owner(ledger_api):
+    with pytest.raises(HttpError) as exc:
+        call(ledger_api, "PUT", "/api/entities/REQ-2", {"data": _claims("suite::*")})
+    assert exc.value.status == 409
+    assert "//t:ctl_test#suite::a" in str(exc.value) and "owned by REQ-1" in str(exc.value)
+    assert exc.value.data["conflicts"][0]["owner"] == "REQ-1"
+    with pytest.raises(HttpError) as exc:
+        call(
+            ledger_api, "POST", "/api/entities", {"kind": "requirement", "data": {"title": "x", **_claims("suite::b")}}
+        )
+    assert exc.value.status == 409
+    r = call(ledger_api, "PUT", "/api/entities/REQ-2", {"data": _claims("suite::c")})
+    assert r["set"]["passed"] == 1 and r["members"][0]["case"] == "//t:ctl_test#suite::c"
+
+
+def test_the_409_reaches_the_browser_with_its_conflicts(ledger_api):
+    httpd = serve(ledger_api, port=0)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        status, _, body = http(base, "PUT", "/api/entities/REQ-2", {"data": _claims("suite::a")}, {"X-RR-Request": "1"})
+        data = json.loads(body)
+        assert status == 409 and "a test case verifies at most one requirement" in data["error"]
+        assert data["conflicts"][0]["case"] == "//t:ctl_test#suite::a" and data["conflicts"][0]["owner"] == "REQ-1"
+    finally:
+        httpd.shutdown()
+
+
+def test_precheck_endpoint(ledger_api):
+    r = call(ledger_api, "POST", "/api/entities/REQ-2/precheck", {"data": _claims("suite::a")})
+    assert not r["ok"] and r["problems"][0]["code"] == "shared-case" and r["problems"][0]["owner"] == "REQ-1"
+    r = call(ledger_api, "POST", "/api/entities/REQ-2/precheck", {"data": _claims("suite::c")})
+    assert (
+        r["ok"]
+        and r["set"]["members"] == 1
+        and r["selectors"] == [{"target": "//t:ctl_test", "selector": "suite::c", "cases": 1}]
+    )
+    r = call(
+        ledger_api,
+        "POST",
+        "/api/entities/_new/precheck",
+        {
+            "kind": "mitigation",
+            "data": {"title": "m", "verified_by": [{"target": "//t:ctl_test", "cases": ["suite::b"]}]},
+        },
+    )
+    assert not r["ok"] and r["id"] == "MIT-2" and r["problems"][0]["case"] == "//t:ctl_test#suite::b"
+    assert "verified_by" not in call(ledger_api, "GET", "/api/entities/REQ-2")["data"]  # nothing written
+
+
+def test_cases_attribution_and_move_endpoints(ledger_api):
+    r = call(ledger_api, "GET", "/api/cases")
+    assert r["summary"] == {"cases": 3, "owned": 2, "unowned": 1, "quarantined": 0}
+    assert {c["case"]: c["owner"] for c in r["cases"]} == {
+        "//t:ctl_test#suite::a": "REQ-1",
+        "//t:ctl_test#suite::b": "REQ-1",
+        "//t:ctl_test#suite::c": None,
+    }
+    assert [c["case"] for c in call(ledger_api, "GET", "/api/cases", unowned=1)["cases"]] == ["//t:ctl_test#suite::c"]
+    assert call(ledger_api, "GET", "/api/cases", target="//t:other")["cases"] == []
+    s = call(ledger_api, "GET", "/api/state")
+    assert s["attribution"]["cases"] == 3 and s["attribution"]["quarantined"] == 0
+    a = call(ledger_api, "GET", "/api/attribution")
+    assert a["targets"]["//t:ctl_test"]["owned"] == 2 and a["sets"]["REQ-1"]["passed"] == 2
+    plan = call(
+        ledger_api, "POST", "/api/cases/move", {"case": "//t:ctl_test#suite::b", "to": "REQ-2", "dry_run": True}
+    )
+    assert plan["ok"] and plan["from"] == "REQ-1" and plan["plan"]
+    call(ledger_api, "POST", "/api/cases/move", {"case": "//t:ctl_test#suite::b", "to": "REQ-2"})
+    rows = {c["case"]: c["owner"] for c in call(ledger_api, "GET", "/api/cases")["cases"]}
+    assert rows["//t:ctl_test#suite::b"] == "REQ-2"
+    with pytest.raises(HttpError) as exc:
+        call(ledger_api, "POST", "/api/cases/move", {"case": "nonsense", "to": "REQ-2"})
+    assert exc.value.status == 400
