@@ -26,9 +26,11 @@ class WorksheetPathError(ValueError):
     pass
 
 
-def resolve(root: str, rel: str) -> str:
+def resolve(root: str, rel: str, model_paths: Iterable[str] = ()) -> str:
     """The absolute path of worksheet ``rel`` (relative to ``root``), refusing
-    anything outside ``root`` or not a ``.rrplan`` / ``.json`` file."""
+    anything outside ``root``, not a ``.rrplan`` / ``.json`` file, or a file
+    the model loader would read as part of the model (``model_paths``,
+    relative to ``root`` or absolute): a worksheet there would corrupt it."""
     rel = (rel or DEFAULT).strip()
     if not rel.endswith((".rrplan", ".json")):
         raise WorksheetPathError(f"{rel}: a worksheet is a .rrplan (or .json) file")
@@ -36,7 +38,24 @@ def resolve(root: str, rel: str) -> str:
     path = os.path.realpath(os.path.join(base, rel))
     if not path.startswith(base + os.sep) or ".git" in os.path.relpath(path, base).split(os.sep):
         raise WorksheetPathError(f"{rel} is outside the workspace")
+    for model_path in model_paths:
+        if _model_would_read(os.path.realpath(os.path.join(base, model_path)), path):
+            raise WorksheetPathError(
+                f"{rel} would be read as part of the model ({model_path}); put the worksheet outside the model "
+                "directories, or name it .rrplan"
+            )
     return path
+
+
+def _model_would_read(model_path: str, path: str) -> bool:
+    """Whether :func:`~rules_requirements.model.model_files` over
+    ``model_path`` would load ``path`` (both absolute, resolved)."""
+    if path == model_path:
+        return True
+    if not path.startswith(model_path.rstrip(os.sep) + os.sep) or not path.endswith((".yaml", ".yml", ".json")):
+        return False
+    folders = os.path.relpath(path, model_path).split(os.sep)[:-1]
+    return not any(f.startswith(".") for f in folders)
 
 
 def _group_of(path: str) -> str:
@@ -95,11 +114,14 @@ def propose(
     return entry
 
 
-def record(root: str, rel: str, proposals: Iterable[Mapping[str, Any]], by: str = AGENT) -> tuple[str, int]:
+def record(
+    root: str, rel: str, proposals: Iterable[Mapping[str, Any]], by: str = AGENT, model_paths: Iterable[str] = ()
+) -> tuple[str, int]:
     """Write ``proposals`` (``{case, owner, rationale, candidates, status}``)
-    into the worksheet at ``rel`` (created when absent); returns its path
-    relative to ``root`` and the number recorded."""
-    path = resolve(root, rel)
+    into the worksheet at ``rel`` (created when absent; never a file of the
+    model at ``model_paths``); returns its path relative to ``root`` and the
+    number recorded."""
+    path = resolve(root, rel, model_paths)
     if os.path.exists(path):
         doc = migrate.load_worksheet(path)
     else:

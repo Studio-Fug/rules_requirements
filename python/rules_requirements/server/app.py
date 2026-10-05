@@ -78,6 +78,8 @@ class Api:
         r("GET", r"/api/cases", Api.list_cases)
         r("POST", r"/api/cases/move", Api.move_case)
         r("GET", r"/api/attribution", Api.attribution)
+        r("GET", r"/api/lock", Api.lock_status)
+        r("POST", r"/api/lock/update", Api.update_lock)
         r("GET", r"/api/next-id", Api.next_id)
         r("GET", r"/api/graph", Api.graph)
         r("GET", r"/api/report", Api.report)
@@ -127,7 +129,12 @@ class Api:
     def _context(self, job: Any) -> Context:
         snap = self.ws.snapshot()
         return Context(
-            model=snap.model, matrix=snap.matrix, root=self.ws.root, references=snap.references, issues=snap.issues
+            model=snap.model,
+            matrix=snap.matrix,
+            root=self.ws.root,
+            references=snap.references,
+            issues=snap.issues,
+            model_paths=tuple(self.ws.model_paths),
         )
 
     @staticmethod
@@ -205,12 +212,12 @@ class Api:
 
     def update_entity(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         body = _obj(body)
-        self.ws.update(params["id"], _obj(body.get("data")), version=str(body.get("version") or ""))
-        return entity_payload(self.ws, params["id"])
+        notices = self.ws.update(params["id"], _obj(body.get("data")), version=str(body.get("version") or ""))
+        return {**entity_payload(self.ws, params["id"]), "notices": notices}
 
     def delete_entity(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        self.ws.delete(params["id"], force=self._q(query, "force") in ("1", "true"))
-        return {"deleted": params["id"]}
+        unlocked = self.ws.delete(params["id"], force=self._q(query, "force") in ("1", "true"))
+        return {"deleted": params["id"], "unlocked": unlocked}
 
     def rename_entity(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         new_id = str(_obj(body).get("new_id", "")).strip()
@@ -254,9 +261,10 @@ class Api:
         )
 
     def list_cases(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
-        """The case ledger, from the attribution: ``?target=&q=&state=`` (``unowned=1`` is ``state=unowned``)."""
+        """The case ledger, from the attribution: ``?target=&q=&state=&lane=``
+        (``unowned=1`` is ``state=unowned``)."""
         state = self._q(query, "state") or ("unowned" if self._q(query, "unowned") in ("1", "true") else "")
-        return self.ws.cases(self._q(query, "target"), self._q(query, "q"), state)
+        return self.ws.cases(self._q(query, "target"), self._q(query, "q"), state, self._q(query, "lane"))
 
     def move_case(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         """Give a case to another owner (or none) through a model edit that passes the checks."""
@@ -271,6 +279,15 @@ class Api:
 
     def attribution(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         return self.ws.attribution_payload()
+
+    def lock_status(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        """Whether the verification-set lock is out of date (``?entity=`` for one set)."""
+        return self.ws.lock_status(self._q(query, "entity"))
+
+    def update_lock(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
+        """``rr sets lock --write`` over the loaded evidence; removals need ``allow_removals``."""
+        body = _obj(body)
+        return self.ws.update_lock(allow_removals=bool(body.get("allow_removals")), dry_run=bool(body.get("dry_run")))
 
     def next_id(self, params: dict[str, str], query: dict[str, list[str]], body: Any) -> Any:
         kind = self._q(query, "kind")
@@ -428,7 +445,7 @@ class Api:
                 )
             job = next((j for j in self.jobs.jobs.values() if finding in j.findings), None)
             rel = str(body.get("worksheet") or (job.params.get("worksheet") if job else "") or rr_worksheet.DEFAULT)
-            written, _ = rr_worksheet.record(self.ws.root, rel, [proposal], by=author)
+            written, _ = rr_worksheet.record(self.ws.root, rel, [proposal], by=author, model_paths=self.ws.model_paths)
             return {"worksheet": written, "case": proposal.get("case"), "proposed": proposal.get("owner")}
         if action in ("create", "update"):
             data = _obj(body.get("data")) or dict(proposal.get("data", {}))

@@ -85,6 +85,7 @@ class Context:
     root: str
     references: list[Reference] | None = None
     issues: list[Any] = field(default_factory=list)
+    model_paths: tuple[str, ...] = ()  # where the model is read from: never a worksheet
     _texts: dict[str, list[str]] = field(default_factory=dict)
     _files: list[str] | None = None
 
@@ -800,8 +801,8 @@ def cases_to_assign(
             except ValueError as exc:
                 if job:
                     job.say(str(exc))
-    elif worksheet and os.path.exists(rr_worksheet.resolve(ctx.root, worksheet)):
-        doc = load_worksheet(rr_worksheet.resolve(ctx.root, worksheet))
+    elif worksheet and os.path.exists(rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths)):
+        doc = load_worksheet(rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths))
         keys = [k for k, owner in decisions(doc).items() if owner == OPEN]
     else:
         keys = [q.key for q in att.quarantined]
@@ -883,6 +884,8 @@ def assign_cases(
     proposal is also written into that ``.rrplan`` for a person to decide.
     Never touches the model, a lock or a test source."""
     assert llm is not None
+    if worksheet:
+        rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths)  # refuse a bad path before asking the LLM
     todo = cases_to_assign(ctx, cases, worksheet, job)[: int(limit)]
     if not todo:
         job.say("no unowned or quarantined case to assign")
@@ -956,7 +959,7 @@ def assign_cases(
             if case not in done:
                 job.say(f"{case}: no proposal")
     if worksheet and proposals:
-        rel, n = rr_worksheet.record(ctx.root, worksheet, proposals)
+        rel, n = rr_worksheet.record(ctx.root, worksheet, proposals, model_paths=ctx.model_paths)
         job.say(f"wrote {n} proposal(s) to {rel} (proposed owners only; a person decides)")
         for f in findings:
             f.status = "applied"

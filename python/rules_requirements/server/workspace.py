@@ -12,11 +12,17 @@ the edit would produce and runs the static claim checks
 before anything is written. An edit that would let one test case verify two
 entities (``shared-case``, ``same-code-multiple-owners``, a new
 ``attribution-conflict``), break a selector or a target (``bad-selector``,
-``bad-target``) or contradict the verification-set lock
-(``lock-owner-changed``) is refused with a 409 that names the case and its
-current owner (:class:`Conflict`). Which entity owns a case is read from the
-:class:`~rules_requirements.attribution.Attribution` alone; the editor never
-derives it from tags or targets.
+``bad-target``), claim a whole target without a reason
+(``whole-target-reference``) or contradict the verification-set lock
+(``lock-owner-changed``, ``lock-invalid``) is refused with a 409 that names
+the case and its current owner (:class:`Conflict`). Which entity owns a case
+is read from the :class:`~rules_requirements.attribution.Attribution` alone;
+the editor never derives it from tags or targets.
+
+A save is checked and written under an advisory lock on the workspace root,
+after making sure no file it read changed on disk since: two editors (two
+``rr serve`` processes) on one checkout cannot both pass the guard with
+edits that together give a case two owners.
 """
 
 from __future__ import annotations
@@ -31,8 +37,9 @@ import subprocess
 import tempfile
 import threading
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Collection, Iterable, Mapping
+from typing import Any, Callable, Collection, Iterable, Iterator, Mapping
 
 from rules_requirements import annotations as rr_annotations
 from rules_requirements import case_selectors, edit, ingest, labels
@@ -54,6 +61,8 @@ from rules_requirements.model import (
     Claim,
     Model,
     Note,
+    VerifiedBy,
+    claim_items,
     load_text,
     model_files,
     parse_documents,
@@ -78,7 +87,16 @@ class WorkspaceError(Exception):
 
 # Problems a save may not introduce (refused with 409). Hard errors of the
 # one-owner rule: none of them can be configured off.
-GUARDED = ("shared-case", "same-code-multiple-owners", "bad-selector", "bad-target", "lock-owner-changed")
+GUARDED = (
+    "shared-case",
+    "same-code-multiple-owners",
+    "attribution-conflict",
+    "bad-selector",
+    "bad-target",
+    "whole-target-reference",
+    "lock-owner-changed",
+    "lock-invalid",
+)
 REPORT_TIME = ("attribution-conflict", "same-code-multiple-owners")  # quarantines a save may not introduce
 
 
@@ -119,6 +137,10 @@ class Check:
     model: Model | None = None
     attribution: Attribution | None = None
     issues: list[Issue] = field(default_factory=list)
+    # Owner changes the save makes that are allowed but worth saying (not
+    # refused): ``takes-from-tag``, a claim taking a case its tag gives to
+    # another entity (hybrid attribution: the model wins).
+    notices: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -133,6 +155,7 @@ class Snapshot:
     matrix: Matrix
     references: list[rr_annotations.Reference] | None
     signature: tuple[Any, ...] = ()
+    _lock_plan: Any = field(default=None, repr=False)
 
     @property
     def attribution(self) -> Attribution | None:
@@ -152,6 +175,9 @@ class Workspace:
     current_build: Mapping[str, str] = field(default_factory=dict)
     scan: bool = True
     author: str = ""
+    # Lanes (``rr serve --lane-targets NAME=FILE``): the targets each lane
+    # runs, for the case ledger's lane filter. Labels only, never an owner.
+    lanes: Mapping[str, Collection[str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.root = os.path.realpath(self.root)
@@ -181,26 +207,30 @@ class Workspace:
 
     # ------------------------------------------------------------------ model
 
-    def _signature(self) -> tuple[Any, ...]:
+    def _signature(self, lock_path: str = "") -> tuple[Any, ...]:
+        """The model files' (and the verification-set lock's) stat: the
+        snapshot is rebuilt when any of them changes."""
         sig = []
-        for rel in self.files():
+        for path in [os.path.join(self.root, rel) for rel in self.files()] + ([lock_path] if lock_path else []):
             try:
-                st = os.stat(os.path.join(self.root, rel))
-                sig.append((rel, st.st_mtime_ns, st.st_size))
+                st = os.stat(path)
+                sig.append((path, st.st_mtime_ns, st.st_size))
             except OSError:
-                sig.append((rel, 0, 0))
+                sig.append((path, 0, 0))
         return tuple(sig)
 
     def snapshot(self, refresh: bool = False) -> Snapshot:
         """The current model, validation and trace matrix (cached until files change)."""
         with self._lock:
-            sig = self._signature()
+            sig = self._signature(self._snapshot.model.lock_path() if self._snapshot is not None else "")
             if refresh:
                 self._evidence = None
                 self._refs = None
             if self._snapshot is not None and self._snapshot.signature == sig and not refresh:
                 return self._snapshot
             model, warnings = read_model([os.path.join(self.root, p) for p in self.model_paths], root=self.root)
+            if model.lock_path():
+                sig = self._signature(model.lock_path())
             issues = validate(model)
             if self._evidence is None:
                 self._evidence = ingest.collect(self.evidence_paths) if self.evidence_paths else ingest.Evidence()
@@ -325,15 +355,16 @@ class Workspace:
             txn.edit(target, lambda _text: edit.render_file(kind, edit.entity_to_dict(ent)), want)
         return txn, ent.id
 
-    def update(self, entity_id: str, data: Mapping[str, Any], version: str = "") -> None:
-        """Replace an entity's fields with ``data``.
+    def update(self, entity_id: str, data: Mapping[str, Any], version: str = "") -> list[dict[str, Any]]:
+        """Replace an entity's fields with ``data``; returns the save's
+        notices (``notices`` of :class:`Check`).
 
         ``notes`` are kept unless ``data`` names them (the form editor does
         not); with ``version`` (from :func:`entity_payload`) a concurrent change
         since the caller loaded the entity is a 409 instead of being lost.
         """
         with self._lock:
-            self._update_txn(entity_id, data, version).commit()
+            return self._update_txn(entity_id, data, version).commit().notices
 
     def _update_txn(self, entity_id: str, data: Mapping[str, Any], version: str = "") -> _Transaction:
         ent = self.model.get(entity_id)
@@ -375,12 +406,21 @@ class Workspace:
                 result = txn.check()
             except WorkspaceError as exc:
                 problems = exc.data.get("conflicts") or [{"code": "invalid", "message": str(exc)}]
-                return {"ok": False, "id": entity_id, "problems": problems, "issues": [], "members": [], "set": {}}
+                return {
+                    "ok": False,
+                    "id": entity_id,
+                    "problems": problems,
+                    "notices": [],
+                    "issues": [],
+                    "members": [],
+                    "set": {},
+                }
         members = result.attribution.members_of(entity_id) if result.attribution is not None else ()
         return {
             "ok": result.ok,
             "id": entity_id,
             "problems": [c.to_dict() for c in result.conflicts],
+            "notices": result.notices,
             "issues": [_issue(i) for i in result.issues if i.entity == entity_id],
             "members": [_member(m) for m in members],
             "set": _set_summary(members),
@@ -476,14 +516,18 @@ class Workspace:
                 seen[k] -= 1
                 continue
             conflicts.append(Conflict(i.code, i.message, entities=(i.entity,)))
-        # The lock: a locked case another entity's claims would select.
+        conflicts += self._unreasoned_whole_claims(candidate, snap.model, edited, old)
+        # The lock: a locked case another entity's claims would select, or
+        # an entry whose owner the save removes.
         if lock == "configured":
             try:
                 lock = rr_lock.configured_lock(candidate)
             except rr_lock.LockError:
                 lock = None
         assert not isinstance(lock, str)
-        conflicts += self._lock_conflicts(candidate, lock, snap.model, before_att.lock if before_att else None, old)
+        before_lock = before_att.lock if before_att else None
+        conflicts += self._lock_conflicts(candidate, lock, snap.model, before_lock, old)
+        conflicts += self._lock_owner_conflicts(candidate, lock, snap.model, before_lock, old)
         # Report time: what attribution would quarantine over this evidence.
         after_att: Attribution | None = None
         if not any(i.code == "duplicate-id" for i in issues):
@@ -511,7 +555,69 @@ class Workspace:
                     "a test case verifies at most one requirement"
                 )
             conflicts.append(Conflict(q.code, msg, str(q.key), q.entities, owner or "", "attribution" if owner else ""))
-        return Check(conflicts, candidate, after_att, issues)
+        return Check(conflicts, candidate, after_att, issues, _tag_takeovers(before_att, after_att, old))
+
+    @staticmethod
+    def _unreasoned_whole_claims(candidate: Model, before: Model, edited: Collection[str], old: Any) -> list[Conflict]:
+        """A whole-target claim of an ``edited`` entity without a ``reason``
+        (``whole: true`` with none, or a bare target reference) that the
+        entity did not have before: the editor's widget requires a reason,
+        and so does the save."""
+        out = []
+        for eid in edited:
+            ent = candidate.get(eid)
+            if ent is None:
+                continue
+            was = before.get(old(eid))
+            had = Counter(vb.target for vb in (claim_items(was) if was is not None else ()) if _unreasoned(vb))
+            for vb in claim_items(ent):
+                if not _unreasoned(vb):
+                    continue
+                if had[vb.target]:
+                    had[vb.target] -= 1
+                    continue
+                rel = CLAIM_FIELDS[ent.kind]
+                out.append(
+                    Conflict(
+                        "whole-target-reference",
+                        f"{eid}: {rel} {vb.label} claims the whole target without a reason; say why it cannot "
+                        "be claimed per case (reason), or name its cases",
+                        vb.target,
+                        (eid,),
+                    )
+                )
+        return out
+
+    @staticmethod
+    def _lock_owner_conflicts(
+        candidate: Model, lock: rr_lock.Lock | None, before: Model, before_lock: rr_lock.Lock | None, old: Any
+    ) -> list[Conflict]:
+        """A lock entry whose owner is no user need, requirement or
+        mitigation after the save (``lock-invalid``: a deleted or renamed
+        entity whose entries were not carried along), unless it was so
+        before."""
+        if lock is None:
+            return []
+        out = []
+        for entry in lock.entries:
+            if candidate.is_verifiable(entry.owner):
+                continue
+            was = before_lock.entry(entry.target, entry.path) if before_lock is not None else None
+            if was is not None and was.owner == old(entry.owner) and not before.is_verifiable(was.owner):
+                continue  # invalid already; reported by validation, not caused by this save
+            out.append(
+                Conflict(
+                    "lock-invalid",
+                    f"{entry.case} is locked to {entry.owner}, which this save leaves "
+                    f"{'undefined' if candidate.get(entry.owner) is None else 'unable to hold a verification set'}; "
+                    "move the case in the case ledger first, or update the lock",
+                    entry.case,
+                    (entry.owner,),
+                    entry.owner,
+                    "lock",
+                )
+            )
+        return out
 
     def _pair_conflict(
         self,
@@ -606,25 +712,32 @@ class Workspace:
             raise WorkspaceError("no attribution: the trace was built without one", 500)
         return att
 
-    def cases(self, target: str = "", q: str = "", state: str = "") -> dict[str, Any]:
+    def cases(self, target: str = "", q: str = "", state: str = "", lane: str = "") -> dict[str, Any]:
         """The case ledger: every test case of the loaded evidence with its one
         owner (or none), how it got it, and its quarantine — read from the
         :class:`~rules_requirements.attribution.Attribution`.
 
         ``target`` keeps one target's cases; ``q`` those whose key or owner
         contains it (any case); ``state`` is ``owned``, ``unowned`` (no owner
-        and not quarantined), ``quarantined`` or ``unlocked`` (owned, and
-        absent from a configured lock)."""
+        and not quarantined), ``quarantined``, ``unlocked`` (owned, and
+        absent from a configured lock) or ``coarse`` (selected by a
+        whole-target claim of a target that reports per-case results);
+        ``lane`` keeps the cases of the targets lane ``lane`` runs."""
         att = self._attribution()
+        if lane and lane not in self.lanes:
+            raise WorkspaceError(f"unknown lane {lane!r} (lanes: {', '.join(sorted(self.lanes)) or 'none'})")
+        lanes = self._lane_sets()
         needle = q.strip().lower()
         rows = []
         for key in att.cases:
-            row = _case_row(att, key, self.current_build)
+            row = _case_row(att, key, self.current_build, lanes)
             if target and key.target != target:
                 continue
             if needle and needle not in str(key).lower() and needle not in str(row.get("owner") or "").lower():
                 continue
             if state and not _in_state(row, state, att):
+                continue
+            if lane and lane not in row.get("lanes", ()):
                 continue
             rows.append(row)
         owned = len(att.owner)
@@ -632,6 +745,8 @@ class Workspace:
         return {
             "mode": att.mode,
             "lock": att.lock.path if att.lock is not None else "",
+            "lock_status": self.lock_status(),
+            "lanes": sorted(self.lanes, key=natural_key),
             "summary": {
                 "cases": len(att.cases),
                 "owned": owned,
@@ -641,6 +756,108 @@ class Workspace:
             "targets": sorted({k.target for k in att.cases}, key=natural_key),
             "cases": rows,
         }
+
+    def _lane_sets(self) -> dict[str, set[str]]:
+        out = {}
+        for name, targets in self.lanes.items():
+            norm = (labels.try_normalize(t, self.model.config.main_repo) for t in targets)
+            out[name] = {t for t in norm if t}
+        return out
+
+    # ------------------------------------------------------------------ the verification-set lock
+
+    def _lock_plan(self) -> rr_lock.LockPlan | None:
+        """What ``rr sets lock`` would make of the configured lock over the
+        loaded evidence (None without a lock, or one that cannot be read)."""
+        snap = self.snapshot()
+        att = snap.attribution
+        if att is None or att.lock is None or not snap.model.config.sets_lock:
+            return None
+        if snap._lock_plan is None:
+            snap._lock_plan = rr_lock.plan_lock(snap.model, att, att.lock)
+        plan: rr_lock.LockPlan = snap._lock_plan
+        return plan
+
+    def lock_status(self, entity: str = "") -> dict[str, Any]:
+        """Whether the configured lock is out of date: the entries ``rr sets
+        lock`` would add, change or remove over the loaded evidence (only
+        those of ``entity``, when given). ``{}`` without a configured lock;
+        ``missing`` when it cannot be read."""
+        model = self.model
+        if not model.config.sets_lock:
+            return {}
+        out: dict[str, Any] = {"path": model.lock_path(shown=True)}
+        plan = self._lock_plan()
+        if plan is None:
+            return {**out, "missing": True, "out_of_date": True}
+
+        def mine(*entries: rr_lock.LockEntry) -> bool:
+            return not entity or any(e.owner == entity for e in entries)
+
+        added = [_entry(e) for e in plan.added if mine(e)]
+        changed = [{**_entry(new), "from": old.owner} for old, new in plan.changed if mine(old, new)]
+        removed = [_entry(e) for e in plan.removed if mine(e)]
+        return {
+            **out,
+            "out_of_date": bool(added or changed or removed),
+            "added": added,
+            "changed": changed,
+            "removed": removed,
+            "refused": list(plan.refused) if not entity else [],
+        }
+
+    def update_lock(self, *, allow_removals: bool = False, dry_run: bool = False) -> dict[str, Any]:
+        """``rr sets lock`` over the loaded evidence: lock every owned case
+        to its owner (:func:`~rules_requirements.lock.plan_lock` — the lock
+        only records what attribution decided). A quarantine refuses it
+        (409); an entry to remove (its case absent from a target that ran,
+        or no claim selects it) is kept unless ``allow_removals`` confirms
+        it. With ``dry_run`` nothing is written."""
+        with self._lock:
+            snap = self.snapshot()
+            model = snap.model
+            if not model.config.sets_lock:
+                raise WorkspaceError("no verification-set lock: set config.sets_lock (e.g. verification.rrlock)")
+            att = self._attribution()
+            rel = self._rel(model.lock_path())
+            raw = self._load(rel)
+            previous: rr_lock.Lock | None = None
+            if raw is not None and raw.strip():
+                try:
+                    previous = rr_lock.parse_lock(raw, model.lock_path(shown=True), model.config.main_repo)
+                except rr_lock.LockError as exc:
+                    raise WorkspaceError(
+                        "the lock cannot be read: " + "; ".join(exc.problems),
+                        409,
+                        {"conflicts": [{"code": "lock-invalid", "message": p} for p in exc.problems]},
+                    ) from exc
+            plan = rr_lock.plan_lock(model, att, previous, allow_removals=allow_removals)
+            text = rr_lock.render_lock(plan.lock)
+            out = {
+                "path": rel,
+                "added": [_entry(e) for e in plan.added],
+                "changed": [{**_entry(new), "from": old.owner} for old, new in plan.changed],
+                "removed": [_entry(e) for e in plan.removed],
+                "kept": bool(plan.removed) and not allow_removals,
+                "refused": list(plan.refused),
+                "up_to_date": raw is not None and text == raw,
+                "ok": not plan.refused,
+            }
+            if dry_run:
+                return out
+            if plan.refused:
+                raise WorkspaceError(
+                    "refusing to lock quarantined cases (they have no owner); nothing written: "
+                    + "; ".join(plan.refused),
+                    409,
+                    {"conflicts": [{"code": "quarantined", "message": r} for r in plan.refused]},
+                )
+            if not out["up_to_date"]:
+                txn = self._txn()
+                txn.lock = plan.lock
+                txn.write_file(rel, text, raw)
+                txn.commit()  # the guard over the lock it leaves: a lock never gives a case two owners
+            return out
 
     def attribution_payload(self) -> dict[str, Any]:
         """The attribution at a glance: mode, lock, per-target counts, every
@@ -743,17 +960,14 @@ class Workspace:
                     lambda t, eid=eid, data=data: edit.update_entity(t, eid, data),
                     {eid: {**data, "kind": ent.kind}},
                 )
-            lock = att.lock if snap.model.config.sets_lock else None
-            if lock is not None and lock.entry(key.target, key.path) is not None:
-                here = (key.target, key.path)
-                entries = [
-                    rr_lock.LockEntry(e.target, e.path, target_id) if (e.target, e.path) == here else e
-                    for e in lock.entries
-                    if target_id or (e.target, e.path) != here
-                ]
-                new_lock = rr_lock.Lock(tuple(entries), lock.path)
-                txn.lock = new_lock
-                txn.files_out[self._rel(snap.model.lock_path())] = rr_lock.render_lock(new_lock)
+            here = (key.target, key.path)
+
+            def relock(e: rr_lock.LockEntry) -> rr_lock.LockEntry | None:
+                if (e.target, e.path) != here:
+                    return e
+                return rr_lock.LockEntry(e.target, e.path, target_id) if target_id else None
+
+            if self._relock(txn, relock):
                 plan.append(f"lock: {key} -> {target_id or 'no entry'}")
             result = txn.check()
             problems = [c.to_dict() for c in result.conflicts]
@@ -857,6 +1071,40 @@ class Workspace:
         items.append({"target": key.target, "cases": [pattern]})
         return f"claim {pattern!r} of {key.target}"
 
+    def _relock(
+        self, txn: _Transaction, rewrite: Callable[[rr_lock.LockEntry], rr_lock.LockEntry | None]
+    ) -> list[tuple[rr_lock.LockEntry, rr_lock.LockEntry | None]]:
+        """Rewrite the configured lock's entries with ``rewrite`` (None drops
+        one) as part of ``txn``: the save guard checks the model against the
+        lock the save leaves, and both are written together. Returns the
+        changed entries (as they were, as they become); nothing when there is
+        no lock, or it cannot be read (validation reports that)."""
+        model = self.model
+        if not model.config.sets_lock:
+            return []
+        rel = self._rel(model.lock_path())
+        raw = self._load(rel)
+        if raw is None:
+            return []
+        try:
+            lock = rr_lock.parse_lock(raw, model.lock_path(shown=True), model.config.main_repo)
+        except rr_lock.LockError:
+            return []
+        changes: list[tuple[rr_lock.LockEntry, rr_lock.LockEntry | None]] = []
+        entries = []
+        for entry in lock.entries:
+            new = rewrite(entry)
+            if new is None or (new.target, new.path, new.owner) != (entry.target, entry.path, entry.owner):
+                changes.append((entry, new))
+            if new is not None:
+                entries.append(new)
+        if not changes:
+            return []
+        new_lock = rr_lock.Lock(tuple(entries), lock.path)
+        txn.lock = new_lock
+        txn.write_file(rel, rr_lock.render_lock(new_lock), raw)
+        return changes
+
     def referrers(self, entity_id: str) -> list[tuple[str, str]]:
         """(referring id, relation) for every reference to ``entity_id``."""
         out = []
@@ -886,7 +1134,9 @@ class Workspace:
             {holder_id: {**data, "kind": holder.kind}},
         )
 
-    def delete(self, entity_id: str, force: bool = False) -> None:
+    def delete(self, entity_id: str, force: bool = False) -> list[str]:
+        """Delete an entity (``force``: also drop every reference to it);
+        returns the cases whose lock entries were dropped with it."""
         with self._lock:
             ent = self.model.get(entity_id)
             if ent is None:
@@ -903,13 +1153,18 @@ class Workspace:
                 self._retarget(txn, ref_id, entity_id, None)
             # A file left with no content at all (a one-object file) is removed.
             txn.edit(ent.location.path, lambda t: edit.delete_entity(t, entity_id), {entity_id: None})
+            # Its lock entries go with it (in the same transaction): a case
+            # locked to an entity that no longer exists is no one's.
+            dropped = self._relock(txn, lambda e: None if e.owner == entity_id else e)
             txn.commit()
+            return [e.case for e, _ in dropped]
 
     def rename(self, old_id: str, new_id: str) -> list[str]:
         """Change an id and every model reference to it, in one transaction.
 
         Source annotations are not rewritten (the scan reports them). A
-        one-object file named after the old id is renamed with it.
+        one-object file named after the old id is renamed with it, and so
+        are its entries in the verification-set lock.
         """
         with self._lock:
             ent = self.model.get(old_id)
@@ -932,6 +1187,8 @@ class Workspace:
             base, ext = os.path.splitext(os.path.basename(rel))
             if base == old_id and self._single_object(rel):
                 txn.move(rel, os.path.join(os.path.dirname(rel), new_id + ext).replace(os.sep, "/"))
+            # The cases locked to it stay its own: its lock entries are renamed with it.
+            self._relock(txn, lambda e: replace(e, owner=new_id) if e.owner == old_id else e)
             txn.commit()
             return touched
 
@@ -1204,6 +1461,11 @@ class _Transaction:
     passes is anything written, and the writes themselves are all-or-nothing:
     every new file is staged first, then all are moved into place, and a
     failure part-way restores the files already replaced.
+
+    :meth:`commit` holds an advisory lock on the workspace root (shared by
+    every process editing this checkout) while it makes sure no file the
+    transaction read changed on disk, reruns the save guard over the model as
+    it is on disk now, and writes.
     """
 
     def __init__(self, ws: Workspace):
@@ -1215,6 +1477,7 @@ class _Transaction:
         self.moves: dict[str, str] = {}
         self.aliases: dict[str, str] = {}  # renamed ids, new -> old
         self.files_out: dict[str, str] = {}  # other files written with the model (the lock), as-is
+        self.seen: dict[str, str | None] = {}  # every file read, exactly as read: unchanged at commit
         self.lock: rr_lock.Lock | str | None = "configured"  # the lock the save leaves
 
     def _text(self, rel: str) -> str:
@@ -1226,8 +1489,14 @@ class _Transaction:
             if "\r" in text:
                 raise WorkspaceError(f"{rel} has bare CR line endings; convert it to LF or CRLF to edit it here", 422)
             self.texts[rel] = self.orig[rel] = text
-            self.raw[rel] = raw
+            self.raw[rel] = self.seen[rel] = raw
         return self.texts[rel]
+
+    def write_file(self, rel: str, text: str, read: str | None) -> None:
+        """Write ``text`` to ``rel`` (not a model file: the lock) with the
+        model; ``read`` is the content it was computed from."""
+        self.files_out[rel] = text
+        self.seen.setdefault(rel, read)
 
     def edit(self, rel: str, fn: Any, expect: Mapping[str, Any]) -> None:
         text = self._text(rel)
@@ -1262,14 +1531,34 @@ class _Transaction:
         self.verify()
         return self.ws.check(self.ws._candidate(self), edited=self.edited(), aliases=self.aliases, lock=self.lock)
 
-    def commit(self) -> None:
-        result = self.check()
-        if not result.ok:
+    def unchanged(self) -> None:
+        """Refuse (409) when a file this transaction read changed on disk
+        since: another editor saved meanwhile."""
+        moved = [rel for rel, text in self.seen.items() if self.ws._load(rel) != text]
+        if moved:
             raise WorkspaceError(
-                "; ".join(c.message for c in result.conflicts),
+                f"{', '.join(sorted(moved))} changed on disk since this edit was prepared (another editor saved "
+                "meanwhile); reload and reapply your edit",
                 409,
-                {"conflicts": [c.to_dict() for c in result.conflicts]},
+                {"conflicts": [{"code": "changed-on-disk", "message": f"{rel} changed on disk"} for rel in moved]},
             )
+
+    def commit(self) -> Check:
+        """Check and write, as one step against every other editor of the
+        checkout; returns the check (its notices)."""
+        with _disk_lock(self.ws.root):
+            self.unchanged()
+            result = self.check()  # over the files as they are now: another process may have saved
+            if not result.ok:
+                raise WorkspaceError(
+                    "; ".join(c.message for c in result.conflicts),
+                    409,
+                    {"conflicts": [c.to_dict() for c in result.conflicts]},
+                )
+            self._write()
+        return result
+
+    def _write(self) -> None:
         writes: list[tuple[str, str, int | None]] = []  # (path, content, mode of a new file)
         removes: list[str] = []
         for rel, text in self.texts.items():
@@ -1287,6 +1576,26 @@ class _Transaction:
             path = self.ws.abspath(rel)
             writes.append((path, data, None))
         _write_all(writes, removes, self.ws.root)
+
+
+@contextmanager
+def _disk_lock(root: str) -> Iterator[None]:
+    """An exclusive advisory lock on the directory ``root`` (``flock``),
+    held while a save is checked and written: every ``rr serve`` process (and
+    every :class:`Workspace`) editing one checkout takes the same lock, so
+    their saves cannot interleave. Without ``fcntl`` (Windows) only the
+    in-process lock serializes saves."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - not POSIX
+        yield
+        return
+    fd = os.open(root, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # releases the lock
 
 
 def with_line_endings(orig: str, text: str) -> str:
@@ -1487,10 +1796,49 @@ def entity_payload(ws: Workspace, entity_id: str) -> dict[str, Any]:
         "basis": verdict.basis if verdict else "",
         "derived_from": list(verdict.derived_from) if verdict else [],
         "verifiable": verifiable,
+        # The lock entries `rr sets lock` would change for this set ({} without a lock).
+        "lock": ws.lock_status(entity_id) if verifiable else {},
     }
 
 
-def _case_row(att: Attribution, key: CaseKey, current: Mapping[str, str]) -> dict[str, Any]:
+def _unreasoned(vb: VerifiedBy) -> bool:
+    """A whole-target claim with no reason: ``whole: true`` without one, or a bare target reference."""
+    return (vb.whole or vb.legacy) and not vb.reason.strip() and not vb.problem
+
+
+def _tag_takeovers(before: Attribution | None, after: Attribution | None, old: Any) -> list[dict[str, Any]]:
+    """Cases a tag gives to one entity today that the save gives to another
+    (hybrid attribution: a claim wins over a tag). Allowed, but the editor
+    says so before saving: the owner changes."""
+    if before is None or after is None:
+        return []
+    out = []
+    for key, owner in before.owner.items():
+        if before.via.get(key) != VIA_TAG:
+            continue
+        now = after.owner_of(key)
+        if now is None or old(now) == owner:
+            continue
+        out.append(
+            {
+                "code": "takes-from-tag",
+                "case": str(key),
+                "owner": owner,
+                "to": now,
+                "message": f"{key} is owned by {owner} through its own tag today; this save gives it to {now} "
+                "(a claim wins over a tag). If the tag is right, leave the case out",
+            }
+        )
+    return out
+
+
+def _entry(e: rr_lock.LockEntry) -> dict[str, str]:
+    return {"case": e.case, "owner": e.owner}
+
+
+def _case_row(
+    att: Attribution, key: CaseKey, current: Mapping[str, str], lanes: Mapping[str, Collection[str]] | None = None
+) -> dict[str, Any]:
     """One row of the case ledger, read from the attribution."""
     res = att.cases[key]
     row: dict[str, Any] = {
@@ -1518,6 +1866,10 @@ def _case_row(att: Attribution, key: CaseKey, current: Mapping[str, str]) -> dic
         row["quarantine"] = {"code": q.code, "entities": list(q.entities), "detail": q.detail}
     if att.lock is not None:
         row["locked_to"] = att.lock.owner_of(key.target, key.path) or ""
+    if not res.synthetic and any(c.pattern is None for c in att.claimed_by.get(key, ())):
+        row["coarse"] = True  # a whole-target claim selects a per-case result (coarse-claim)
+    if lanes:
+        row["lanes"] = sorted((name for name, targets in lanes.items() if key.target in targets), key=natural_key)
     return row
 
 
@@ -1530,7 +1882,9 @@ def _in_state(row: Mapping[str, Any], state: str, att: Attribution) -> bool:
         return "quarantine" in row
     if state == "unlocked":
         return bool(row["owner"]) and att.lock is not None and not row.get("locked_to")
-    raise WorkspaceError(f"unknown case state {state!r} (owned, unowned, quarantined, unlocked)")
+    if state == "coarse":
+        return bool(row.get("coarse"))
+    raise WorkspaceError(f"unknown case state {state!r} (owned, unowned, quarantined, unlocked, coarse)")
 
 
 def _member(m: Member) -> dict[str, Any]:

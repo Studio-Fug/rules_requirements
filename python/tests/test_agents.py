@@ -602,3 +602,37 @@ def test_applying_an_agent_update_cannot_change_claims(owned_ws):
     assert r["entity"]["data"]["verified_by"] == [
         {"target": "//t:agent_test", "cases": ["tests.test_ctl::test_unrelated"]}
     ]
+
+
+def test_a_worksheet_is_never_a_file_of_the_model(owned_ws):
+    from rules_requirements.agents import worksheet
+
+    root = owned_ws.root
+    proposal = {"case": "//t:agent_test#tests.test_ctl::test_orphan", "owner": "REQ-2"}
+    for rel in ("req/x.json", "req/sub/plan.json", "req/model.yaml.json"):
+        with pytest.raises(worksheet.WorksheetPathError, match="read as part of the model"):
+            worksheet.record(root, rel, [proposal], model_paths=owned_ws.model_paths)
+        assert not os.path.exists(os.path.join(root, rel))
+    # Next to the model it is fine: a .rrplan (the loader skips it), a dot-directory, another folder.
+    for rel in ("req/attribution.rrplan", "req/.plans/x.json", "plans/x.json"):
+        worksheet.record(root, rel, [proposal], model_paths=owned_ws.model_paths)
+    assert owned_ws.snapshot(refresh=True).model.parse_errors == ()
+    # Through the API (apply, and the assign_cases job) the same.
+    api = Api(owned_ws, llm=FakeLLM([]), author="Ada <ada@x>")
+    api.llm.answers.append({"assignments": [{"case": proposal["case"], "owner": "REQ-2", "rationale": "r"}]})
+    job = api.dispatch("POST", "/api/agents/run", {}, {"workflow": "assign_cases", "params": {}, "wait": True})
+    (f,) = job["findings"]
+    with pytest.raises(HttpError) as exc:
+        api.dispatch("POST", f"/api/findings/{f['id']}/apply", {}, {"action": "worksheet", "worksheet": "req/x.json"})
+    assert exc.value.status == 400 and not os.path.exists(os.path.join(root, "req/x.json"))
+    job = api.dispatch(
+        "POST",
+        "/api/agents/run",
+        {},
+        {"workflow": "assign_cases", "params": {"worksheet": "req/y.json"}, "wait": True},
+    )
+    assert job["status"] == "failed" and "read as part of the model" in "\n".join(job["log"]), job
+    assert not os.path.exists(os.path.join(root, "req/y.json"))
+    from rules_requirements.validate import validate
+
+    assert not [i for i in validate(owned_ws.snapshot(refresh=True).model) if i.severity == "error"]
