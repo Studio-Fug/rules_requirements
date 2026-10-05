@@ -18,6 +18,7 @@ import {
   toast,
 } from "../components.js";
 import { add, h, plural, swap } from "../dom.js";
+import { memberTable, moveDialog, setLine } from "../ledger.js";
 import { go, reloadModel, rerender } from "../nav.js";
 import { KIND, config, referrers, refsOf, store } from "../store.js";
 
@@ -196,6 +197,28 @@ function methodView(ent) {
   return h("span", { class: "level" }, m);
 }
 
+/** verified_by / validated_by items: the target, and its selectors or "whole target". */
+function claimsView(items) {
+  if (!items || !items.length) return null;
+  return h(
+    "ul",
+    { class: "plain claims" },
+    items.map((v) => {
+      const item = typeof v === "string" ? { target: v, whole: true } : v;
+      return h(
+        "li",
+        null,
+        h("code", null, item.target),
+        " ",
+        Array.isArray(item.cases)
+          ? item.cases.map((c) => [h("code", { class: "selector" }, c), " "])
+          : h("span", { class: "muted" }, item.whole ? "whole target" : ""),
+        item.level ? h("span", { class: "level" }, item.level) : null,
+      );
+    }),
+  );
+}
+
 function details(ent) {
   const d = ent.data;
   switch (ent.kind) {
@@ -203,23 +226,7 @@ function details(ent) {
       return dl([
         ["Demands", methodView(ent)],
         ["Category", d.category],
-        [
-          "Verified by",
-          d.verified_by && d.verified_by.length
-            ? h(
-                "ul",
-                { class: "plain" },
-                d.verified_by.map((v) =>
-                  h(
-                    "li",
-                    null,
-                    h("code", null, typeof v === "string" ? v : v.target),
-                    typeof v === "object" && v.level ? h("span", { class: "level" }, v.level) : null,
-                  ),
-                ),
-              )
-            : null,
-        ],
+        ["Claims", claimsView(d.verified_by)],
         ["Modules", d.modules && d.modules.length ? d.modules.map((m) => h("span", { class: "tag" }, m)) : null],
       ]);
     case "risk": {
@@ -258,7 +265,12 @@ function details(ent) {
       );
     }
     case "mitigation":
-      return dl([["Type", d.type ? `${MITIGATION_TYPES[d.type] || d.type}` : null]]);
+      return dl([
+        ["Type", d.type ? `${MITIGATION_TYPES[d.type] || d.type}` : null],
+        ["Claims", claimsView(d.verified_by)],
+      ]);
+    case "user_need":
+      return d.validated_by && d.validated_by.length ? dl([["Claims", claimsView(d.validated_by)]]) : null;
     case "test_method":
       return dl([
         ["Level", d.level ? h("span", { class: "level" }, d.level) : null],
@@ -300,6 +312,7 @@ function evidenceTable(ent) {
             : null,
         )
       : null;
+  if (ent.verifiable) return h("div", null, verdict, verificationSet(ent));
   if (!rows.length)
     return h(
       "div",
@@ -340,6 +353,92 @@ function evidenceTable(ent) {
       ],
       rows,
     }),
+  );
+}
+
+// --------------------------------------------------------------------------
+// The verification set: the cases attribution gave this entity (one owner
+// per case), the cases it expects, and the quarantined cases naming it.
+// --------------------------------------------------------------------------
+
+async function moveMember(ent, m) {
+  const row = {
+    case: m.case,
+    path: m.case.slice(m.target.length + 1),
+    owner: m.owned ? ent.id : null,
+    quarantine: m.state === "quarantined" ? { code: m.reason } : null,
+  };
+  if (await moveDialog(row)) {
+    await reloadModel({ page: false });
+    await rerender({ keepScroll: true });
+    toast(`Moved ${row.path}`);
+  }
+}
+
+function verificationSet(ent) {
+  const set = ent.set || {};
+  const quarantined = ent.quarantined || [];
+  const head = h(
+    "p",
+    { class: "set-line" },
+    h("strong", null, ent.kind === "user_need" ? "Validation set: " : "Verification set: "),
+    setLine(set),
+    set.complete ? h("span", { class: "badge st-ok" }, "complete") : null,
+    ent.basis && ent.basis !== "own" ? h("span", { class: "muted" }, ` · verdict ${ent.basis}`) : null,
+  );
+  const derived =
+    ent.derived_from && ent.derived_from.length
+      ? h("p", { class: "derived" }, "Rolls up from ", ent.derived_from.map((id) => [idTag(id), " "]))
+      : null;
+  const banner = quarantined.length
+    ? h(
+        "div",
+        { class: "callout fail quarantine-banner" },
+        h("h3", null, `${plural(quarantined.length, "quarantined case")} — ${ent.id} reads INVALID`),
+        h(
+          "p",
+          null,
+          "A test case verifies at most one requirement. These name more than one owner, so they count for nobody " +
+            "until each has exactly one.",
+        ),
+        h(
+          "ul",
+          { class: "plain quarantine-list" },
+          quarantined.map((q) =>
+            h(
+              "li",
+              null,
+              h("code", { class: "case-key" }, q.case),
+              " ",
+              h("span", { class: "mstate st-fail" }, q.code),
+              " ",
+              q.entities.map((id) => [idTag(id), " "]),
+              q.claims && q.claims.length
+                ? h(
+                    "div",
+                    { class: "muted small" },
+                    q.claims.map((c) => `${c.entity} claims ${c.selector}${c.location ? ` (${c.location})` : ""}`).join("; "),
+                  )
+                : null,
+            ),
+          ),
+        ),
+      )
+    : null;
+  const members = ent.members || [];
+  return h(
+    "div",
+    { class: "vset" },
+    head,
+    derived,
+    banner,
+    members.length
+      ? memberTable(members, { onMove: (m) => moveMember(ent, m) })
+      : empty(
+          ent.kind === "user_need"
+            ? "No test case validates this need yet. Claim cases with validated_by."
+            : "No test case verifies this yet. Claim cases with verified_by (Edit), or assign one in the case ledger.",
+        ),
   );
 }
 

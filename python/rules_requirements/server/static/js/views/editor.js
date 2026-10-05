@@ -3,9 +3,15 @@
 
 import { enc, get, post, put, settings } from "../api.js";
 import { button, glyph, idPicker, reportError, toast } from "../components.js";
-import { add, h } from "../dom.js";
+import { add, debounce, h, swap } from "../dom.js";
+import { VERIFIABLE, escapeSelector, problemList, setLine } from "../ledger.js";
 import { go, reloadModel } from "../nav.js";
 import { KIND, config, entitiesOf, levelNames, store } from "../store.js";
+
+const CLAIM_HINT =
+  "The test cases this entity claims, per target: case selectors ('*' matches any run of characters), or the " +
+  "whole target when it reports no per-case results. A test case verifies at most one requirement: a case " +
+  "another entity owns cannot be claimed here (move it in the case ledger).";
 
 // Field specs, grouped. `type` decides the control.
 function spec(kind) {
@@ -25,6 +31,10 @@ function spec(kind) {
         {
           legend: "Statement",
           fields: [...statement, { key: "rationale", label: "Rationale", type: "textarea", rows: 3 }],
+        },
+        {
+          legend: "Validation",
+          fields: [{ key: "validated_by", label: "Validation set", type: "verified_by", hint: CLAIM_HINT }],
         },
         { legend: "Bookkeeping", fields: meta },
       ];
@@ -58,9 +68,9 @@ function spec(kind) {
             },
             {
               key: "verified_by",
-              label: "Verified by targets",
+              label: "Verification set",
               type: "verified_by",
-              hint: "Whole test targets (e.g. Bazel labels) that verify this requirement, for suites without per-case tags.",
+              hint: CLAIM_HINT,
             },
           ],
         },
@@ -129,6 +139,10 @@ function spec(kind) {
             { key: "implemented_by", label: "Implemented by requirements", type: "ids", kinds: ["requirement"] },
           ],
         },
+        {
+          legend: "Verification",
+          fields: [{ key: "verified_by", label: "Verification set", type: "verified_by", hint: CLAIM_HINT }],
+        },
         { legend: "Bookkeeping", fields: meta },
       ];
     case "test_method":
@@ -148,7 +162,7 @@ function spec(kind) {
   }
 }
 
-function control(field, value) {
+function control(field, value, ctx = {}) {
   const id = `f-${field.key}`;
   const labelEl = (el) =>
     h(
@@ -239,47 +253,199 @@ function control(field, value) {
     }
     case "verified_by": {
       const rowsHost = h("div", { class: "vb-rows" });
-      const addRow = (target = "", level = "") => {
-        const t = h("input", {
-          type: "text",
-          value: target,
-          placeholder: "//pkg:test_target",
-          "aria-label": "Test target",
-        });
-        const l = h(
-          "select",
-          { "aria-label": "Level it provides" },
-          h("option", { value: "" }, "default level"),
-          levelNames().map((n) => h("option", { value: n, selected: n === level }, n)),
-        );
-        const row = h(
-          "div",
-          { class: "vb-row" },
-          t,
-          l,
-          button("Remove", () => row.remove(), { small: true, quiet: true }),
-        );
-        row.read = () =>
-          t.value.trim() ? (l.value ? { target: t.value.trim(), level: l.value } : t.value.trim()) : null;
-        add(rowsHost, row);
-        return t;
-      };
-      for (const v of value || []) {
-        if (typeof v === "string") addRow(v);
-        else addRow(v.target, v.level || "");
-      }
+      const rows = [];
+      for (const v of value || []) rows.push(claimRow(v, ctx, rowsHost));
       const el = h(
         "div",
         { class: "vb", id },
         rowsHost,
-        button("Add target", () => addRow().focus(), { small: true }),
+        button(
+          "Add target",
+          () => {
+            const row = claimRow(null, ctx, rowsHost);
+            rows.push(row);
+            row.focusTarget();
+            if (ctx.onChange) ctx.onChange();
+          },
+          { small: true },
+        ),
       );
-      el.read = () => [...rowsHost.children].map((r) => r.read()).filter(Boolean);
+      el.read = () => [...rowsHost.children].map((r) => (r.read ? r.read() : null)).filter(Boolean);
+      el.setCounts = (counts) => [...rowsHost.children].forEach((r) => r.setCounts && r.setCounts(counts));
       return [labelEl(el), el];
     }
     default:
       return [labelEl(h("span", null, "?")), { read: () => value }];
   }
+}
+
+/**
+ * One claim item: a target and either its case selectors or the whole target.
+ * The checklist offers the target's observed cases; a case another entity
+ * owns is disabled (move it in the case ledger instead). An item left
+ * untouched is written back exactly as it was read.
+ */
+function claimRow(item, ctx, host) {
+  const orig = item;
+  const it = typeof item === "string" ? { target: item, legacy: true } : { ...(item || {}) };
+  let dirty = item === null || item === undefined;
+  const ledger = ctx.ledger || { cases: [] };
+  const target = h("input", {
+    type: "text",
+    value: it.target || "",
+    placeholder: "//pkg:test_target",
+    "aria-label": "Test target",
+    list: "vb-targets",
+    class: "vb-target",
+  });
+  const whole = Boolean(it.whole || it.legacy);
+  const mode = h(
+    "select",
+    { "aria-label": "Claim", class: "vb-mode" },
+    h("option", { value: "cases", selected: !whole }, "Cases"),
+    h("option", { value: "whole", selected: whole }, "Whole target"),
+  );
+  const level = h(
+    "select",
+    { "aria-label": "Level it provides" },
+    h("option", { value: "" }, "default level"),
+    levelNames().map((n) => h("option", { value: n, selected: n === it.level }, n)),
+  );
+  const selectors = h(
+    "textarea",
+    {
+      rows: 3,
+      class: "vb-selectors",
+      "aria-label": "Case selectors, one per line",
+      placeholder: "one selector per line, e.g. clocksync::*",
+    },
+    Array.isArray(it.cases) ? it.cases.join("\n") : "",
+  );
+  const reason = h("input", {
+    type: "text",
+    value: it.reason || "",
+    class: "vb-reason",
+    "aria-label": "Why the whole target",
+    placeholder: "why can this target not be claimed per case?",
+  });
+  const count = h("span", { class: "vb-count muted" });
+  const list = h("div", { class: "vb-cases" });
+  const casesBox = h("div", { class: "vb-cases-box" }, selectors, count, list);
+  const wholeBox = h("div", { class: "vb-whole-box" }, reason);
+  const lines = () =>
+    selectors.value
+      .split("\n")
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+  function changed() {
+    dirty = true;
+    if (ctx.onChange) ctx.onChange();
+  }
+
+  function drawList() {
+    const t = target.value.trim();
+    const observed = ledger.cases.filter((c) => c.target === t);
+    const perCase = observed.filter((c) => !c.synthetic);
+    if (!t || !observed.length) {
+      swap(list, t ? h("p", { class: "muted small" }, "No result of this target in the loaded evidence.") : null);
+      return;
+    }
+    if (!perCase.length) {
+      swap(list, h("p", { class: "muted small" }, "This target reports no per-case results: claim it as a whole target."));
+      return;
+    }
+    const chosen = new Set(lines());
+    swap(
+      list,
+      perCase.slice(0, 300).map((c) => {
+        const lit = escapeSelector(c.path);
+        const other = c.owner && c.owner !== ctx.entityId ? c.owner : "";
+        const box = h("input", { type: "checkbox", checked: chosen.has(lit), disabled: Boolean(other) });
+        box.addEventListener("change", () => {
+          const now = lines().filter((x) => x !== lit);
+          if (box.checked) now.push(lit);
+          selectors.value = now.join("\n");
+          changed();
+        });
+        return h(
+          "label",
+          { class: ["vb-case", other ? "taken" : ""], title: c.case },
+          box,
+          h("span", { class: "test-name" }, c.path),
+          h("span", { class: `result ${c.status}` }, ` ${c.status}`),
+          other ? h("span", { class: "muted" }, ` owned by ${other}`) : null,
+          c.quarantine ? h("span", { class: "mstate st-fail" }, c.quarantine.code) : null,
+        );
+      }),
+      perCase.length > 300 ? h("p", { class: "muted small" }, `${perCase.length - 300} more; type selectors above.`) : null,
+    );
+  }
+
+  function sync() {
+    casesBox.hidden = mode.value === "whole";
+    wholeBox.hidden = !casesBox.hidden;
+    drawList();
+  }
+
+  const row = h(
+    "div",
+    { class: "vb-row claim" },
+    h(
+      "div",
+      { class: "vb-head" },
+      target,
+      mode,
+      level,
+      button(
+        "Remove",
+        () => {
+          row.remove();
+          if (ctx.onChange) ctx.onChange();
+        },
+        { small: true, quiet: true },
+      ),
+    ),
+    casesBox,
+    wholeBox,
+  );
+  target.addEventListener("input", () => {
+    sync();
+    changed();
+  });
+  mode.addEventListener("change", () => {
+    sync();
+    changed();
+  });
+  for (const el of [level, selectors, reason]) el.addEventListener("input", changed);
+  selectors.addEventListener("input", drawList);
+  row.read = () => {
+    if (!dirty) return orig;
+    const t = target.value.trim();
+    if (!t) return null;
+    const extra = typeof orig === "object" && orig ? { ...orig } : {};
+    for (const k of ["target", "cases", "whole", "reason", "level"]) delete extra[k];
+    const out = { target: t };
+    if (mode.value === "whole") out.whole = true;
+    else out.cases = lines();
+    if (level.value) out.level = level.value;
+    if (mode.value === "whole" && reason.value.trim()) out.reason = reason.value.trim();
+    return { ...out, ...extra };
+  };
+  row.setCounts = (counts) => {
+    const t = target.value.trim();
+    if (mode.value === "whole") {
+      swap(count);
+      return;
+    }
+    const mine = (counts || []).filter((c) => c.target === t && lines().includes(c.selector));
+    const n = mine.reduce((a, c) => a + c.cases, 0);
+    swap(count, lines().length ? `matches ${n} case${n === 1 ? "" : "s"}` : "");
+  };
+  row.focusTarget = () => target.focus();
+  sync();
+  add(host, row);
+  return row;
 }
 
 /**
@@ -308,7 +474,18 @@ export async function renderEditor({ kind, id, query }) {
   const meta = KIND[kind];
   const page = h("div", { class: "page editor" });
   const errorBox = h("div", { class: "form-error", role: "alert", hidden: true });
+  const precheckBox = h("div", { class: "precheck", "aria-live": "polite" });
   const fields = [];
+  // The case ledger (owners from the server's attribution) for the claim checklists.
+  let ledger = { cases: [], targets: [] };
+  if (VERIFIABLE.includes(kind)) {
+    try {
+      ledger = await get("/api/cases");
+    } catch (err) {
+      reportError(err);
+    }
+  }
+  const ctx = { ledger, entityId: existing ? existing.id : "", onChange: () => schedulePrecheck() };
 
   let idInput = null;
   let fileInput = null;
@@ -351,7 +528,7 @@ export async function renderEditor({ kind, id, query }) {
   for (const group of spec(kind)) {
     const fs = h("fieldset", null, h("legend", null, group.legend));
     for (const field of group.fields) {
-      const [wrapper, el] = control(field, base[field.key]);
+      const [wrapper, el] = control(field, base[field.key], ctx);
       fields.push([field, el]);
       add(fs, wrapper);
     }
@@ -362,6 +539,12 @@ export async function renderEditor({ kind, id, query }) {
   const submit = h("button", { type: "submit", class: "btn primary" }, saveLabel);
   add(
     form,
+    h(
+      "datalist",
+      { id: "vb-targets" },
+      (ledger.targets || []).map((t) => h("option", { value: t })),
+    ),
+    precheckBox,
     errorBox,
     h(
       "div",
@@ -379,9 +562,7 @@ export async function renderEditor({ kind, id, query }) {
     ),
   );
 
-  form.addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    errorBox.hidden = true;
+  function collect() {
     const data = { ...base };
     delete data.notes;
     for (const [field, el] of fields) {
@@ -389,6 +570,60 @@ export async function renderEditor({ kind, id, query }) {
       if (v === "" || v === null || v === undefined || (Array.isArray(v) && !v.length)) delete data[field.key];
       else data[field.key] = v;
     }
+    return data;
+  }
+
+  // Live dry run: the save guard's verdict on the draft, and the set it would give.
+  let precheckSeq = 0;
+  let blocked = false;
+  async function precheck() {
+    if (!VERIFIABLE.includes(kind)) return;
+    const seq = ++precheckSeq;
+    const data = collect();
+    if (!existing) data.id = idInput.value.trim();
+    let res;
+    try {
+      res = await post(`/api/entities/${existing ? enc(existing.id) : "_new"}/precheck`, {
+        kind,
+        data,
+        file: fileInput ? fileInput.value.trim() : "",
+      });
+    } catch (err) {
+      return; // the save itself reports what is wrong
+    }
+    if (seq !== precheckSeq) return;
+    const problems = (res.problems || []).filter((p) => p.code !== "invalid");
+    blocked = problems.length > 0;
+    submit.disabled = blocked;
+    for (const [, el] of fields) if (el.setCounts) el.setCounts(res.selectors || []);
+    swap(
+      precheckBox,
+      problems.length
+        ? h(
+            "div",
+            { class: "callout fail" },
+            h("h3", null, "This draft cannot be saved"),
+            h("p", null, "A test case verifies at most one requirement."),
+            problemList(problems),
+          )
+        : res.ok && res.set && res.set.members
+          ? h("p", { class: "muted precheck-ok" }, `Its ${kind === "user_need" ? "validation" : "verification"} set would be: ${setLine(res.set)}.`)
+          : null,
+    );
+  }
+  const schedulePrecheck = debounce(precheck, 300);
+  form.addEventListener("input", () => schedulePrecheck());
+  form.addEventListener("change", () => schedulePrecheck());
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    errorBox.hidden = true;
+    if (blocked) {
+      errorBox.textContent = "Resolve the problems above first: a test case verifies at most one requirement.";
+      errorBox.hidden = false;
+      return;
+    }
+    const data = collect();
     const missing = fields.filter(([f]) => f.required && !data[f.key]).map(([f]) => f.label);
     if (missing.length) {
       errorBox.textContent = `Fill in: ${missing.join(", ")}.`;
@@ -434,6 +669,7 @@ export async function renderEditor({ kind, id, query }) {
       go(`#/entity/${enc(savedId)}`);
     } catch (err) {
       errorBox.textContent = err.message;
+      if (err.data && err.data.conflicts) swap(precheckBox, problemList(err.data.conflicts));
       errorBox.hidden = false;
       submit.disabled = false;
       errorBox.scrollIntoView({ block: "nearest" });
@@ -471,6 +707,7 @@ export async function renderEditor({ kind, id, query }) {
     ),
     form,
   );
+  if (VERIFIABLE.includes(kind)) schedulePrecheck();
   const first = form.querySelector(existing ? "#f-title" : "#f-title");
   if (first) setTimeout(() => first.focus(), 0);
   if (query && query.get("focus")) {
