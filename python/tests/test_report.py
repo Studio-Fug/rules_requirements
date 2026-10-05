@@ -294,3 +294,21 @@ def test_a_gap_stays_in_the_queue_unless_every_open_member_is_out_of_lane(tmp_pa
         (req1,) = report.to_dict(plain, lane=lane)["requirements"]
         hinted = {mb["state"] for mb in req1["members"] if mb.get("lane_hint")}
         assert hinted == {"not-run"}, lane_targets
+
+
+def test_graph_case_nodes_read_the_attribution(model):
+    from rules_requirements.attribution import attribute
+    from rules_requirements.ingest import Evidence, TestCase
+
+    ev = Evidence()
+    ev.add(TestCase("a", "passed", classname="s", target="//t:x_test", declared=("REQ-1",)))
+    ev.add(TestCase("b", "passed", classname="s", target="//t:x_test", declared=("REQ-1", "REQ-2")))
+    att = attribute(model, ev)
+    nodes, edges = graph.cases(att)
+    assert [(n.id, n.kind, n.status) for n in nodes] == [("//t:x_test#s::a", "case", "passed")]  # b: multi-tag
+    assert [(e.source, e.target, e.relation) for e in edges] == [(o, str(k), "verifies") for k, o in att.owner.items()]
+    assert len({e.target for e in edges}) == len(edges)  # one in-edge per case
+    assert graph.cases(att, {"REQ-2"}) == ([], [])
+    entity_nodes, entity_edges = graph.build(model)
+    svg = graph.to_svg(entity_nodes + nodes, entity_edges + edges)
+    assert "Test cases" in svg and svg.count("rr-case") == len(nodes)

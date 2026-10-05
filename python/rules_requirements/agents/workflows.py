@@ -17,6 +17,17 @@
     Hazards the analysis may be missing.
 ``assistant``
     Free-form instruction -> proposed model operations.
+``assign_cases``
+    For unowned or quarantined test cases (or a worksheet's open rows): one
+    proposed owner each, or ``none`` — written into the attribution
+    worksheet for a person to decide, never into the model.
+
+Every workflow reads a requirement's tests from its verification set
+(:meth:`Attribution.members_of <rules_requirements.attribution.Attribution.members_of>`),
+never from the tags in the evidence: a case quarantined or owned by another
+entity is no test of it. No workflow edits ownership: proposals never carry
+``verified_by`` / ``validated_by``, and case owners are only proposed in the
+worksheet (:mod:`rules_requirements.agents.worksheet`).
 """
 
 from __future__ import annotations
@@ -28,13 +39,21 @@ from typing import Any, Iterable
 
 from rules_requirements import config as cfg
 from rules_requirements.agents import Finding, Job, Workflow
+from rules_requirements.agents import worksheet as rr_worksheet
 from rules_requirements.agents.llm import LLM, LLMError
 from rules_requirements.annotations import Reference, candidate_files, is_test_path
+from rules_requirements.attribution import Attribution, Member
+from rules_requirements.case_keys import CaseKey
 from rules_requirements.edit import entity_to_dict
 from rules_requirements.ingest import TestCase
-from rules_requirements.model import FIELDS, Model
+from rules_requirements.migrate import OPEN, decisions, load_worksheet
+from rules_requirements.model import CLAIM_FIELDS, FIELDS, VERIFIABLE_KINDS, Model
 from rules_requirements.trace import Matrix
 from rules_requirements.util import natural_key
+
+# Fields that claim test cases: an agent never writes them (it proposes case
+# owners in the attribution worksheet instead).
+OWNERSHIP_FIELDS = frozenset(CLAIM_FIELDS.values())
 
 SYSTEM = (
     "You review requirements-driven development artifacts for a product team: user needs, requirements, "
@@ -66,8 +85,31 @@ class Context:
     root: str
     references: list[Reference] | None = None
     issues: list[Any] = field(default_factory=list)
+    model_paths: tuple[str, ...] = ()  # where the model is read from: never a worksheet
     _texts: dict[str, list[str]] = field(default_factory=dict)
     _files: list[str] | None = None
+
+    @property
+    def attribution(self) -> Attribution | None:
+        """Who owns each test case — the only source of an entity's tests."""
+        return self.matrix.attribution
+
+    def members_of(self, entity: str) -> tuple[Member, ...]:
+        """``entity``'s verification set
+        (:meth:`~rules_requirements.attribution.Attribution.members_of`)."""
+        att = self.attribution
+        return att.members_of(entity) if att is not None else ()
+
+    def set_line(self, entity: str) -> str:
+        """``set 3/4 passed · 1 not-run`` for a verifiable entity ("" otherwise)."""
+        members = self.members_of(entity)
+        if not members:
+            return ""
+        counts: dict[str, int] = {}
+        for m in members:
+            counts[m.state] = counts.get(m.state, 0) + 1
+        rest = " · ".join(f"{n} {state}" for state, n in sorted(counts.items()) if state != "passed")
+        return f"set {counts.get('passed', 0)}/{len(members)} passed" + (f" · {rest}" if rest else "")
 
     # --- source access ----------------------------------------------------
 
@@ -153,6 +195,8 @@ class Context:
                 d = entity_to_dict(ent)
                 d.pop("notes", None)
                 status = self.matrix.verdicts[ent.id].status if with_status and ent.id in self.matrix.verdicts else ""
+                if status and self.set_line(ent.id):
+                    status += f"; {self.set_line(ent.id)}"
                 head = f"- {ent.id}" + (f" [{status}]" if status else "") + f": {ent.title}"
                 rest = {k: v for k, v in d.items() if k not in ("id", "title")}
                 out.append(head + ("\n  " + "; ".join(f"{k}={v}" for k, v in rest.items()) if rest else ""))
@@ -253,7 +297,9 @@ def to_proposal(raw: dict[str, Any] | None, model: Model) -> dict[str, Any] | No
     kind = str(raw["kind"])
     if kind not in cfg.KINDS or not str(raw.get("title", "")).strip():
         return None
-    data = {k: v for k, v in raw.items() if k in FIELDS[kind] and v not in ("", [], None)}
+    # Never a claim: which tests verify an entity is decided by its
+    # verification set, and an agent only proposes case owners in the worksheet.
+    data = {k: v for k, v in raw.items() if k in FIELDS[kind] and k not in OWNERSHIP_FIELDS and v not in ("", [], None)}
     known = model.ids()
     for key in ("satisfies", "refines", "mitigates", "implemented_by"):
         if key in data:
@@ -380,25 +426,21 @@ def _requirement_block(ctx: Context, req_id: str) -> str:
     if req.description:
         parts.append(req.description)
     parts.append(f"(demands verification at level: {v.demanded}; current status: {v.status})")
+    if ctx.set_line(req_id):
+        parts.append(f"(verification set: {ctx.set_line(req_id)})")
     return "\n".join(parts)
 
 
 def linked_tests(ctx: Context, req_id: str, max_tests: int = 8) -> list[tuple[str, str]]:
-    """(label, source excerpt) for tests linked to a requirement by evidence or annotation."""
+    """(label, source excerpt) of a requirement's tests: first the cases of its
+    verification set (:meth:`Context.members_of` — never the tags in the
+    evidence: a case quarantined or owned by another entity is no test of
+    it), then test code annotated with its id, labelled as such (an
+    annotation documents, it verifies nothing)."""
     v = ctx.matrix.verdicts[req_id]
     out: list[tuple[str, str]] = []
     seen: set[tuple[str, int]] = set()
-    for ref in v.verified_in:
-        if (ref.path, ref.line) in seen:
-            continue
-        seen.add((ref.path, ref.line))
-        code = ctx.snippet(ref.path, ref.line)
-        if code:
-            out.append((f"{ref.symbol or 'test'} ({ref.path}:{ref.line})", code))
-    # The cases the requirement owns (its verification set), never the raw
-    # tags: a quarantined case is no test of it.
-    attribution = ctx.matrix.attribution
-    for member in attribution.members_of(req_id) if attribution is not None else ():
+    for member in ctx.members_of(req_id):
         if not member.owned or member.result is None:
             continue
         res = member.result
@@ -411,6 +453,14 @@ def linked_tests(ctx: Context, req_id: str, max_tests: int = 8) -> list[tuple[st
         code = ctx.snippet(*loc)
         if code:
             out.append((f"{member.key} ({loc[0]}:{loc[1]}, last result: {member.state})", code))
+    for ref in v.verified_in:
+        if (ref.path, ref.line) in seen:
+            continue
+        seen.add((ref.path, ref.line))
+        code = ctx.snippet(ref.path, ref.line)
+        if code:
+            label = f"{ref.symbol or 'test'} ({ref.path}:{ref.line}; annotated, not in its verification set)"
+            out.append((label, code))
     return out[:max_tests]
 
 
@@ -731,6 +781,191 @@ def assistant(
     return findings
 
 
+def cases_to_assign(
+    ctx: Context, cases: Any = None, worksheet: str = "", job: Job | None = None
+) -> list[tuple[CaseKey, tuple[str, ...]]]:
+    """The cases to propose an owner for, each with the entities in question
+    (a quarantine's entities, else the claimants; () when any entity may do).
+
+    ``cases`` (``<target>#<path>`` keys) or the open rows of ``worksheet``
+    (when it exists); by default every quarantined and every unowned case. All read from the
+    attribution, never from the evidence's tags."""
+    att = ctx.attribution
+    if att is None:
+        return []
+    keys: list[CaseKey] = []
+    if cases:
+        for text in [cases] if isinstance(cases, str) else list(cases):
+            try:
+                keys.append(CaseKey.parse(str(text)))
+            except ValueError as exc:
+                if job:
+                    job.say(str(exc))
+    elif worksheet and os.path.exists(rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths)):
+        doc = load_worksheet(rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths))
+        keys = [k for k, owner in decisions(doc).items() if owner == OPEN]
+    else:
+        keys = [q.key for q in att.quarantined]
+        keys += [k for k in att.cases if k not in att.owner and att.quarantine_of(k) is None]
+    out = []
+    for key in dict.fromkeys(keys):
+        if key not in att.cases:
+            if job:
+                job.say(f"{key}: not a test case of the loaded evidence, skipped")
+            continue
+        q = att.quarantine_of(key)
+        if q is not None:
+            out.append((key, q.entities))
+        else:
+            out.append((key, tuple(sorted({c.entity for c in att.claimed_by.get(key, ())}, key=natural_key))))
+    return out
+
+
+def _assign_schema(ids: list[str]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["assignments"],
+        "properties": {
+            "assignments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["case", "owner", "rationale"],
+                    "properties": {
+                        "case": {"type": "string"},
+                        "owner": {"type": "string", "enum": [*ids, "none"]},
+                        "rationale": {"type": "string"},
+                    },
+                },
+            }
+        },
+    }
+
+
+def _case_block(ctx: Context, key: CaseKey, entities: tuple[str, ...]) -> str:
+    att = ctx.attribution
+    assert att is not None
+    res = att.cases[key]
+    lines = [f"CASE {key}", f"last result: {res.status}" + (f" at level {res.level}" if res.level else "")]
+    q = att.quarantine_of(key)
+    if q is not None:
+        lines.append(f"quarantined ({q.code}): {q.detail}")
+    elif att.owner_of(key):
+        lines.append(f"owned by {att.owner_of(key)} today")
+    else:
+        lines.append("owned by no entity today")
+    if entities:
+        lines.append(f"in question: {', '.join(entities)}")
+    loc: tuple[str, int] | None = (res.file, res.line) if res.file and res.line else None
+    if loc is None and res.cases:
+        loc = ctx.locate_case(res.cases[0])
+    code = ctx.snippet(*loc) if loc else ""
+    if loc and code:
+        lines.append(f"source ({loc[0]}:{loc[1]}):\n```\n{code}\n```")
+    else:
+        lines.append("(source not found)")
+    return "\n".join(lines)
+
+
+def assign_cases(
+    ctx: Context,
+    job: Job,
+    llm: LLM | None,
+    cases: Any = None,
+    worksheet: str = "",
+    limit: int = 25,
+    batch: int = 8,
+    **_: Any,
+) -> list[Finding]:
+    """Propose exactly one owner (or ``none``) for each unowned or
+    quarantined case. A proposal is a finding; with ``worksheet`` every
+    proposal is also written into that ``.rrplan`` for a person to decide.
+    Never touches the model, a lock or a test source."""
+    assert llm is not None
+    if worksheet:
+        rr_worksheet.resolve(ctx.root, worksheet, ctx.model_paths)  # refuse a bad path before asking the LLM
+    todo = cases_to_assign(ctx, cases, worksheet, job)[: int(limit)]
+    if not todo:
+        job.say("no unowned or quarantined case to assign")
+        return []
+    ids = [
+        e.id
+        for kind in VERIFIABLE_KINDS
+        for e in sorted(ctx.model.section(kind).values(), key=lambda e: natural_key(e.id))
+    ]
+    schema = _assign_schema(ids)
+    findings: list[Finding] = []
+    proposals: list[dict[str, Any]] = []
+    att = ctx.attribution
+    assert att is not None
+    step = max(1, int(batch))
+    for start in range(0, len(todo), step):
+        chunk = todo[start : start + step]
+        job.say(f"assigning {len(chunk)} case(s) …")
+        prompt = (
+            "A test case verifies at most one requirement (user need, requirement or mitigation). For each test "
+            "case below, decide the ONE entity whose statement its assertions actually verify, or `none` when it "
+            "verifies none of them. Judge from the test's name and code against the entity texts, never from "
+            "which entities are 'in question' alone. Give a short rationale citing what the test asserts.\n\n"
+            + ctx.digest(VERIFIABLE_KINDS)
+            + "\n\n"
+            + "\n\n".join(_case_block(ctx, key, ents) for key, ents in chunk)
+        )
+        try:
+            raw = llm.json(SYSTEM, prompt, schema)
+        except LLMError as exc:
+            job.say(f"assignment failed: {exc}")
+            continue
+        wanted = {str(key): (key, ents) for key, ents in chunk}
+        done: set[str] = set()
+        for item in (raw or {}).get("assignments", []):
+            case = str(item.get("case", ""))
+            owner = str(item.get("owner", "")).strip()
+            if case not in wanted or case in done:
+                continue
+            if owner != "none" and owner not in ids:
+                job.say(f"{case}: {owner!r} is not one entity id; ignored")
+                continue
+            done.add(case)
+            key, ents = wanted[case]
+            current = att.owner_of(key) or ""
+            rationale = str(item.get("rationale", "")).strip()
+            findings.append(
+                Finding(
+                    "assign_cases",
+                    "info",
+                    "assign-case",
+                    f"{key} → {owner}",
+                    detail=rationale,
+                    entity=owner if owner != "none" else "",
+                    refs=[e for e in dict.fromkeys([*ents, current]) if e and e != owner],
+                    proposal={
+                        "kind": "case_owner",
+                        "op": "worksheet",
+                        "case": str(key),
+                        "owner": owner,
+                        "current": current,
+                        "candidates": list(ents),
+                        "status": att.cases[key].status,
+                        "rationale": rationale,
+                    },
+                    source="llm",
+                )
+            )
+            proposals.append(findings[-1].proposal or {})
+        for case in wanted:
+            if case not in done:
+                job.say(f"{case}: no proposal")
+    if worksheet and proposals:
+        rel, n = rr_worksheet.record(ctx.root, worksheet, proposals, model_paths=ctx.model_paths)
+        job.say(f"wrote {n} proposal(s) to {rel} (proposed owners only; a person decides)")
+        for f in findings:
+            f.status = "applied"
+    return findings
+
+
 WORKFLOWS: dict[str, Workflow] = {
     wf.id: wf
     for wf in (
@@ -781,6 +1016,19 @@ WORKFLOWS: dict[str, Workflow] = {
             assistant,
             needs_llm=True,
             params={"instruction": "what to do", "focus": "entity ids to include in full"},
+        ),
+        Workflow(
+            "assign_cases",
+            "Assign test cases",
+            "For unowned or quarantined test cases, propose the one entity each verifies (or none). Proposals go "
+            "into the attribution worksheet for a person to decide; the model is never edited.",
+            assign_cases,
+            needs_llm=True,
+            params={
+                "cases": "case keys <target>#<path> (default: every unowned or quarantined case)",
+                "worksheet": "a .rrplan to write the proposals into (and, if it exists, take its open cases from)",
+                "limit": "max cases (default 25)",
+            },
         ),
     )
 }

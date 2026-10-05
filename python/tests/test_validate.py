@@ -489,3 +489,45 @@ def test_cli_validate_known_targets(tmp_path, capsys):
     err = capsys.readouterr().err
     assert rc == 1 and "[unknown-target]" in err and "not a label: 'not a label'" in err
     assert cli.main(["validate", model]) == 0
+
+
+def test_claim_conflicts_are_exactly_the_shared_case_errors_of_validate(tmp_path):
+    """The save guard's static witnesses (claim_conflicts) and validate's
+    shared-case / same-code-multiple-owners errors are one pairing: over
+    random models they name the same pairs."""
+    import random
+
+    from rules_requirements.validate import claim_conflicts
+
+    rng = random.Random(20261005)
+    selectors = ["suite::a", "suite::b", "suite::*", "*", "other::a", "suite::a*", "*::b", "x\\*y", "suite::[bad"]
+    targets = ["//t:a_test", "//t:b_test", "//t:c_test"]
+    seen: set[str] = set()
+    for trial in range(60):
+        reqs = []
+        for n in range(1, rng.randint(2, 5)):
+            items = []
+            for _ in range(rng.randint(0, 3)):
+                target = rng.choice(targets)
+                if rng.random() < 0.2:
+                    items.append(f"{{target: '{target}', whole: true, reason: r}}")
+                else:
+                    cases = ", ".join(repr(s) for s in rng.sample(selectors, rng.randint(1, 3)))
+                    items.append(f"{{target: '{target}', cases: [{cases}]}}")
+            claims = f"\n    verified_by: [{', '.join(items)}]" if items else ""
+            reqs.append(f"  - id: REQ-{n}\n    title: r{n}{claims}")
+        variants = "config:\n  variants: [['//t:a_test', '//t:b_test']]\n" if trial % 2 else ""
+        model, _ = read_model(write(tmp_path, f"m{trial}.yaml", variants + "requirements:\n" + "\n".join(reqs) + "\n"))
+        pairs = sorted(
+            (c.code, c.second.entity, c.second.location.line, c.first.entity) for c in claim_conflicts(model)
+        )
+        errors = sorted(
+            (i.code, i.entity, i.location.line, i.message)
+            for i in validate(model)
+            if i.code in ("shared-case", "same-code-multiple-owners")
+        )
+        seen.update(p[0] for p in pairs)
+        assert [p[:3] for p in pairs] == [e[:3] for e in errors], (trial, model)
+        for e in errors:  # each error names the other claim's entity of a pair it stands for
+            assert any(p[:3] == e[:3] and f"{p[3]} claims" in e[3] for p in pairs), e
+    assert seen == {"shared-case", "same-code-multiple-owners"}  # the models exercise both

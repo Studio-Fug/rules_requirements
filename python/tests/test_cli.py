@@ -587,3 +587,37 @@ def test_report_surfaces_every_attribution_issue_and_gates_on_errors(capsys, tmp
     assert rc == 1 and "ATTRIBUTION ERROR: [same-path-multiple-owners] case path 'suite::run' is owned by" in err
     rc, _, err = run(capsys, "report", "--model", plain, *evidence, "--strict")
     assert rc == 1 and "ATTRIBUTION ERROR: [unscoped-evidence] suite:copied:" in err
+
+
+def test_graph_cases_gives_each_owned_case_one_in_edge(capsys, model_path, tmp_path):
+    x = junit(
+        tmp_path,
+        "e.xml",
+        [("g", "passed", ["REQ-1"], ""), ("h", "failed", ["REQ-2"], ""), ("both", "passed", ["REQ-1", "REQ-2"], "")],
+    )
+    rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", "json", "--evidence", x, "--cases")
+    assert rc == 0
+    data = json.loads(out)
+    cases = [n for n in data["nodes"] if n["kind"] == "case"]
+    assert sorted(n["title"].split("::")[-1] for n in cases) == ["g", "h"]  # a multi-tag case is no one's: no node
+    for n in cases:
+        assert [e["source"] for e in data["edges"] if e["target"] == n["id"]] in (["REQ-1"], ["REQ-2"])
+    rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", "mermaid", "--evidence", x, "--cases")
+    assert rc == 0 and "-->|verifies| case_" in out
+    for fmt in ("dot", "svg"):
+        rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", fmt, "--evidence", x, "--cases")
+        assert rc == 0 and ("rr-case" in out if fmt == "svg" else "verifies" in out)
+    rc, _, err = run(capsys, "graph", "--model", model_path, "--cases")
+    assert rc == 2 and "--cases needs --evidence" in err
+
+
+def test_serve_reads_lane_target_files(tmp_path):
+    from rules_requirements.cli import _serve_lanes
+
+    write(tmp_path, "lanes/hitl.txt", "# the rig lane\n//pi/hitl:e2e_test\n\n@//pi/hitl:smoke_test\n")
+    assert _serve_lanes(["hitl=lanes/hitl.txt"], str(tmp_path)) == {
+        "hitl": ["//pi/hitl:e2e_test", "@//pi/hitl:smoke_test"]
+    }
+    assert _serve_lanes(None, str(tmp_path)) == {}
+    with pytest.raises(SystemExit, match="cannot read"):
+        _serve_lanes(["sw=lanes/none.txt"], str(tmp_path))

@@ -162,6 +162,23 @@ function assistantComposer(llm) {
 
 function proposalPreview(p) {
   if (!p) return null;
+  if (p.kind === "case_owner") {
+    // A proposed case owner: recorded in the attribution worksheet, never applied to the model.
+    return h(
+      "div",
+      { class: "proposal" },
+      h("p", { class: "proposal-head" }, "Proposed owner (for the attribution worksheet)"),
+      h(
+        "dl",
+        { class: "facts small" },
+        h("dt", null, "case"),
+        h("dd", null, h("code", { class: "case-key" }, p.case)),
+        h("dt", null, "owner"),
+        h("dd", null, store.byId.has(p.owner) ? idTag(p.owner, { compact: true }) : p.owner),
+        p.current ? [h("dt", null, "owned by today"), h("dd", null, idTag(p.current, { compact: true }))] : null,
+      ),
+    );
+  }
   const data = p.data || {};
   const rows = Object.entries(data).filter(([k]) => k !== "id");
   return h(
@@ -266,7 +283,24 @@ function findingItem(f, job, refresh) {
         { small: true },
       ),
     );
-    if (f.proposal && f.proposal.op === "update" && f.entity) {
+    if (f.proposal && f.proposal.kind === "case_owner") {
+      add(
+        actions,
+        button(
+          "Record in worksheet",
+          async () => {
+            try {
+              const res = await post(`/api/findings/${enc(f.id)}/apply`, { action: "worksheet" });
+              toast(`Proposal recorded in ${res.worksheet}; a person decides the owner there`);
+              refresh();
+            } catch (err) {
+              reportError(err);
+            }
+          },
+          { small: true, primary: true },
+        ),
+      );
+    } else if (f.proposal && f.proposal.op === "update" && f.entity) {
       add(
         actions,
         button(

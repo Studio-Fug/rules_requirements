@@ -16,6 +16,7 @@ import { h, mount, plural, swap } from "./js/dom.js";
 import { KIND, KIND_BY_ROUTE, KINDS, refresh, store } from "./js/store.js";
 import { stopPolling } from "./js/views/agents.js";
 import { renderAgents } from "./js/views/agents.js";
+import { renderCases } from "./js/views/cases.js";
 import { renderCode } from "./js/views/code.js";
 import { renderEditor } from "./js/views/editor.js";
 import { renderEntity } from "./js/views/entity.js";
@@ -54,6 +55,7 @@ async function render(opts = {}) {
     else if (section === "versions") view = await renderVersions(query);
     else if (section === "agents") view = await renderAgents(query);
     else if (section === "queue") view = await renderQueue(query);
+    else if (section === "cases") view = await renderCases(query);
     else
       view = h(
         "div",
@@ -92,6 +94,7 @@ const NAV = [
     group: "Trace",
     items: [
       { route: "graph", label: "Trace graph", icon: "graph" },
+      { route: "cases", label: "Case ledger", icon: "cases" },
       { route: "code", label: "Implementation", icon: "code" },
       { route: "queue", label: "Work queue", icon: "queue" },
     ],
@@ -108,6 +111,7 @@ const NAV = [
 function navCount(item) {
   if (item.kind) return store.entities.filter((e) => e.kind === item.kind).length;
   if (item.route === "queue") return (store.state && store.state.counts && store.state.counts.gaps) || 0;
+  if (item.route === "cases") return (store.state && store.state.attribution && store.state.attribution.cases) || 0;
   if (item.route === "versions") return (store.state && store.state.git && (store.state.git.changed || []).length) || 0;
   return null;
 }

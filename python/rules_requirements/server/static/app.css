@@ -1472,6 +1472,169 @@ td.rel {
   font-size: 12.5px;
 }
 
+/* Verification set widget: one claim per target */
+.vb-row.claim {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--surface-2);
+}
+.vb-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.vb-head .vb-target {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+.vb-cases-box,
+.vb-whole-box {
+  margin-top: 8px;
+}
+.vb-selectors {
+  width: 100%;
+  font-family: var(--font-code);
+  font-size: 12.5px;
+}
+.vb-reason {
+  width: 100%;
+}
+.vb-count {
+  display: block;
+  font-size: 12px;
+  margin: 2px 0 4px;
+}
+.vb-cases {
+  max-height: 220px;
+  overflow: auto;
+  display: grid;
+  gap: 2px;
+}
+.vb-case {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.vb-case.taken {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+/* Member states, the set line, quarantines and the invariant */
+.mstates {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.mstate {
+  display: inline-block;
+  font: 600 11px/1 var(--font-din);
+  padding: 3px 7px 2px;
+  border-radius: 999px;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 13%, transparent);
+  white-space: nowrap;
+}
+.mstate.st-ok {
+  color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 13%, transparent);
+}
+.mstate.st-warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.mstate.st-amber {
+  color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+}
+.mstate.st-fail {
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 13%, transparent);
+}
+.mstate.st-stale {
+  color: var(--stale);
+  background: color-mix(in srgb, var(--stale) 14%, transparent);
+}
+.set-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+.derived {
+  margin: 0 0 10px;
+}
+.quarantine-banner h3 {
+  margin: 0 0 6px;
+  color: var(--fail);
+}
+.quarantine-list li {
+  margin: 6px 0;
+}
+.case-key {
+  font-family: var(--font-code);
+  font-size: 12px;
+  word-break: break-word;
+}
+tr.row-quarantined td {
+  background: color-mix(in srgb, var(--fail) 5%, transparent);
+}
+.invariant {
+  display: block;
+  margin: 0;
+  padding: 10px 18px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+  border-top: 1px solid var(--line-2);
+}
+.invariant.bad strong:last-of-type {
+  color: var(--fail);
+}
+a.invariant:hover {
+  text-decoration: none;
+  background: var(--surface-2);
+}
+.page-head .invariant {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--surface);
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+.precheck .callout {
+  margin: 0 0 12px;
+}
+.precheck .callout h3 {
+  margin: 0 0 4px;
+}
+.precheck-ok {
+  margin: 0 0 10px;
+}
+.move-dialog .field select {
+  width: 100%;
+}
+.move-plan li {
+  margin: 3px 0;
+  font-size: 13px;
+}
+.check-row[hidden] {
+  display: none;
+}
+.check-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: 8px 0;
+  font-size: 13px;
+}
+
 /* Id picker */
 .picker {
   position: relative;
@@ -2184,6 +2347,10 @@ dialog::backdrop {
   background: var(--fail);
   color: #fff;
 }
+.toast.warn {
+  background: var(--amber);
+  color: #1b1b1b;
+}
 .toast.leaving {
   opacity: 0;
   transform: translateY(6px);
@@ -2303,4 +2470,11 @@ dialog::backdrop {
     animation: none !important;
     scroll-behavior: auto !important;
   }
+}
+.claims code.selector {
+  font-size: 12px;
+  padding: 0 4px;
+  border-radius: var(--r-s);
+  background: var(--surface-2);
+  border: 1px solid var(--line-2);
 }

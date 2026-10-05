@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 import os
+import pathlib
 import subprocess
 
 import pytest
 from conftest import MODEL, write
 
+from rules_requirements.case_keys import CaseKey
 from rules_requirements.server.workspace import Workspace, WorkspaceError, entity_payload, summary_rows
 
 GIT_ENV = {"GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@x"}
@@ -466,3 +468,642 @@ def test_commits_need_someone_to_attribute_them_to(repo, monkeypatch):
         git(repo, "log", "-1", "--format=%an <%ae> / %cn <%ce>").strip()
         == "Ada <ada@example.com> / Ada <ada@example.com>"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The save guard and the case ledger (one owner per test case)                #
+# --------------------------------------------------------------------------- #
+
+LEDGER_REQS = """
+user_needs:
+  - id: UN-1
+    title: n
+requirements:
+  - id: REQ-1
+    title: Heat below setpoint
+    satisfies: [UN-1]
+    verified_by:
+      - target: //t:ctl_test
+        cases: ["suite::a", "suite::b"]
+  - id: REQ-2
+    title: Accept setpoints
+    satisfies: [UN-1]
+  - id: REQ-3
+    title: Cut the heater
+    satisfies: [UN-1]
+"""
+
+
+def write_testlog(root, target, cases):
+    """bazel-testlogs/<pkg>/<name>/test.xml; cases: (name, status[, extra testcase attrs])."""
+    pkg, name = target[2:].split(":")
+    rows = []
+    for case in cases:
+        cname, status = case[:2]
+        attrs = case[2] if len(case) > 2 else ""
+        body = '<failure message="boom"/>' if status == "failed" else ""
+        rows.append(f'<testcase classname="suite" name="{cname}" {attrs}>{body}</testcase>')
+    xml = f'<?xml version="1.0"?><testsuites><testsuite name="s">{"".join(rows)}</testsuite></testsuites>'
+    write(root, f"bazel-testlogs/{pkg}/{name}/test.xml", xml)
+
+
+@pytest.fixture
+def ledger(tmp_path):
+    write(tmp_path, "req/model.yaml", LEDGER_REQS)
+    write_testlog(tmp_path, "//t:ctl_test", [("a", "passed"), ("b", "passed"), ("c", "passed")])
+    git(tmp_path, "init", "-q", "-b", "main")
+    git(tmp_path, "add", "-A")
+    git(tmp_path, "commit", "-qm", "init")
+    return tmp_path
+
+
+def ledger_ws(root, **kw):
+    return Workspace(root=str(root), model_paths=["req"], evidence_paths=["bazel-testlogs"], **kw)
+
+
+def claim(*cases, target="//t:ctl_test"):
+    return {
+        "title": "Accept setpoints",
+        "satisfies": ["UN-1"],
+        "verified_by": [{"target": target, "cases": list(cases)}],
+    }
+
+
+def refused(ws, fn, *args, **kw):
+    before = (ws.root, pathlib.Path(os.path.join(ws.root, "req/model.yaml")).read_text(encoding="utf-8"))
+    with pytest.raises(WorkspaceError) as exc:
+        fn(*args, **kw)
+    assert exc.value.status == 409, exc.value
+    assert (
+        pathlib.Path(os.path.join(ws.root, "req/model.yaml")).read_text(encoding="utf-8") == before[1]
+    )  # nothing written
+    return exc.value
+
+
+def test_a_save_that_shares_a_case_is_refused_naming_the_case_and_its_owner(ledger):
+    ws = ledger_ws(ledger)
+    assert ws.snapshot().attribution.owner_of(CaseKey("//t:ctl_test", "suite::a")) == "REQ-1"
+    err = refused(ws, ws.update, "REQ-2", claim("suite::a"))
+    assert "//t:ctl_test#suite::a" in str(err) and "owned by REQ-1" in str(err)
+    assert "a test case verifies at most one requirement" in str(err)
+    (conflict,) = err.data["conflicts"]
+    assert conflict["code"] == "shared-case" and conflict["case"] == "//t:ctl_test#suite::a"
+    assert conflict["owner"] == "REQ-1" and conflict["owner_via"] == "attribution"
+    assert set(conflict["entities"]) == {"REQ-1", "REQ-2"}
+    # A glob is caught by its witness, and so is a whole-target claim.
+    err = refused(ws, ws.update, "REQ-2", claim("suite::*"))
+    assert err.data["conflicts"][0]["code"] == "shared-case" and err.data["conflicts"][0]["owner"] == "REQ-1"
+    whole = {**claim(), "verified_by": [{"target": "//t:ctl_test", "whole": True, "reason": "r"}]}
+    refused(ws, ws.update, "REQ-2", whole)
+    # Creating an entity is guarded the same way.
+    err = refused(ws, ws.create, "requirement", {"id": "REQ-9", **claim("suite::b")})
+    assert "owned by REQ-1" in str(err)
+    # A case nobody owns can be claimed.
+    ws.update("REQ-2", claim("suite::c"))
+    assert ws.snapshot().attribution.owner_of(CaseKey("//t:ctl_test", "suite::c")) == "REQ-2"
+
+
+def test_the_guard_names_a_claimed_case_absent_from_the_evidence(ledger):
+    ws = Workspace(root=str(ledger), model_paths=["req"])  # no evidence loaded
+    err = refused(ws, ws.update, "REQ-2", claim("suite::a"))
+    (conflict,) = err.data["conflicts"]
+    assert conflict["case"] == "//t:ctl_test#suite::a"
+    assert conflict["owner"] == "REQ-1" and conflict["owner_via"] == "claim" and "REQ-1 claims it now" in str(err)
+
+
+def test_a_conflict_already_in_the_model_blocks_no_unrelated_edit(ledger):
+    text = LEDGER_REQS.replace(
+        "  - id: REQ-2\n    title: Accept setpoints\n",
+        "  - id: REQ-2\n    title: Accept setpoints\n    verified_by: [{target: //t:ctl_test, cases: ['suite::b']}]\n",
+    )
+    write(ledger, "req/model.yaml", text)
+    ws = ledger_ws(ledger)
+    assert any(i.code == "shared-case" for i in ws.snapshot().issues)
+    ws.update("REQ-3", {"title": "Cut the heater at 35 C", "satisfies": ["UN-1"]})
+    ws.update("REQ-2", {**claim("suite::b"), "title": "Accept setpoints, 5..30 C"})  # still the same conflict
+    ws.add_note("REQ-1", "why both?")
+    assert ws.rename("REQ-2", "REQ-20") == []  # the conflict follows the renamed entity: not a new one
+    err = refused(ws, ws.update, "REQ-20", claim("suite::b", "suite::a"))  # but a second shared case is
+    assert [c["case"] for c in err.data["conflicts"]] == ["//t:ctl_test#suite::a"]
+
+
+def test_bad_selectors_and_targets_of_the_edited_entity_are_refused(ledger):
+    ws = ledger_ws(ledger)
+    err = refused(ws, ws.update, "REQ-2", claim("suite::\\x"))
+    assert err.data["conflicts"][0]["code"] == "bad-selector"
+    err = refused(ws, ws.update, "REQ-2", claim("suite::c", target="no label"))
+    assert err.data["conflicts"][0]["code"] == "bad-target"
+    # A bad selector already in the model blocks no other edit of its entity.
+    text = LEDGER_REQS.replace(
+        "  - id: REQ-2\n    title: Accept setpoints\n",
+        "  - id: REQ-2\n    title: Accept setpoints\n    verified_by: [{target: //t:ctl_test, cases: ['suite::\\x']}]\n",
+    )
+    write(ledger, "req/model.yaml", text)
+    ws = ledger_ws(ledger)
+    assert any(i.code == "bad-selector" for i in ws.snapshot().issues)
+    ws.add_note("REQ-2", "fix the selector")
+    assert ws.model.get("REQ-2").notes[0].text == "fix the selector"
+
+
+def test_same_code_in_two_targets_is_refused_statically_and_by_attribution(tmp_path):
+    reqs = LEDGER_REQS.replace('cases: ["suite::a", "suite::b"]', 'cases: ["suite::x"]').replace(
+        "//t:ctl_test", "//t:a_test"
+    )
+    write(tmp_path, "req/model.yaml", reqs)
+    write_testlog(tmp_path, "//t:a_test", [("x", "passed", 'file="tests/x.py"')])
+    write_testlog(tmp_path, "//t:b_test", [("x", "passed", 'file="tests/x.py"')])
+    ws = ledger_ws(tmp_path)
+    # No variants configured: only attribution sees one source file in two targets.
+    err = refused(ws, ws.update, "REQ-2", claim("suite::x", target="//t:b_test"))
+    conflicts = {c["case"]: c for c in err.data["conflicts"]}
+    assert set(conflicts) == {"//t:a_test#suite::x", "//t:b_test#suite::x"}
+    assert {c["code"] for c in conflicts.values()} == {"same-code-multiple-owners"}
+    assert conflicts["//t:a_test#suite::x"]["owner"] == "REQ-1"
+    # With the targets declared variants, the static witness names it first.
+    write(tmp_path, "req/model.yaml", "config:\n  variants: [[//t:a_test, //t:b_test]]\n" + reqs)
+    ws = ledger_ws(tmp_path)
+    err = refused(ws, ws.update, "REQ-2", claim("suite::x", target="//t:b_test"))
+    assert err.data["conflicts"][0]["code"] == "same-code-multiple-owners"
+    assert err.data["conflicts"][0]["owner"] == "REQ-1"
+
+
+def test_a_save_may_not_take_a_locked_case(ledger):
+    write(ledger, "req/model.yaml", "config:\n  sets_lock: verification.rrlock\n" + LEDGER_REQS)
+    write(
+        ledger,
+        "req/verification.rrlock",
+        "schema: rules_requirements/verification-lock/v1\ncases:\n  //t:ctl_test:\n"
+        '    "suite::a": REQ-1\n    "suite::b": REQ-1\n    "suite::c": REQ-3\n',
+    )
+    ws = ledger_ws(ledger)
+    err = refused(ws, ws.update, "REQ-2", claim("suite::c"))
+    (conflict,) = [c for c in err.data["conflicts"] if c["code"] == "lock-owner-changed"]
+    assert (
+        conflict["case"] == "//t:ctl_test#suite::c" and conflict["owner"] == "REQ-3" and conflict["owner_via"] == "lock"
+    )
+
+
+def test_precheck_is_a_dry_run_with_the_set_it_would_give(ledger):
+    ws = ledger_ws(ledger)
+    path = os.path.join(ledger, "req/model.yaml")
+    before = pathlib.Path(path).read_text(encoding="utf-8")
+    bad = ws.precheck("REQ-2", claim("suite::a", "suite::c"))
+    assert not bad["ok"] and bad["problems"][0]["case"] == "//t:ctl_test#suite::a"
+    good = ws.precheck("REQ-2", claim("suite::c", "suite::nope"))
+    assert good["ok"] and good["set"]["members"] == 2 and good["set"]["passed"] == 1 and good["set"]["missing"] == 1
+    assert {s["selector"]: s["cases"] for s in good["selectors"]} == {"suite::c": 1, "suite::nope": 0}
+    new = ws.precheck("", {"id": "REQ-7", **claim("suite::b")}, kind="requirement")
+    assert not new["ok"] and new["problems"][0]["owner"] == "REQ-1"
+    invalid = ws.precheck("REQ-2", {"title": "x", "colour": "red"})
+    assert not invalid["ok"] and invalid["problems"][0]["code"] == "invalid"
+    assert pathlib.Path(path).read_text(encoding="utf-8") == before
+
+
+def test_the_case_ledger_reads_owners_from_the_attribution(ledger):
+    write_testlog(ledger, "//t:tag_test", [("t", "passed", ""), ("u", "passed")])
+    write(
+        ledger,
+        "bazel-testlogs/t/tag_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="t"><properties><property name="requirement" value="REQ-3"/>'
+        "</properties></testcase>"
+        '<testcase classname="suite" name="u"><properties><property name="requirement" value="REQ-2"/>'
+        '<property name="requirement" value="REQ-3"/></properties></testcase>'
+        "</testsuite></testsuites>",
+    )
+    ws = ledger_ws(ledger)
+    out = ws.cases()
+    rows = {r["case"]: r for r in out["cases"]}
+    assert rows["//t:ctl_test#suite::a"]["owner"] == "REQ-1" and rows["//t:ctl_test#suite::a"]["via"] == "model"
+    assert rows["//t:ctl_test#suite::c"]["owner"] is None
+    assert rows["//t:tag_test#suite::t"]["owner"] == "REQ-3" and rows["//t:tag_test#suite::t"]["via"] == "tag"
+    assert rows["//t:tag_test#suite::u"]["quarantine"]["code"] == "multi-tag"
+    assert rows["//t:tag_test#suite::u"]["owner"] is None
+    assert out["summary"] == {"cases": 5, "owned": 3, "unowned": 1, "quarantined": 1}
+    assert [r["case"] for r in ws.cases(state="unowned")["cases"]] == ["//t:ctl_test#suite::c"]
+    assert [r["case"] for r in ws.cases(state="quarantined")["cases"]] == ["//t:tag_test#suite::u"]
+    assert {r["case"] for r in ws.cases(q="req-3")["cases"]} == {"//t:tag_test#suite::t"}
+    assert len(ws.cases(target="//t:ctl_test")["cases"]) == 3
+    with pytest.raises(WorkspaceError):
+        ws.cases(state="mine")
+    # The entity page shows the set, its quarantines and the invariant holds.
+    p = entity_payload(ws, "REQ-3")
+    assert p["verifiable"] and p["status"] == "INVALID"
+    assert [q["case"] for q in p["quarantined"]] == ["//t:tag_test#suite::u"]
+    assert {m["state"] for m in p["members"]} == {"passed", "quarantined"}
+    assert p["set"]["quarantined"] == 1 and p["basis"]
+    assert entity_payload(ws, "UN-1")["verifiable"]
+    att = ws.attribution_payload()
+    assert att["summary"]["quarantined"] == 1 and att["targets"]["//t:ctl_test"]["owners"] == ["REQ-1"]
+    assert att["sets"]["REQ-1"]["passed"] == 2 and att["quarantined"][0]["code"] == "multi-tag"
+
+
+def test_moving_a_case_is_a_model_edit_that_passes_the_checks(ledger):
+    ws = ledger_ws(ledger)
+    key = CaseKey("//t:ctl_test", "suite::b")
+    plan = ws.move_case(str(key), "REQ-2", dry_run=True)
+    assert plan["ok"] and plan["from"] == "REQ-1" and ws.snapshot().attribution.owner_of(key) == "REQ-1"
+    ws.move_case(str(key), "REQ-2")
+    att = ws.snapshot().attribution
+    assert att.owner_of(key) == "REQ-2" and att.owner_of(CaseKey("//t:ctl_test", "suite::a")) == "REQ-1"
+    assert [vb.cases for vb in ws.model.get("REQ-1").verified_by] == [("suite::a",)]
+    assert [vb.cases for vb in ws.model.get("REQ-2").verified_by] == [("suite::b",)]
+    ws.move_case(str(key), "none")
+    assert ws.snapshot().attribution.owner_of(key) is None and not ws.model.get("REQ-2").verified_by
+    ws.move_case("//t:ctl_test#suite::c", "REQ-1")  # appended to REQ-1's item for the target
+    assert [vb.cases for vb in ws.model.get("REQ-1").verified_by] == [("suite::a", "suite::c")]
+    with pytest.raises(WorkspaceError, match="already"):
+        ws.move_case("//t:ctl_test#suite::c", "REQ-1")
+    with pytest.raises(WorkspaceError) as exc:
+        ws.move_case("//t:ctl_test#suite::zz", "REQ-1")
+    assert exc.value.status == 404
+    with pytest.raises(WorkspaceError, match="not a user need"):
+        ws.move_case("//t:ctl_test#suite::c", "RISK-1")
+
+
+def test_moving_a_case_out_of_a_glob_rewrites_it_only_when_confirmed(ledger):
+    write(ledger, "req/model.yaml", LEDGER_REQS.replace('cases: ["suite::a", "suite::b"]', "cases: ['suite::*']"))
+    ws = ledger_ws(ledger)
+    plan = ws.move_case("//t:ctl_test#suite::b", "REQ-2", dry_run=True)
+    assert not plan["ok"] and plan["problems"][-1]["code"] == "needs-expand"
+    refused(ws, ws.move_case, "//t:ctl_test#suite::b", "REQ-2")
+    ws.move_case("//t:ctl_test#suite::b", "REQ-2", expand=True)
+    assert [vb.cases for vb in ws.model.get("REQ-1").verified_by] == [("suite::a", "suite::c")]
+    assert ws.snapshot().attribution.owner_of(CaseKey("//t:ctl_test", "suite::b")) == "REQ-2"
+
+
+def test_moving_a_case_relocks_it_and_a_multi_tag_case_cannot_move(ledger):
+    write(ledger, "req/model.yaml", "config:\n  sets_lock: verification.rrlock\n" + LEDGER_REQS)
+    write(
+        ledger,
+        "req/verification.rrlock",
+        "schema: rules_requirements/verification-lock/v1\ncases:\n  //t:ctl_test:\n"
+        '    "suite::a": REQ-1\n    "suite::b": REQ-1\n',
+    )
+    write(
+        ledger,
+        "bazel-testlogs/t/tag_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="u"><properties><property name="requirement" value="REQ-2"/>'
+        '<property name="requirement" value="REQ-3"/></properties></testcase>'
+        "</testsuite></testsuites>",
+    )
+    ws = ledger_ws(ledger)
+    out = ws.move_case("//t:ctl_test#suite::b", "REQ-3")
+    assert any(p.startswith("lock:") for p in out["plan"])
+    lock = pathlib.Path(os.path.join(ledger, "req/verification.rrlock")).read_text(encoding="utf-8")
+    assert '"suite::b": REQ-3' in lock and '"suite::a": REQ-1' in lock
+    snap = ws.snapshot()
+    assert snap.attribution.owner_of(CaseKey("//t:ctl_test", "suite::b")) == "REQ-3"
+    assert not [i for i in snap.issues if i.code == "lock-owner-changed"]
+    with pytest.raises(WorkspaceError, match="multi-tag") as exc:
+        ws.move_case("//t:tag_test#suite::u", "REQ-2")
+    assert exc.value.status == 409
+
+
+LOCKED = (
+    "schema: rules_requirements/verification-lock/v1\ncases:\n  //t:ctl_test:\n"
+    '    "suite::a": REQ-1\n    "suite::b": REQ-1\n'
+)
+
+
+def locked_ledger(root, lock=LOCKED, reqs=LEDGER_REQS):
+    write(root, "req/model.yaml", "config:\n  sets_lock: verification.rrlock\n" + reqs)
+    write(root, "req/verification.rrlock", lock)
+    return ledger_ws(root)
+
+
+def lock_text(root):
+    return pathlib.Path(os.path.join(root, "req/verification.rrlock")).read_text(encoding="utf-8")
+
+
+def errors(ws):
+    from rules_requirements.validate import validate
+
+    return sorted({i.code for i in validate(ws.model) if i.severity == "error"})
+
+
+def test_renaming_an_entity_renames_its_lock_entries_with_it(ledger):
+    ws = locked_ledger(ledger)
+    assert ws.rename("REQ-1", "REQ-10") == []
+    lock = lock_text(ledger)
+    assert '"suite::a": REQ-10' in lock and '"suite::b": REQ-10' in lock and "REQ-1\n" not in lock
+    assert errors(ws) == []
+    att = ws.snapshot().attribution
+    assert (
+        att.owner_of(CaseKey("//t:ctl_test", "suite::a")) == "REQ-10"
+        and att.lock.owner_of("//t:ctl_test", "suite::b") == "REQ-10"
+    )
+    assert entity_payload(ws, "REQ-10")["set"]["passed"] == 2
+
+
+def test_deleting_an_entity_drops_its_lock_entries_with_it(ledger):
+    ws = locked_ledger(ledger, LOCKED.replace('"suite::b": REQ-1\n', '"suite::b": REQ-1\n    "suite::c": REQ-3\n'))
+    ws.update("REQ-3", {**claim("suite::c"), "title": "Cut the heater"})
+    assert ws.delete("REQ-1") == ["//t:ctl_test#suite::a", "//t:ctl_test#suite::b"]
+    lock = lock_text(ledger)
+    assert "REQ-1" not in lock and '"suite::c": REQ-3' in lock
+    assert errors(ws) == []  # no lock-invalid left behind
+
+
+def test_the_guard_refuses_a_lock_entry_whose_owner_the_save_removes(ledger):
+    from rules_requirements import edit
+    from rules_requirements.server.workspace import GUARDED
+
+    assert "lock-invalid" in GUARDED
+    ws = locked_ledger(ledger)
+    txn = ws._txn()  # a delete that forgets the lock
+    txn.edit("req/model.yaml", lambda t: edit.delete_entity(t, "REQ-1"), {"REQ-1": None})
+    result = txn.check()
+    assert {c.code for c in result.conflicts} == {"lock-invalid"}
+    assert {c.case for c in result.conflicts} == {"//t:ctl_test#suite::a", "//t:ctl_test#suite::b"}
+    with pytest.raises(WorkspaceError) as exc:
+        txn.commit()
+    assert exc.value.status == 409 and "REQ-1" in lock_text(ledger)
+    # A lock entry that was invalid before blocks no unrelated save.
+    write(ledger, "req/verification.rrlock", LOCKED + '    "suite::c": REQ-77\n')
+    ws = ledger_ws(ledger)
+    ws.update("REQ-3", {"title": "Cut the heater at 35 C", "satisfies": ["UN-1"]})
+
+
+def test_same_code_variants_are_refused_statically_with_no_evidence_loaded(tmp_path):
+    reqs = LEDGER_REQS.replace('cases: ["suite::a", "suite::b"]', 'cases: ["suite::x"]').replace(
+        "//t:ctl_test", "//t:a_test"
+    )
+    write(tmp_path, "req/model.yaml", "config:\n  variants: [[//t:a_test, //t:b_test]]\n" + reqs)
+    ws = Workspace(root=str(tmp_path), model_paths=["req"])  # the variants have not run yet
+    assert ws.snapshot().attribution.cases == {}
+    err = refused(ws, ws.update, "REQ-2", claim("suite::x", target="//t:b_test"))
+    (conflict,) = err.data["conflicts"]
+    assert conflict["code"] == "same-code-multiple-owners" and conflict["case"] == "//t:b_test#suite::x"
+    assert conflict["owner"] == "REQ-1" and conflict["owner_via"] == "claim"
+    # One entity may claim the same code in each variant.
+    ws.update(
+        "REQ-1",
+        {
+            **claim("suite::x", target="//t:a_test"),
+            "title": "Heat",
+            "verified_by": [
+                {"target": "//t:a_test", "cases": ["suite::x"]},
+                {"target": "//t:b_test", "cases": ["suite::x"]},
+            ],
+        },
+    )
+
+
+def test_an_entity_may_select_a_case_twice_but_never_share_it(ledger):
+    ws = ledger_ws(ledger)
+    ws.update("REQ-2", claim("suite::c", "suite::c*"))  # a redundant glob of its own: a warning, not a conflict
+    assert ws.snapshot().attribution.owner_of(CaseKey("//t:ctl_test", "suite::c")) == "REQ-2"
+
+
+def test_a_move_attribution_would_resolve_elsewhere_is_refused(ledger):
+    # Hybrid attribution: REQ-2 claims suite::t, whose own tag names REQ-3; the claim wins.
+    write(
+        ledger,
+        "req/model.yaml",
+        LEDGER_REQS.replace(
+            "    title: Accept setpoints\n",
+            "    title: Accept setpoints\n    verified_by: [{target: //t:tag_test, cases: ['suite::t']}]\n",
+        ),
+    )
+    write(
+        ledger,
+        "bazel-testlogs/t/tag_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="t"><properties><property name="requirement" value="REQ-3"/>'
+        "</properties></testcase></testsuite></testsuites>",
+    )
+    ws = ledger_ws(ledger)
+    key = CaseKey("//t:tag_test", "suite::t")
+    assert ws.snapshot().attribution.owner_of(key) == "REQ-2"
+    plan = ws.move_case(str(key), "none", dry_run=True)
+    assert [p["code"] for p in plan["problems"]] == ["not-moved"] and "REQ-3" in plan["problems"][0]["message"]
+    err = refused(ws, ws.move_case, str(key), "none")
+    assert "would give //t:tag_test#suite::t to REQ-3" in str(err)
+
+
+def test_a_tag_owned_case_cannot_be_moved_to_none(ledger):
+    write(
+        ledger,
+        "bazel-testlogs/t/tag_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="t"><properties><property name="requirement" value="REQ-3"/>'
+        "</properties></testcase></testsuite></testsuites>",
+    )
+    ws = ledger_ws(ledger)
+    key = CaseKey("//t:tag_test", "suite::t")
+    assert ws.snapshot().attribution.via[key] == "tag"
+    err = refused(ws, ws.move_case, str(key), "none")
+    assert "remove the tag" in str(err)
+
+
+def test_a_claim_taking_a_case_from_its_tag_says_so(ledger):
+    write(
+        ledger,
+        "bazel-testlogs/t/tag_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="t"><properties><property name="requirement" value="REQ-3"/>'
+        "</properties></testcase></testsuite></testsuites>",
+    )
+    ws = ledger_ws(ledger)
+    draft = claim("suite::t", target="//t:tag_test")
+    pre = ws.precheck("REQ-2", draft)
+    assert pre["ok"]  # allowed (the model wins over a tag) ...
+    (notice,) = pre["notices"]  # ... but never silent
+    assert notice["code"] == "takes-from-tag" and notice["case"] == "//t:tag_test#suite::t"
+    assert notice["owner"] == "REQ-3" and notice["to"] == "REQ-2"
+    assert ws.update("REQ-2", draft) == [notice]
+    assert ws.snapshot().attribution.owner_of(CaseKey("//t:tag_test", "suite::t")) == "REQ-2"
+    assert ws.update("REQ-2", {**draft, "title": "Accept setpoints, 5..30 C"}) == []  # its own now
+
+
+def test_a_whole_target_claim_needs_a_reason(ledger):
+    write_testlog(ledger, "//t:smoke_test", [("smoke_test", "passed")])
+    ws = ledger_ws(ledger)
+    whole = {**claim(), "verified_by": [{"target": "//t:smoke_test", "whole": True}]}
+    err = refused(ws, ws.update, "REQ-2", whole)
+    (conflict,) = err.data["conflicts"]
+    assert conflict["code"] == "whole-target-reference" and "reason" in conflict["message"]
+    pre = ws.precheck("REQ-2", whole)
+    assert not pre["ok"] and pre["problems"][0]["code"] == "whole-target-reference"
+    refused(ws, ws.update, "REQ-2", {**claim(), "verified_by": ["//t:smoke_test"]})  # a bare reference too
+    whole["verified_by"][0]["reason"] = "the smoke script reports one result"
+    ws.update("REQ-2", whole)
+    # One already in the model blocks no other edit of its entity.
+    write(
+        ledger,
+        "req/model.yaml",
+        LEDGER_REQS.replace(
+            "    title: Cut the heater\n", "    title: Cut the heater\n    verified_by: [//t:smoke_test]\n"
+        ),
+    )
+    ws = ledger_ws(ledger)
+    ws.update("REQ-3", {"title": "Cut the heater at 35 C", "satisfies": ["UN-1"], "verified_by": ["//t:smoke_test"]})
+
+
+def test_the_unlocked_and_coarse_ledger_states_and_lanes(ledger):
+    write_testlog(ledger, "//t:hil_test", [("x", "passed"), ("y", "passed")])
+    reqs = LEDGER_REQS.replace(
+        "    title: Cut the heater\n",
+        "    title: Cut the heater\n    verified_by: [{target: //t:hil_test, whole: true, reason: one rig run}]\n",
+    )
+    ws = locked_ledger(ledger, LOCKED.replace('    "suite::b": REQ-1\n', ""), reqs)
+    rows = {r["case"]: r for r in ws.cases()["cases"]}
+    assert rows["//t:ctl_test#suite::a"]["locked_to"] == "REQ-1" and rows["//t:ctl_test#suite::b"]["locked_to"] == ""
+    unlocked = [r["case"] for r in ws.cases(state="unlocked")["cases"]]
+    assert unlocked == ["//t:ctl_test#suite::b", "//t:hil_test#suite::x", "//t:hil_test#suite::y"]
+    assert [r["case"] for r in ws.cases(state="coarse")["cases"]] == ["//t:hil_test#suite::x", "//t:hil_test#suite::y"]
+    assert "coarse" not in rows["//t:ctl_test#suite::a"]
+    ws = Workspace(
+        root=str(ledger),
+        model_paths=["req"],
+        evidence_paths=["bazel-testlogs"],
+        lanes={"software": ["//t:ctl_test"], "hitl": ["@//t:hil_test"]},
+    )
+    out = ws.cases(lane="hitl")
+    assert out["lanes"] == ["hitl", "software"]
+    assert [r["case"] for r in out["cases"]] == ["//t:hil_test#suite::x", "//t:hil_test#suite::y"]
+    assert {r["case"]: r["lanes"] for r in ws.cases()["cases"]}["//t:ctl_test#suite::c"] == ["software"]
+    with pytest.raises(WorkspaceError, match="unknown lane"):
+        ws.cases(lane="nightly")
+
+
+def test_the_lock_status_and_updating_the_lock(ledger):
+    ws = locked_ledger(ledger, LOCKED.replace('    "suite::b": REQ-1\n', '    "suite::c": REQ-3\n'))
+    assert ws.snapshot() is ws.snapshot()  # cached while neither the model nor the lock changes
+    status = ws.lock_status()
+    assert status["out_of_date"] and status["added"] == [{"case": "//t:ctl_test#suite::b", "owner": "REQ-1"}]
+    assert status["removed"] == [{"case": "//t:ctl_test#suite::c", "owner": "REQ-3"}]
+    assert entity_payload(ws, "REQ-1")["lock"]["added"] == status["added"]
+    assert entity_payload(ws, "REQ-1")["lock"]["removed"] == []
+    assert not entity_payload(ws, "REQ-2")["lock"]["out_of_date"]
+    before = lock_text(ledger)
+    plan = ws.update_lock(dry_run=True)
+    assert plan["kept"] and not plan["up_to_date"] and lock_text(ledger) == before
+    ws.update_lock()  # removals are kept until confirmed
+    assert '"suite::b": REQ-1' in lock_text(ledger) and '"suite::c": REQ-3' in lock_text(ledger)
+    ws.update_lock(allow_removals=True)
+    assert '"suite::c"' not in lock_text(ledger)
+    assert not ws.lock_status()["out_of_date"] and ws.update_lock(dry_run=True)["up_to_date"]
+    # A quarantine has no owner to lock: refused, nothing written.
+    write(
+        ledger,
+        "req/model.yaml",
+        "config:\n  sets_lock: verification.rrlock\n"
+        + LEDGER_REQS.replace(
+            "  - id: REQ-2\n    title: Accept setpoints\n",
+            "  - id: REQ-2\n    title: Accept setpoints\n    verified_by: [{target: //t:ctl_test, cases: ['suite::a']}]\n",
+        ),
+    )
+    ws = ledger_ws(ledger)
+    before = lock_text(ledger)
+    with pytest.raises(WorkspaceError) as exc:
+        ws.update_lock(allow_removals=True)
+    assert exc.value.status == 409 and lock_text(ledger) == before
+    # No lock configured: nothing to update, nothing to report.
+    write(ledger, "req/model.yaml", LEDGER_REQS)
+    ws = ledger_ws(ledger)
+    assert ws.lock_status() == {} and entity_payload(ws, "REQ-1")["lock"] == {}
+    with pytest.raises(WorkspaceError):
+        ws.update_lock()
+
+
+def test_a_quarantine_that_would_name_another_entity_is_refused(tmp_path):
+    # suite::x of //t:a_test and //t:b_test is one source file: a_test's (owned
+    # by its tag, REQ-1) and b_test's (claimed by REQ-2) are quarantined already.
+    # REQ-3 claiming a_test's is no static pair (no other claim selects it),
+    # but it would make the quarantine name REQ-3: a new conflict.
+    reqs = LEDGER_REQS.replace(
+        '    verified_by:\n      - target: //t:ctl_test\n        cases: ["suite::a", "suite::b"]\n', ""
+    )
+    reqs = reqs.replace(
+        "    title: Accept setpoints\n",
+        "    title: Accept setpoints\n    verified_by: [{target: //t:b_test, cases: ['suite::x']}]\n",
+    )
+    write(tmp_path, "req/model.yaml", reqs)
+    write(
+        tmp_path,
+        "bazel-testlogs/t/a_test/test.xml",
+        '<?xml version="1.0"?><testsuites><testsuite name="s">'
+        '<testcase classname="suite" name="x" file="tests/x.py"><properties>'
+        '<property name="requirement" value="REQ-1"/></properties></testcase></testsuite></testsuites>',
+    )
+    write_testlog(tmp_path, "//t:b_test", [("x", "passed", 'file="tests/x.py"')])
+    ws = ledger_ws(tmp_path)
+    key = CaseKey("//t:a_test", "suite::x")
+    assert ws.snapshot().attribution.quarantine_of(key).entities == ("REQ-1",)
+    ws.update("REQ-2", {**claim("suite::x", target="//t:b_test"), "title": "Accept 5..30 C"})  # the same quarantine
+    err = refused(ws, ws.update, "REQ-3", {**claim("suite::x", target="//t:a_test"), "title": "Cut"})
+    (conflict,) = err.data["conflicts"]
+    assert conflict["code"] == "same-code-multiple-owners" and conflict["case"] == str(key)
+    assert conflict["entities"] == ["REQ-3"]
+
+
+def race(*saves):
+    """Run ``(workspace, entity id)`` saves of suite::c at once; their outcomes ("ok" or the status)."""
+    import threading
+
+    barrier = threading.Barrier(len(saves))
+    results = []
+
+    def save(ws, eid):
+        barrier.wait()
+        try:
+            ws.update(eid, {**claim("suite::c"), "title": eid})
+            results.append("ok")
+        except WorkspaceError as exc:
+            results.append(exc.status)
+
+    threads = [threading.Thread(target=save, args=s) for s in saves]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return sorted(results, key=str)
+
+
+def test_concurrent_saves_in_one_process_give_a_case_one_owner(ledger):
+    ws = ledger_ws(ledger)
+    ws.snapshot()
+    assert race((ws, "REQ-2"), (ws, "REQ-3")) == [409, "ok"]
+    assert "shared-case" not in errors(ledger_ws(ledger))
+
+
+TWO_FILES = "requirements:\n  - id: REQ-4\n    title: four\n    satisfies: [UN-1]\n"
+
+
+def test_two_editors_on_one_checkout_cannot_both_pass_the_guard(ledger):
+    # Two rr serve processes (two Workspaces) prepare their saves before either writes.
+    w1, w2 = ledger_ws(ledger), ledger_ws(ledger)
+    t1 = w1._update_txn("REQ-2", {**claim("suite::c"), "title": "x"})
+    t2 = w2._update_txn("REQ-3", {**claim("suite::c"), "title": "y"})
+    t1.commit()
+    with pytest.raises(WorkspaceError) as exc:  # one file: the second would overwrite the first
+        t2.commit()
+    assert exc.value.status == 409 and "changed on disk" in str(exc.value)
+    assert exc.value.data["conflicts"][0]["code"] == "changed-on-disk"
+    assert ledger_ws(ledger).model.get("REQ-2").verified_by  # the first save survived
+    # Two files: each read file is unchanged, but the guard reruns over the disk as it is now.
+    write(ledger, "req/model.yaml", LEDGER_REQS)
+    write(ledger, "req/more.yaml", TWO_FILES)
+    w1, w2 = ledger_ws(ledger), ledger_ws(ledger)
+    w1.snapshot(), w2.snapshot()
+    t1 = w1._update_txn("REQ-2", {**claim("suite::c"), "title": "x"})
+    t2 = w2._update_txn("REQ-4", {**claim("suite::c"), "title": "y"})
+    assert t2.check().ok  # against what w2 read
+    t1.commit()
+    err = refused(w2, t2.commit)
+    assert err.data["conflicts"][0]["code"] == "shared-case" and err.data["conflicts"][0]["owner"] == "REQ-2"
+    assert errors(ledger_ws(ledger)) == []
+
+
+def test_two_editors_racing_never_give_a_case_two_owners(ledger):
+    for _ in range(8):
+        write(ledger, "req/model.yaml", LEDGER_REQS)
+        write(ledger, "req/more.yaml", TWO_FILES)
+        editors = [ledger_ws(ledger), ledger_ws(ledger)]
+        for w in editors:
+            w.snapshot()
+        assert race((editors[0], "REQ-2"), (editors[1], "REQ-4")) == [409, "ok"]
+        assert "shared-case" not in errors(ledger_ws(ledger))

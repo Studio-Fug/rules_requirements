@@ -33,7 +33,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: Config, Level, parse_config
 
 .. automodule:: rules_requirements.validate
-   :members: validate, Issue, ValidationError
+   :members: validate, Issue, ValidationError, claim_conflicts, overlapping_claims, ClaimConflict
 
 .. automodule:: rules_requirements.case_selectors
    :members: matches, witness, overlaps, tokens, check, is_literal, literal_path, escape, BadSelector
@@ -97,7 +97,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: check_report, load_report, summarize, ReportError, AmbiguousReportError
 
 .. automodule:: rules_requirements.graph
-   :members: Node, Edge, build, to_dot, to_mermaid, to_json, to_svg, layout
+   :members: Node, Edge, build, cases, to_dot, to_mermaid, to_json, to_svg, layout
 ```
 
 ## Hooks
@@ -141,7 +141,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: EntityChange, diff_models, summarize, render_text
 
 .. automodule:: rules_requirements.server.workspace
-   :members: Workspace, WorkspaceError, entity_payload
+   :members: Workspace, WorkspaceError, Conflict, Check, entity_payload
 
 .. automodule:: rules_requirements.server.app
    :members: Api, serve
@@ -153,5 +153,8 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: LLM, ClaudeLLM, LLMError, LLMUnavailable, default_llm
 
 .. automodule:: rules_requirements.agents.workflows
-   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant
+   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant, assign_cases, linked_tests
+
+.. automodule:: rules_requirements.agents.worksheet
+   :members: propose, record, resolve
 ```
