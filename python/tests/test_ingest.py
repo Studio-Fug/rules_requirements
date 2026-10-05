@@ -457,6 +457,7 @@ def test_declared_is_a_field_and_requirements_a_deprecated_alias():
     tagged = TestCase("n", "passed", declared=("R-1",))
     with pytest.warns(DeprecationWarning):
         assert dataclasses.replace(tagged, requirements=["R-9"]).declared == ("R-9",)
+
     # Only dataclasses' own replace() may pass a case's declared beside the
     # alias: a user function that looks like it (named replace / _replace,
     # holding the source case as a local obj / self) is two sets of ids.
