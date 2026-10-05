@@ -150,7 +150,7 @@ jobs:
           python -m venv /tmp/wheel && /tmp/wheel/bin/pip install dist/*.whl
           /tmp/wheel/bin/rr validate tests/integration/model.yaml
           /tmp/wheel/bin/python -c "import rules_requirements._vendor.yaml, rules_requirements.hooks.pytest_plugin"
-          /tmp/wheel/bin/rr --version | grep -q "0.2.1"
+          /tmp/wheel/bin/rr --version | grep -q "0.3.0"
           XML_OUTPUT_FILE=/tmp/c.xml /tmp/wheel/bin/rr case --name x --requirement REQ-1
           grep -q 'value="REQ-1"' /tmp/c.xml
           /tmp/wheel/bin/rr cases --evidence python/tests/fixtures/migrate/pyrepo/evidence

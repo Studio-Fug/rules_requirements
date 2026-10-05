@@ -5,6 +5,62 @@ behaviour — is the [release notes](docs/release-notes.md) (published at
 <https://studio-fug.github.io/rules_requirements/release-notes.html>); where
 the two differ, the release notes are right and this file is the bug.
 
+## 0.3.0 (2026-10-05)
+
+One owner per test case: a test case verifies at most one requirement, a set
+of test cases may together verify one, and the tool makes it impossible for
+one case to verify two. Semantic release: verdicts change on purpose.
+[Details](docs/release-notes.md#030-2026-10-05) ·
+[upgrade guide](docs/guides/migrating-to-per-case.md).
+
+### Added
+
+- Claims in the model: `verified_by` / `validated_by` items
+  `{target, cases: [selector]}` or `{target, whole: true, reason}`, on
+  requirements, mitigations and user needs alike; `config.attribution`
+  (`hybrid` | `model`), `main_repo`, `sets_lock`, `flaky`,
+  `set_consistency`, `variants`.
+- `rr validate`: `shared-case` with an example case, `same-code-multiple-owners`,
+  `bad-selector`, `bad-target`, lock checks, `--known-targets`; hard errors
+  no configuration turns off.
+- Attribution (`attribution.attribute()`, the one place a case gets an
+  owner), verification sets, and the INVALID and INCOMPLETE statuses.
+- The verification-set lock (`verification.rrlock`; `rr sets lock|check|show`).
+- Report v2 (`cases`, `attribution`, sets and members); `rr report` exit 3,
+  `--on-attribution-error`, lanes; `rr attribution`; `rr check-report`;
+  `rr migrate apply --stage model`; `rr graph --cases`.
+- Bazel: `rr_model(lock)`, `rr_report(check, lane, lane_targets,
+  on_attribution_error)`, `rr_sets_lock_test`.
+- Web editor: the 409 save guard, live precheck, case ledger, lock update;
+  the *Assign test cases* agent workflow (proposals only).
+- Docs: "One test case, one requirement", the 0.2 → 0.3 migration path, the
+  standards rationale. The thermostat example runs in model mode with a lock.
+
+### Changed
+
+- A case naming two ids is quarantined: it counts for nobody, every id it
+  names reads INVALID, `rr report` exits 3 and `rr_report` fails the build.
+  Give each test one id.
+- Two entities naming one target is a `shared-case` model error. Claim the
+  cases each owns.
+- Retries are merged per case (a pass after a failure is flaky:
+  UNDER-VERIFIED by default); suite-level ids are no longer inherited;
+  Bazel's synthetic results are `[target]`, selected only by `whole: true`.
+- JSON report schema `rules_requirements/report/v2`; new statuses and gaps;
+  pytest records only the nearest scope's id; `JUnitWriter.cases` is
+  read-only; `rr_report` adds `<name>_check_test` with a JSON report.
+- `attribution: hybrid` is the default, so single-id tags keep working.
+
+### Removed
+
+- Nothing yet.
+
+### Deprecated
+
+- Multi-id authoring in every hook (an error in 0.4), the 0.2 claim forms
+  (`bare-target-reference`), `attribution: hybrid`, `TestCase.requirements`,
+  `Evidence.for_id`, `untraced-failure`, the report's `evidence[]`.
+
 ## 0.2.1 (2026-10-04)
 
 Unblocks applying a worksheet in Bazel projects.

@@ -22,7 +22,7 @@ paths resolve against the directory Bazel was invoked from.
 | `wrap` | Run a test binary and convert its output to traceability JUnit. | {doc}`../guides/hooks` |
 | `case` | Append one test case to a JUnit file (shell and ad-hoc harnesses). | {doc}`../guides/hooks` |
 
-`rr --version` prints the installed version (`rr 0.2.1`).
+`rr --version` prints the installed version (`rr 0.3.0`).
 
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds, or

@@ -3,6 +3,242 @@
 This page is the detailed record of each release. `CHANGELOG.md` at the
 repository root summarises each version in a few lines and links here.
 
+## 0.3.0 (2026-10-05)
+
+**One owner per test case.** A test case verifies at most one requirement; a
+set of test cases may together verify one; and the tool is built so that one
+test case *cannot* verify two ({doc}`one-test-case-one-requirement`).
+Ownership is decided in one function, `attribution.attribute()`, from the
+model's claims and the evidence's declared tags; ambiguity quarantines the
+case (it owns nothing, every entity it names reads INVALID, `rr report` exits
+3); and `rr check-report` re-proves the partition from a published JSON
+report alone.
+
+This is the semantic release that 0.2 prepared: verdicts change, on purpose.
+Projects that followed {doc}`guides/migrating-to-per-case` on 0.2 (single-id
+tags, decided owners) bump the pin, fix the targets two requirements still
+share, and keep the default `attribution: hybrid`; the guide's second half
+then moves them to `attribution: model` with a lock. The
+[thermostat example](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
+shows the end state.
+
+### Added
+
+- **Claims in the model** ({ref}`claims`). `verified_by` on requirements and
+  mitigations, and the new `validated_by` on user needs, take items
+  `{target, cases: [selector, ...]}` or `{target, whole: true, reason}`, with
+  an optional `level`. Selectors match whole case paths, with `*` as the only
+  wildcard (`\*` and `\\` escape; `?`, `[` and `]` are literal, so pytest ids
+  work). Labels are compared in one spelling (`@@//p:n`, `@//p:n`,
+  `@<config.main_repo>//p:n`, `//p`, canonical `+`/`~` module names).
+  `verified_by` on mitigations and `validated_by` on user needs share the
+  requirements' claim namespace.
+- **`config` keys** `attribution` (`hybrid` | `model`), `main_repo`,
+  `sets_lock`, `flaky` (`accept` | `flag` | `under-verify` | `fail`),
+  `set_consistency` (`off` | `warn` | `enforce`) and `variants` ({ref}`config-reference`).
+- **Validation of claims** ({ref}`rules`): `shared-case` (two entities can
+  select one case; decided exactly, with an example case path), the same
+  check across a `variants` group (`same-code-multiple-owners`),
+  `bad-selector`, `bad-target`, `lock-invalid`, `lock-owner-changed`, and
+  with `rr validate --known-targets FILE`, `unknown-target`. These are hard
+  errors that no `config.rules` entry can turn off. New configurable rules:
+  `bare-target-reference`, `whole-target-reference`, `coarse-claim`,
+  `glob-selector`, `redundant-selector`, `tag-mismatch`, `unclaimed-tag`,
+  `suite-level-requirement`, `duplicate-case`, `level-mismatch`,
+  `same-path-multiple-owners`, `parent-with-claims`,
+  `multi-verifies-annotation`, `lock-stale`. Under `$XML_OUTPUT_FILE` (or
+  `--junit`), `rr validate` writes one JUnit case per check family, so
+  `rr_model`'s `<name>_test` is per-case evidence.
+- **Attribution** ({py:mod}`rules_requirements.attribution`): the owner map,
+  quarantine codes `multi-tag`, `attribution-conflict` and
+  `same-code-multiple-owners` (the same source file and case path, or a
+  `variants` group, owned twice), and `check_invariant()`. Retries
+  (`test_attempts/`), repeated runs, shards and several evidence roots of one
+  case merge into one result before attribution.
+- **Verification sets** ({ref}`evidence`): an entity's verdict is computed
+  over every case it owns or expects. Member states `missing`, `not-run`,
+  `moved` and `quarantined` join the case results, and verdicts gain `basis`
+  (`own` / `derived` / `own+derived`) and `derived_from`.
+- **New statuses** <span class="rr-status">INVALID</span> (a quarantined case
+  names the entity; rolls up like FAILED) and
+  <span class="rr-status">INCOMPLETE</span> (a member missing, not run,
+  skipped or moved; rolls up like PARTIAL), with the counts
+  `requirements_invalid` and `requirements_incomplete`.
+- **The verification-set lock** ({ref}`verification-lock`):
+  `verification.rrlock` maps each case to one id and pins the sets; it adds
+  expected members and never creates ownership.
+  `rr sets lock [--write] [--allow-removals]`, `rr sets check`,
+  `rr sets show ID`; {py:mod}`rules_requirements.lock`.
+- **Report v2** ({doc}`guides/outputs`): schema
+  `rules_requirements/report/v2` (`schema/report.v2.schema.json`); the inverse
+  matrix `cases` (every case with one owner or `null`), `attribution` (mode,
+  lock, lane, per-target counts, quarantines, issues, granularity), each
+  entity's `set` and `members`; Markdown and HTML gain a quarantine banner,
+  set columns and member tables, a "Case attribution" section and the
+  INVALID/INCOMPLETE badges. New gaps: `invalid`, `multi-tag`,
+  `attribution-conflict`, `same-code-multiple-owners`, `incomplete`,
+  `missing-case`, `flaky`, `mixed-builds`, `unlocked-member`,
+  `lock-owner-changed`, `lock-stale`, `unpinned-sets`, `unclaimed-tag`,
+  `tag-mismatch`, `duplicate-case`, `coarse-claim`, `ambiguous-source`,
+  `unattributed-failure`.
+- **CLI.** `rr report --on-attribution-error {fail,warn}`, `--lane NAME`,
+  `--lane-targets FILE`, `--sets-lock PATH`, `--no-lock`, and exit `3`;
+  `rr attribution [--check] [--suggest] [--unowned]`; `rr sets`;
+  `rr check-report REPORT.json`; `rr migrate apply --stage model
+  [--compress]`; `rr validate --known-targets FILE --sets-lock PATH --junit
+  PATH`; `rr graph --cases`; `rr serve --lane-targets NAME=FILE`
+  ({doc}`reference/cli`).
+- **Bazel** ({doc}`guides/bazel`): `rr_model(lock = ...)`,
+  `rr_report(check, lane, lane_targets, on_attribution_error)` with
+  `<name>_check_test` (`rr check-report`), and `rr_sets_lock_test` with
+  `.update`.
+- **Web editor and agents** ({doc}`guides/web-editor`): the save guard
+  refuses with 409 any edit that would give a case two owners (or introduce
+  a bad selector or target, or a lock owner change), a live precheck, the
+  verification-set widget, the case ledger (`#/cases`) with checked
+  **Move…**, **Update lock…**, and the *Assign test cases* agent workflow,
+  which only proposes owners into the attribution worksheet.
+- **Ingest**: `TestCase.declared`, `scope` and `synthetic`; `[rr:ID]` name
+  tags; nested `<testcase>`s; `rr.file`, `file` and `line`; a records file's
+  document-level `target:` and scalar `requirement`.
+- **Docs**: {doc}`one-test-case-one-requirement`; the second half of
+  {doc}`guides/migrating-to-per-case`; the standards page's
+  {ref}`standards-one-owner`. The thermostat example runs in model mode with
+  a lock, a records target and one id per test case.
+
+### Changed
+
+These are the intended semantic breaks. Each says what a consumer must do.
+
+**Model**
+
+- **Two entities naming one target is now `shared-case`**, a hard error
+  (`rr validate` and `<model>_test` fail, `rr report` exits 2, the editor
+  refuses the save). *Do:* replace both whole-target references with the
+  cases each entity owns. `rr migrate plan` on 0.2 lists every such pair, and
+  the pin-bump change must carry the fix.
+- **0.2 claim forms still parse**: a bare label, `{target}` or
+  `{target, level}` is a whole-target claim with a `bare-target-reference`
+  warning. *Do:* nothing now; convert them to `cases` (or `whole: true` with
+  a `reason`) before 0.4, where the warning becomes an error.
+- **A 0.3 model fails loudly on 0.2.** The new keys (`cases`, `whole`,
+  `reason`, `validated_by`, `verified_by` on mitigations, the six `config`
+  keys, the new rule names) are unknown fields or keys to 0.2. *Do:* bump
+  every consumer that reads the model (CI, the editor, sibling repositories)
+  together.
+
+**Evidence**
+
+- **A case naming two ids from any producer is quarantined**: it counts for
+  no requirement, every id it names reads INVALID, and `rr report` exits 3.
+  Re-ingesting archived 0.1/0.2 evidence shows its multi-counts as
+  quarantines; there is deliberately no "legacy many-to-many" switch. *Do:*
+  give each test one id (split tests that verify two things;
+  `rr migrate apply --stage tags` rewrites Python tags). Only for a report
+  whose quarantines are intentional, `--on-attribution-error=warn` keeps the
+  exit status; it never changes a verdict.
+- **Old JUnit still parses**: repeated or comma-separated `requirement`
+  properties and the googletest `requirements` property are read as declared
+  ids. *Do:* nothing.
+- **Retries are merged, not double-counted.** `test_attempts/attempt_N.xml`
+  and the final `test.xml` are one result per case: the final attempt
+  decides, and a pass after a failed attempt is flaky — UNDER-VERIFIED under
+  the default `config.flaky: under-verify`. *Do:* pass the whole testlogs
+  directory (not a `**/test.xml` glob) so retries are seen, and choose
+  `config.flaky`.
+- **Suite-level requirement properties are no longer inherited** by the
+  suite's cases (`suite-level-requirement` warning). *Do:* declare the id on
+  each case, or claim the cases in the model.
+- **Bazel's synthetic results are recognised** (the generated `test.xml` of a
+  target that writes no JUnit): its case path is `[target]`, and only a
+  `whole` claim selects it. *Do:* claim such targets with `whole: true` and a
+  `reason`.
+
+**Python API**
+
+- `TestCase.requirements` is a read/write alias of `declared`, with a
+  `DeprecationWarning`. *Do:* read and write `declared`.
+- `build_matrix(model, evidence, current_build, references)` keeps its
+  signature and gains keyword-only `lock=None`; `Matrix.attribution` is new.
+  *Do:* nothing.
+- `Verdict` gains `members`, `basis` and `derived_from`; `Verdict.evidence`
+  is kept as a view of the owned members. *Do:* read `members` for new code.
+- `Evidence.for_id` is deprecated (it returns cases *declaring* an id, and
+  no verdict uses it); `Evidence.target_status` is kept but unused. *Do:* use
+  `matrix.attribution.members_of(entity_id)`.
+- `JUnitWriter.cases` is a read-only tuple, and a recorded case's
+  `requirements` a read-only alias: code that re-attributed a recorded case
+  now raises `AttributeError`. *Do:* record a new case (or use `CheckPlan`).
+
+**Statuses, gaps and reports**
+
+- INCOMPLETE and INVALID are new statuses. *Do:* handle them wherever you
+  switch on a status: CI step summaries, dashboards, site generators.
+- `unattributed-failure` replaces `untraced-failure`, which is still emitted
+  alongside it in 0.3.x. *Do:* move readers to the new kind.
+- The JSON report's `schema` is `rules_requirements/report/v2`. `evidence[]`
+  is kept for 0.3.x and every 0.2 summary key is still written (new ones are
+  added); `kind: "target"` evidence
+  entries are gone (a whole-target claim lists the target's cases). A case is
+  named by its key `<target>#<path>` in `unknown_evidence` and the
+  `unknown-id` gap, and `summary.test_cases` counts case keys. *Do:* check the
+  schema string, and read `cases` and each entity's `members`.
+- **Exit codes**: `0`, `1` and `2` are unchanged; `3` is new (a quarantine).
+  `--fail-on failed` counts INVALID, and `--fail-on unverified` counts
+  INCOMPLETE. *Do:* make CI distinguish `3` if it treated every non-zero
+  status alike.
+
+**Hooks**
+
+- googletest records the property `requirement` (0.2: `requirements`);
+  ingest reads both. Rust trace lines carry a single `requirement`; the list
+  form is still read, and a list naming more than one id is quarantined.
+  *Do:* nothing, unless you parse these files yourself.
+- pytest writes only the nearest scope's id (0.2 accumulated the ids of every
+  scope). *Do:* check that a function marker under a module `pytestmark`
+  names the id you mean.
+- pytest's RR-E102 guard fails a test that records a raw `requirement`
+  property past the single-id API. *Do:* use `@pytest.mark.rr`.
+
+**Modes and Bazel**
+
+- `config.attribution` defaults to `hybrid`: an existing tag-based project
+  keeps its attribution, except for multi-id tags and shared targets (above).
+  *Do:* nothing to start; move to `model` with the migration guide.
+- `rr_report` fails the build on a quarantine (`on_attribution_error =
+  "fail"`, the default), and builds `<name>_check_test` whenever it builds a
+  JSON report (`check = False` opts out). The macros' other arguments are
+  unchanged. *Do:* fix the quarantine; use `"warn"` only for intentional
+  fixtures.
+
+### Removed
+
+Nothing yet. 0.4.0 removes the `TestCase.requirements` alias, the report's
+`evidence[]` view and the `untraced-failure` gap.
+
+### Deprecated
+
+- Multi-id authoring in every hook: pytest markers, `@rr.verifies`,
+  `JUnitWriter` lists, `RR_VERIFIES` and `rr::verifies!` with several ids
+  (warn now, quarantined in the report; a collection, import or compile
+  error in 0.4).
+- The 0.2 claim forms (`bare-target-reference`, an error by default in 0.4)
+  and multi-id *verifies* source annotations (`multi-verifies-annotation`,
+  likewise).
+- `attribution: hybrid` (0.4 defaults to `model`, and hybrid warns
+  `hybrid-mode`).
+- `TestCase.requirements`, `Evidence.for_id`, the `untraced-failure` gap and
+  the report's `evidence[]` view.
+
+Still deferred: `rr migrate plan --agent` (agent proposals are made in the
+web editor's *Assign test cases* workflow, into the worksheet).
+
+### Upgrade guide
+
+{doc}`guides/migrating-to-per-case`: on 0.2, plan, decide, apply the tags
+and verify them; then pin 0.3 in hybrid mode, `rr migrate apply --stage
+model`, and lock.
+
 ## 0.2.1 (2026-10-04)
 
 A patch release for projects migrating to one requirement per test case

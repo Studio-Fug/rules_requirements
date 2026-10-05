@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rules-requirements"
-version = "0.2.1"
+version = "0.3.0"
 description = "Requirements-driven development and traceability: user needs, requirements, risks, mitigations, tests."
 readme = "README.md"
 license = "AGPL-3.0-or-later"
