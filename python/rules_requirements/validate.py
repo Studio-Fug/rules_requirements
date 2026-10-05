@@ -122,6 +122,7 @@ class _Validator:
             self.issues.append(Issue("error", "shape", err))
         for msg in self.m.unknown_fields:
             self.rule("unknown-field", msg, None)
+        self.check_unique_ids()
         for ent in self.m.entities():
             self.check_common(ent)
         for req in self.m.requirements.values():
@@ -143,6 +144,18 @@ class _Validator:
         self.check_lock()
 
     # --- per-kind checks -----------------------------------------------------
+
+    def check_unique_ids(self) -> None:
+        """One id, one entity: an id in two sections (only a model built in
+        Python can have one; the loader rejects it) would merge two
+        entities' verification sets. Always an error, not configurable."""
+        sections: dict[str, list[Entity]] = {}
+        for ent in self.m.entities():
+            sections.setdefault(ent.id, []).append(ent)
+        for eid, ents in sorted(sections.items(), key=lambda kv: natural_key(kv[0])):
+            if len(ents) > 1:
+                kinds = " and ".join(f"a {e.kind.replace('_', ' ')}" for e in ents)
+                self.add("duplicate-id", f"{eid} is defined as {kinds}; an id names exactly one entity", ents[-1])
 
     def check_common(self, ent: Entity) -> None:
         if not self.c.id_regex(ent.kind).match(ent.id):

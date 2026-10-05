@@ -634,6 +634,13 @@ class _Attributor:
             for e in sorted(model.section(kind).values(), key=lambda e: natural_key(e.id))
         ]
         self.verifiable = set(self.entities)
+        ids = [e.id for e in model.entities()]
+        if len(ids) != len(set(ids)):
+            twice = sorted({i for i in ids if ids.count(i) > 1}, key=natural_key)
+            # Two entities under one id would share one verification set.
+            raise ValueError(
+                f"cannot attribute: {', '.join(twice)} names entities in two sections (validate(): duplicate-id)"
+            )
         self.issues: list[AttributionIssue] = []
         self.cases: dict[CaseKey, CaseResult] = {}
         self.targets: dict[str, TargetRun] = {}

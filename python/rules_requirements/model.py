@@ -436,7 +436,15 @@ class Model:
         return sorted(mods)
 
     def with_entity(self, entity: Entity) -> Model:
-        """A copy of the model with ``entity`` added or replaced."""
+        """A copy of the model with ``entity`` added or replaced (in its own
+        section). Raises ValueError when its id names an entity of another
+        kind: one id names exactly one entity."""
+        other = self.get(entity.id)
+        if other is not None and other.kind != entity.kind:
+            raise ValueError(
+                f"{entity.id} is already a {other.kind.replace('_', ' ')}; it cannot also be a "
+                f"{entity.kind.replace('_', ' ')} (remove it first: without_entity)"
+            )
         section = dict(self.section(entity.kind))
         section[entity.id] = entity
         return replace(self, **{cfg.SECTIONS[entity.kind]: section})  # type: ignore[arg-type]

@@ -348,6 +348,7 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 | ---- | ----------- |
 | `shape` | A document or entity is malformed: not a mapping, a missing `id`/`title`, a section that is not a list, a duplicate id, a malformed note, a claim item without a `target`, an invalid `config:` value, an unreadable file. |
 | `bad-id` | An id does not match its kind's pattern. |
+| `duplicate-id` | One id names entities in two sections (a model built in Python; the loader reports a duplicate id as `shape`): two entities would share one verification set. |
 | `bad-status` | `status` is not one of the allowed values. |
 | `dangling-reference` | A reference names an id that does not exist. |
 | `bad-reference` | A reference names an entity of the wrong kind, or a requirement refines itself. |

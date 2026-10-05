@@ -1036,6 +1036,41 @@ def test_P29_python_api_cannot_store_an_owner(tmp_path):
     assert owners(build_matrix(model_at(tmp_path), hand_built).attribution) == {"//a:t#c::t": "REQ-1"}
 
 
+def test_P29_one_id_in_two_sections_is_refused(tmp_path):
+    """A requirement X-1 and a mitigation X-1 would share one verification set
+    (the requirement's verdict overwritten): validate() errors, attribute()
+    refuses, and Model.with_entity cannot build it."""
+    config = '{id_pattern: "(?:{prefix}|X)-\\\\d+"}'
+    reqs = "  - {id: X-1, title: req, satisfies: [UN-1], verified_by: [{target: //p:t, cases: ['c::a']}]}\n"
+    extra = (
+        "risks: [{id: RISK-1, title: k, severity: low, likelihood: rare}]\n"
+        "mitigations: [{id: MIT-1, title: m, mitigates: [RISK-1], implemented_by: [X-1]}]\n"
+    )
+    model = model_at(tmp_path, reqs, config=config, extra=extra)
+    assert not [i for i in validate(model) if i.severity == "error"]
+    mitigation = Mitigation(
+        "X-1",
+        "mit",
+        mitigates=("RISK-1",),
+        implemented_by=("X-1",),
+        verified_by=(VerifiedBy("//p:t", cases=("c::b",)),),
+    )
+    with pytest.raises(ValueError, match="X-1 is already a requirement; it cannot also be a mitigation"):
+        model.with_entity(mitigation)
+    both = dataclasses.replace(model, mitigations={**model.mitigations, "X-1": mitigation})
+    (dup,) = static(both, "duplicate-id")
+    assert dup.severity == "error" and "X-1 is defined as a requirement and a mitigation" in dup.message
+    ev = evidence(tc("a"), tc("b", "failed"))
+    for call in (lambda: attribute(both, ev), lambda: build_matrix(both, ev)):
+        with pytest.raises(ValueError, match="X-1 names entities in two sections"):
+            call()
+    # Replacing an entity in its own section is still fine.
+    assert (
+        model.with_entity(dataclasses.replace(model.requirements["X-1"], title="new")).requirements["X-1"].title
+        == "new"
+    )
+
+
 def _trace_reads(name):
     """Where trace.py touches ``name`` (an attribute or a name), except the
     model's own ``requirements`` section."""
