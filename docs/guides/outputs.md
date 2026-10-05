@@ -135,6 +135,7 @@ straight to a row.
 $ rr graph --model requirements/ --format mermaid          # to stdout
 $ rr graph --model requirements/ --format svg --evidence bazel-testlogs --out trace.svg
 $ rr graph --model requirements/ --format dot --methods | dot -Tpng -o trace.png
+$ rr graph --model requirements/ --format svg --evidence bazel-testlogs --cases --out cases.svg
 ```
 
 | Format | Content |
@@ -147,7 +148,10 @@ $ rr graph --model requirements/ --format dot --methods | dot -Tpng -o trace.png
 Edges are `satisfies`, `refines` and `method` (dashed or dotted), `mitigates`
 and `implemented_by`. `--methods` adds test methods and `method` edges (the SVG
 layout draws only the four main columns). With `--evidence`, nodes are coloured
-by status. The same graph, coloured from the example's golden report:
+by status. `--cases` (which needs `--evidence`) adds a node for every owned test
+case, coloured by its result, with exactly one `verifies` edge into it: from the
+one entity attribution gave it to. A test case verifies at most one requirement,
+so no case node has two; unowned and quarantined cases are left out. The same graph, coloured from the example's golden report:
 
 ```{raw} html
 <div class="rr-graph-wrap">

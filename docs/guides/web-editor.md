@@ -53,12 +53,14 @@ only entity of a one-object file removes the file unless other documents
 save — a form, a rename, a note, a finding applied — the editor builds the
 model the save would write and runs the same checks as `rr validate` and
 `rr report` over it: the `shared-case` and `same-code-multiple-owners`
-witnesses of the claims, the edited entity's selectors and targets
-(`bad-selector`, `bad-target`), the verification-set lock
-(`lock-owner-changed`), and attribution over the loaded evidence (a new
-`attribution-conflict`, or one source file owned twice). A save that would
-introduce any of them is refused with **409**, naming the case and its owner
-today:
+witnesses of the claims (the very pairs `rr validate` reports, also before the
+targets have run), the edited entity's selectors and targets (`bad-selector`,
+`bad-target`) and whole-target claims (`whole-target-reference`: one needs a
+reason), the verification-set lock (`lock-owner-changed`, and `lock-invalid`
+for an entry whose owner the save would remove), and attribution over the
+loaded evidence (a new `attribution-conflict`, or one source file owned twice).
+A save that would introduce any of them is refused with **409**, naming the
+case and its owner today:
 
 ```text
 this would make //web:clocksync_test#clocksync::bestSample keeps the min-RTT sample
@@ -68,13 +70,23 @@ most one requirement
 
 Only problems the edit introduces count, so a conflict already in the model
 never blocks an unrelated edit (it is still a validation error). None of these
-checks can be configured off.
+checks can be configured off. Renaming an entity renames its lock entries in
+the same write; deleting one drops them (the response lists the cases).
+
+Saves are checked and written under an advisory lock on the checkout, after
+making sure no file the save read changed on disk meanwhile, so two editors on
+one checkout (two `rr serve` processes) cannot both pass the checks with edits
+that together give a case two owners: the second is refused with a 409 and
+reloads. In hybrid mode a claim may take a case its own tag gives to another
+entity (the model wins); the pre-check and the save say so (`takes-from-tag`)
+instead of changing the owner silently.
 
 The form's **verification set** widget (validation set, for a user need) edits
 `verified_by` / `validated_by` one target per row: *Cases* with one selector
 per line and a checklist of the target's observed cases — a case another
 entity owns is disabled and labelled with its owner — or *Whole target*, with
-the reason the target cannot be claimed per case. While you type, the draft is
+the reason the target cannot be claimed per case (required: Save stays disabled
+without one). While you type, the draft is
 pre-checked (`POST /api/entities/{id}/precheck`): problems show above the Save
 button and disable it, each selector shows how many cases it matches, and the
 set the entity would get is summarised. An item you do not touch is written
@@ -83,16 +95,28 @@ back exactly as it was.
 **Case ledger.** `#/cases` lists every test case of the loaded evidence with its
 one owner (or none), how it got it (`model`, or `tag` in hybrid mode), its
 result, the entities whose claims select it, its lock entry, and its
-quarantine — filterable by owned, unowned, quarantined and (with a lock)
-not locked. Owners are read from the attribution, never derived from tags or
-targets in the browser. **Move…** (or **Assign…**) gives a case to another
+quarantine — filterable by owned, unowned, quarantined, (with a lock) not
+locked, coarse (selected by a whole-target claim of a target that reports
+per-case results) and, with `rr serve --lane-targets NAME=FILE` (repeatable;
+one label per line, as `rr report --lane-targets` reads it), by lane. A
+quarantined case shows no owner: a `multi-tag` case lists the ids its tags
+declare, never as owners. Owners are read from the attribution, never derived
+from tags or targets in the browser. **Move…** (or **Assign…**) gives a case to another
 entity, or to none, only through a model edit: the claims that select it give
 it up (a literal selector is dropped; a glob or whole-target claim is rewritten
 into literal selectors of the other cases it selects, after you confirm), the
 new owner gains a literal selector, a configured lock entry is re-locked in the
 same write, and the result must pass the checks above and give the case to the
 chosen owner. A `multi-tag` case cannot be moved: its own evidence names two
-ids, so fix the test's tag. The overview shows the invariant —
+ids, so fix the test's tag.
+
+**The verification-set lock.** With `config.sets_lock`, an entity page shows a
+banner when the lock is out of date for its set (entries `rr sets lock` would
+add, re-own or remove over the loaded evidence), and the ledger's
+**Update lock…** runs the same logic (`POST /api/lock/update`): a dry run
+first, a quarantine refuses it, and an entry to remove is kept unless you
+confirm its removal. The lock only records owners attribution decided; it never
+decides one. The overview shows the invariant —
 "N test cases · 0 quarantined · each case → ≤1 requirement" — and a banner
 while any case is quarantined.
 
@@ -251,10 +275,11 @@ agents too (send `X-RR-Request: 1` on `POST`/`PUT`/`PATCH`/`DELETE`, and
 | Method and path | Purpose |
 | --------------- | ------- |
 | `GET /api/state` | project, configuration, counts, validation issues, git status, LLM availability |
-| `GET /api/entities?kind=` · `GET /api/entities/{id}` | lists; one entity with verdict, verification set (`members`, `set`, `quarantined`, `basis`, `derived_from`), traces, source references, issues and gaps |
-| `POST /api/entities` · `PUT`/`DELETE /api/entities/{id}` · `POST /api/entities/{id}/rename` | create, update, delete (`?force=1` also removes references), rename; a save that would give a case two owners is a 409 whose body lists `conflicts` (`code`, `message`, `case`, `entities`, `owner`) |
-| `POST /api/entities/{id}/precheck` | dry run of saving a draft (`{data}`; `_new` with `kind` for a create): `ok`, `problems`, the entity's `issues`, and the set it would get |
-| `GET /api/cases?target=&q=&state=` | the case ledger from the attribution (`state`: `owned`, `unowned`, `quarantined`, `unlocked`; `unowned=1` also works) |
+| `GET /api/entities?kind=` · `GET /api/entities/{id}` | lists; one entity with verdict, verification set (`members`, `set`, `quarantined`, `basis`, `derived_from`, and `lock`: what an out-of-date lock would change for it), traces, source references, issues and gaps |
+| `POST /api/entities` · `PUT`/`DELETE /api/entities/{id}` · `POST /api/entities/{id}/rename` | create, update (its `notices`), delete (`?force=1` also removes references; `unlocked` lists the lock entries dropped with it), rename; a save that would give a case two owners is a 409 whose body lists `conflicts` (`code`, `message`, `case`, `entities`, `owner`); a file changed on disk since the save read it is a 409 too (`changed-on-disk`) |
+| `POST /api/entities/{id}/precheck` | dry run of saving a draft (`{data}`; `_new` with `kind` for a create): `ok`, `problems`, `notices` (`takes-from-tag`), the entity's `issues`, and the set it would get |
+| `GET /api/cases?target=&q=&state=&lane=` | the case ledger from the attribution (`state`: `owned`, `unowned`, `quarantined`, `unlocked`, `coarse`; `unowned=1` also works; `lane` with `rr serve --lane-targets`), with the lock's `lock_status` |
+| `GET /api/lock?entity=` · `POST /api/lock/update` | whether the verification-set lock is out of date (for one entity's set); `{allow_removals?, dry_run?}`: `rr sets lock --write` over the loaded evidence |
 | `POST /api/cases/move` | `{case, to, expand?, dry_run?}`: give a case to another owner (or `none`) through a checked model edit |
 | `GET /api/attribution` | mode, lock, per-target counts and owners, quarantines, attribution issues, each entity's set |
 | `POST /api/entities/{id}/notes` · `PATCH`/`DELETE …/notes/{note}` | notes |
