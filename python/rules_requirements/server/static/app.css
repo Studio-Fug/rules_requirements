@@ -2347,6 +2347,10 @@ dialog::backdrop {
   background: var(--fail);
   color: #fff;
 }
+.toast.warn {
+  background: var(--amber);
+  color: #1b1b1b;
+}
 .toast.leaving {
   opacity: 0;
   transform: translateY(6px);

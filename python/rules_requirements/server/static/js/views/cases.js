@@ -2,9 +2,9 @@
 // The case ledger: every test case of the loaded evidence and its one owner
 // (or none), as attribution decided it. Moving a case edits the model.
 
-import { get } from "../api.js";
-import { button, empty, sortableTable } from "../components.js";
-import { add, h, swap } from "../dom.js";
+import { get, post } from "../api.js";
+import { button, empty, openDialog, reportError, sortableTable, toast } from "../components.js";
+import { add, h, plural, swap } from "../dom.js";
 import { invariantLine, moveDialog, ownerTag } from "../ledger.js";
 import { hashOf, reloadModel, rerender } from "../nav.js";
 
@@ -14,16 +14,99 @@ const STATES = [
   ["unowned", "unowned"],
   ["quarantined", "quarantined"],
   ["unlocked", "not locked"],
+  ["coarse", "coarse"],
 ];
 
-function matches(row, state, q, target) {
+function matches(row, state, q, target, lane) {
   if (target && row.target !== target) return false;
+  if (lane && !(row.lanes || []).includes(lane)) return false;
   if (q && !row.case.toLowerCase().includes(q) && !String(row.owner || "").toLowerCase().includes(q)) return false;
   if (state === "owned") return Boolean(row.owner);
   if (state === "unowned") return !row.owner && !row.quarantine;
   if (state === "quarantined") return Boolean(row.quarantine);
   if (state === "unlocked") return Boolean(row.owner) && row.locked_to === "";
+  if (state === "coarse") return Boolean(row.coarse);
   return true;
+}
+
+/** The owner cell: the one owner, or why there is none (never two ids that read as two owners). */
+function ownerCell(r) {
+  if (r.quarantine) {
+    const multiTag = r.quarantine.code === "multi-tag";
+    return h(
+      "span",
+      { class: "quarantine-tag", title: r.quarantine.detail },
+      h("span", { class: "mstate st-fail" }, multiTag ? "quarantined (multi-tag)" : `quarantined (${r.quarantine.code})`),
+      h(
+        "div",
+        { class: "muted small" },
+        multiTag ? "its tags declare " : "named by ",
+        r.quarantine.entities.join(", "),
+        " · owner: none",
+      ),
+    );
+  }
+  return h("span", null, ownerTag(r.owner), r.owner && r.via !== "model" ? h("span", { class: "muted" }, ` via ${r.via}`) : null);
+}
+
+function entryList(title, entries) {
+  if (!entries || !entries.length) return null;
+  return [
+    h("h3", null, `${title} (${entries.length})`),
+    h(
+      "ul",
+      { class: "plain lock-plan" },
+      entries.map((e) => h("li", null, h("code", { class: "case-key" }, e.case), e.from ? ` ${e.from} → ${e.owner}` : ` ${e.owner}`)),
+    ),
+  ];
+}
+
+/**
+ * Update the verification-set lock over the loaded evidence (rr sets lock):
+ * a dry run first; removals only when confirmed. Resolves true when written.
+ */
+async function lockDialog() {
+  const plan = await post("/api/lock/update", { dry_run: true });
+  const allow = h("input", { type: "checkbox", class: "lock-allow-removals" });
+  const body = h(
+    "div",
+    { class: "lock-dialog" },
+    h("p", null, "The lock only records the owners attribution decided; it never decides one."),
+    plan.refused.length
+      ? h("div", { class: "callout fail" }, h("h3", null, "Quarantined cases have no owner to lock"), h("ul", null, plan.refused.map((r) => h("li", null, r))))
+      : null,
+    plan.up_to_date ? h("p", { class: "muted" }, `${plan.path} is up to date.`) : null,
+    entryList("Added", plan.added),
+    entryList("Owner changes", plan.changed),
+    entryList("Removed", plan.removed),
+    plan.removed.length
+      ? h(
+          "label",
+          { class: "check-row" },
+          allow,
+          ` Remove ${plural(plan.removed.length, "entry", "entries")} (a case missing from a target that ran, or no claim selects it); otherwise they are kept`,
+        )
+      : null,
+  );
+  const result = await openDialog({
+    title: "Update the verification-set lock",
+    wide: true,
+    body,
+    actions:
+      plan.refused.length || (plan.up_to_date && !plan.removed.length)
+        ? []
+        : [
+            {
+              label: "Write the lock",
+              primary: true,
+              run: async () => {
+                await post("/api/lock/update", { allow_removals: allow.checked });
+                return undefined;
+              },
+            },
+          ],
+  });
+  return result === "Write the lock";
 }
 
 export async function renderCases(query) {
@@ -64,6 +147,24 @@ export async function renderCases(query) {
         { class: "muted" },
         `Attribution: ${data.mode}`,
         data.lock ? ` · lock ${data.lock}` : " · no verification-set lock",
+        data.lock_status && data.lock_status.out_of_date ? h("span", { class: "mstate st-amber" }, " lock out of date") : null,
+        data.lock_status && data.lock_status.path
+          ? button(
+              "Update lock…",
+              async () => {
+                try {
+                  if (await lockDialog()) {
+                    toast("Wrote the verification-set lock");
+                    await reloadModel({ page: false });
+                    await rerender({ keepScroll: true });
+                  }
+                } catch (err) {
+                  reportError(err);
+                }
+              },
+              { small: true, quiet: true },
+            )
+          : null,
       ),
     ),
   );
@@ -98,16 +199,7 @@ export async function renderCases(query) {
         key: "owner",
         label: "Owner",
         sort: (r) => r.owner || (r.quarantine ? "~quarantined" : "~~"),
-        render: (r) =>
-          r.quarantine
-            ? h(
-                "span",
-                { class: "quarantine-tag", title: r.quarantine.detail },
-                h("span", { class: "mstate st-fail" }, r.quarantine.code),
-                " ",
-                r.quarantine.entities.join(", "),
-              )
-            : h("span", null, ownerTag(r.owner), r.owner && r.via !== "model" ? h("span", { class: "muted" }, ` via ${r.via}`) : null),
+        render: ownerCell,
       },
       {
         key: "status",
@@ -118,7 +210,14 @@ export async function renderCases(query) {
         key: "claimed_by",
         label: "Claimed by",
         sort: (r) => (r.claimed_by || []).join(","),
-        render: (r) => (r.claimed_by && r.claimed_by.length ? r.claimed_by.join(", ") : h("span", { class: "muted" }, "—")),
+        render: (r) =>
+          h(
+            "span",
+            null,
+            r.claimed_by && r.claimed_by.length ? r.claimed_by.join(", ") : h("span", { class: "muted" }, "—"),
+            r.coarse ? h("span", { class: "mstate st-amber", title: "a whole-target claim selects this per-case result" }, "coarse") : null,
+            r.declared && r.declared.length ? h("div", { class: "muted small" }, `declared: ${r.declared.join(", ")}`) : null,
+          ),
       },
       {
         key: "locked_to",
@@ -142,19 +241,28 @@ export async function renderCases(query) {
 
   const chips = h("div", { class: "chips", role: "group", "aria-label": "Filter by owner state" });
   const count = h("span", { class: "muted" });
+  const laneSel = (data.lanes || []).length
+    ? h(
+        "select",
+        { "aria-label": "Lane" },
+        h("option", { value: "" }, "every lane"),
+        data.lanes.map((l) => h("option", { value: l, selected: l === query.get("lane") }, `lane ${l}`)),
+      )
+    : null;
 
   function update() {
     const q = input.value.trim().toLowerCase();
-    const rows = data.cases.filter((r) => matches(r, state, q, targetSel.value));
+    const lane = laneSel ? laneSel.value : "";
+    const rows = data.cases.filter((r) => matches(r, state, q, targetSel.value, lane));
     table.update(rows);
     swap(count, `${rows.length} shown`);
-    history.replaceState(null, "", hashOf("cases", { state, q: input.value.trim(), target: targetSel.value }));
+    history.replaceState(null, "", hashOf("cases", { state, q: input.value.trim(), target: targetSel.value, lane }));
   }
 
   function drawChips() {
     swap(
       chips,
-      ...STATES.filter(([s]) => s !== "unlocked" || data.lock).map(([s, label]) =>
+      ...STATES.filter(([s]) => (s !== "unlocked" || data.lock) && (s !== "coarse" || data.cases.some((r) => r.coarse))).map(([s, label]) =>
         h(
           "button",
           {
@@ -175,8 +283,9 @@ export async function renderCases(query) {
 
   input.addEventListener("input", update);
   targetSel.addEventListener("change", update);
+  if (laneSel) laneSel.addEventListener("change", update);
   drawChips();
-  add(page, h("div", { class: "toolbar" }, input, targetSel, chips, count), table);
+  add(page, h("div", { class: "toolbar" }, input, targetSel, laneSel, chips, count), table);
   update();
   return page;
 }

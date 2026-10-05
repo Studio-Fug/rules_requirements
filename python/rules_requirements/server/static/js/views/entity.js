@@ -375,6 +375,42 @@ async function moveMember(ent, m) {
   }
 }
 
+/** A banner when the verification-set lock no longer matches this set (what `rr sets lock` would change). */
+function lockBanner(ent) {
+  const lock = ent.lock || {};
+  if (!lock.out_of_date) return null;
+  if (lock.missing) {
+    return h(
+      "div",
+      { class: "callout amber lock-banner" },
+      h("h3", null, "The verification-set lock is missing or cannot be read"),
+      h("p", null, `config.sets_lock names ${lock.path}. Generate it with `, h("code", null, "rr sets lock --write"), "."),
+    );
+  }
+  const line = (e) => h("li", null, h("code", { class: "case-key" }, e.case), e.from ? ` ${e.from} → ${e.owner}` : "");
+  const part = (label, entries) =>
+    entries && entries.length
+      ? [h("p", { class: "small" }, `${plural(entries.length, "entry", "entries")} ${label}:`), h("ul", { class: "plain" }, entries.map(line))]
+      : null;
+  return h(
+    "div",
+    { class: "callout amber lock-banner" },
+    h("h3", null, `The verification-set lock is out of date for ${ent.id}`),
+    h(
+      "p",
+      null,
+      `${lock.path} pins the cases of each set; over the loaded evidence it would change. `,
+      h("a", { href: "#/cases" }, "Update the lock"),
+      " in the case ledger, or run ",
+      h("code", null, "rr sets lock --write"),
+      ", and review the diff.",
+    ),
+    part("to add", lock.added),
+    part("to change owner", lock.changed),
+    part("to remove (kept until confirmed)", lock.removed),
+  );
+}
+
 function verificationSet(ent) {
   const set = ent.set || {};
   const quarantined = ent.quarantined || [];
@@ -432,6 +468,7 @@ function verificationSet(ent) {
     head,
     derived,
     banner,
+    lockBanner(ent),
     members.length
       ? memberTable(members, { onMove: (m) => moveMember(ent, m) })
       : empty(

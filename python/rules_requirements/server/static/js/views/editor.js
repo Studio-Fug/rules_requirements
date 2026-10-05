@@ -4,7 +4,7 @@
 import { enc, get, post, put, settings } from "../api.js";
 import { button, glyph, idPicker, reportError, toast } from "../components.js";
 import { add, debounce, h, swap } from "../dom.js";
-import { VERIFIABLE, escapeSelector, problemList, setLine } from "../ledger.js";
+import { VERIFIABLE, escapeSelector, noticeList, problemList, setLine } from "../ledger.js";
 import { go, reloadModel } from "../nav.js";
 import { KIND, config, entitiesOf, levelNames, store } from "../store.js";
 
@@ -271,6 +271,7 @@ function control(field, value, ctx = {}) {
         ),
       );
       el.read = () => [...rowsHost.children].map((r) => (r.read ? r.read() : null)).filter(Boolean);
+      el.problems = () => [...rowsHost.children].map((r) => (r.problem ? r.problem() : "")).filter(Boolean);
       el.setCounts = (counts) => [...rowsHost.children].forEach((r) => r.setCounts && r.setCounts(counts));
       return [labelEl(el), el];
     }
@@ -331,7 +332,8 @@ function claimRow(item, ctx, host) {
   const count = h("span", { class: "vb-count muted" });
   const list = h("div", { class: "vb-cases" });
   const casesBox = h("div", { class: "vb-cases-box" }, selectors, count, list);
-  const wholeBox = h("div", { class: "vb-whole-box" }, reason);
+  const reasonHint = h("small", { class: "form-error vb-reason-missing", hidden: true }, "A whole-target claim needs a reason.");
+  const wholeBox = h("div", { class: "vb-whole-box" }, reason, reasonHint);
   const lines = () =>
     selectors.value
       .split("\n")
@@ -385,6 +387,7 @@ function claimRow(item, ctx, host) {
   function sync() {
     casesBox.hidden = mode.value === "whole";
     wholeBox.hidden = !casesBox.hidden;
+    reasonHint.hidden = !(dirty && mode.value === "whole" && !reason.value.trim());
     drawList();
   }
 
@@ -414,10 +417,11 @@ function claimRow(item, ctx, host) {
     changed();
   });
   mode.addEventListener("change", () => {
-    sync();
     changed();
+    sync();
   });
   for (const el of [level, selectors, reason]) el.addEventListener("input", changed);
+  reason.addEventListener("input", sync);
   selectors.addEventListener("input", drawList);
   row.read = () => {
     if (!dirty) return orig;
@@ -432,6 +436,11 @@ function claimRow(item, ctx, host) {
     if (mode.value === "whole" && reason.value.trim()) out.reason = reason.value.trim();
     return { ...out, ...extra };
   };
+  // Whole mode requires a reason (the save guard refuses a new one without).
+  row.problem = () =>
+    dirty && target.value.trim() && mode.value === "whole" && !reason.value.trim()
+      ? `${target.value.trim()}: say why the whole target is claimed (reason), or claim its cases`
+      : "";
   row.setCounts = (counts) => {
     const t = target.value.trim();
     if (mode.value === "whole") {
@@ -593,11 +602,16 @@ export async function renderEditor({ kind, id, query }) {
     }
     if (seq !== precheckSeq) return;
     const problems = (res.problems || []).filter((p) => p.code !== "invalid");
+    for (const message of localProblems()) {
+      if (!problems.some((p) => p.code === "whole-target-reference")) problems.push({ code: "whole-target-reference", message });
+    }
     blocked = problems.length > 0;
     submit.disabled = blocked;
     for (const [, el] of fields) if (el.setCounts) el.setCounts(res.selectors || []);
+    const notices = noticeList(res.notices);
     swap(
       precheckBox,
+      notices,
       problems.length
         ? h(
             "div",
@@ -611,6 +625,10 @@ export async function renderEditor({ kind, id, query }) {
           : null,
     );
   }
+  // Problems the form knows of before the server does (a whole claim without a reason).
+  function localProblems() {
+    return fields.flatMap(([, el]) => (el.problems ? el.problems() : []));
+  }
   const schedulePrecheck = debounce(precheck, 300);
   form.addEventListener("input", () => schedulePrecheck());
   form.addEventListener("change", () => schedulePrecheck());
@@ -618,8 +636,11 @@ export async function renderEditor({ kind, id, query }) {
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     errorBox.hidden = true;
-    if (blocked) {
-      errorBox.textContent = "Resolve the problems above first: a test case verifies at most one requirement.";
+    const local = localProblems();
+    if (blocked || local.length) {
+      errorBox.textContent = local.length
+        ? `Resolve the problems above first: ${local.join("; ")}.`
+        : "Resolve the problems above first: a test case verifies at most one requirement.";
       errorBox.hidden = false;
       return;
     }
@@ -645,7 +666,8 @@ export async function renderEditor({ kind, id, query }) {
           });
         } else {
           // `version` makes a concurrent change a 409 instead of a silent overwrite.
-          await put(`/api/entities/${enc(existing.id)}`, { data, version: existing.version });
+          const res = await put(`/api/entities/${enc(existing.id)}`, { data, version: existing.version });
+          for (const n of res.notices || []) toast(n.message, "warn", 8000);
         }
         savedId = existing.id;
       } else {

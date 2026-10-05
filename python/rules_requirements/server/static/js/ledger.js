@@ -86,6 +86,30 @@ export function problemList(problems) {
   );
 }
 
+/** Owner changes a save makes that are allowed but worth knowing (takes-from-tag). */
+export function noticeList(notices) {
+  if (!notices || !notices.length) return null;
+  return h(
+    "div",
+    { class: "callout amber precheck-notices" },
+    h("h3", null, "Owner changes"),
+    h(
+      "ul",
+      { class: "issues" },
+      notices.map((n) =>
+        h(
+          "li",
+          { class: "issue warning" },
+          h("span", { class: "sev warning" }, "note"),
+          h("code", { class: "code-tag" }, n.code),
+          h("span", { class: "issue-msg" }, n.message),
+          h("span"),
+        ),
+      ),
+    ),
+  );
+}
+
 /** Where a case can go: every user need, requirement and mitigation, plus none. */
 function ownerOptions(current, allowNone) {
   const opts = [h("option", { value: "" }, "Choose an owner…")];
