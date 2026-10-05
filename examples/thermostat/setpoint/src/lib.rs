@@ -51,7 +51,7 @@ mod tests {
 
     #[test]
     fn requires_a_unit() {
-        rr::verifies!("REQ-3", "REQ-4");
+        rr::verifies!("REQ-3");
         assert!(matches!(parse("21"), Err(Error::Syntax(_))));
         assert!(matches!(parse("warm"), Err(Error::Syntax(_))));
         assert!(matches!(parse(""), Err(Error::Syntax(_))));
@@ -62,8 +62,17 @@ mod tests {
         rr::verifies!("REQ-4");
         assert_eq!(parse("80C"), Err(Error::OutOfRange(80.0)));
         assert!(matches!(parse("30.1C"), Err(Error::OutOfRange(_))));
-        assert!(matches!(parse("40F"), Err(Error::OutOfRange(_))));
+        assert!(matches!(parse("4.9C"), Err(Error::OutOfRange(_))));
         assert_eq!(parse("5C"), Ok(5.0));
+        assert_eq!(parse("30C"), Ok(30.0));
+    }
+
+    #[test]
+    fn checks_the_range_after_converting() {
+        rr::verifies!("REQ-4");
+        assert!(matches!(parse("40F"), Err(Error::OutOfRange(_))));
+        assert_eq!(parse("41F"), Ok(5.0));
         assert_eq!(parse("86F"), Ok(30.0));
+        assert!(matches!(parse("87F"), Err(Error::OutOfRange(_))));
     }
 }

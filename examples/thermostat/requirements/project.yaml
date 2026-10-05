@@ -14,3 +14,10 @@ config:
   # (likelihood index + 1) on the default five-point scales. Residual risk
   # above this is flagged.
   acceptable_risk_score: 6
+  # Test case ownership: the claims (`verified_by`) decide which requirement
+  # a test case verifies, and tags only cross-check them. A test case
+  # verifies at most one requirement.
+  attribution: model
+  # Every verification set's members, pinned: written by
+  # `bazel run //:sets_lock_test.update`, reviewed like a golden.
+  sets_lock: verification.rrlock

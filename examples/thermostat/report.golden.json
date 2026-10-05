@@ -8,28 +8,28 @@
   },
   "summary": {
     "user_needs": 2,
-    "user_needs_validated": 1,
+    "user_needs_validated": 2,
     "requirements": 7,
-    "requirements_verified": 5,
+    "requirements_verified": 7,
     "requirements_under_verified": 0,
     "requirements_partial": 0,
     "requirements_failed": 0,
     "requirements_unverified": 0,
     "requirements_incomplete": 0,
-    "requirements_invalid": 2,
+    "requirements_invalid": 0,
     "risks": 2,
-    "risks_mitigated": 1,
+    "risks_mitigated": 2,
     "mitigations": 2,
-    "mitigations_verified": 1,
-    "test_cases": 17,
-    "test_cases_owned": 16,
+    "mitigations_verified": 2,
+    "test_cases": 18,
+    "test_cases_owned": 18,
     "test_cases_unowned": 0,
-    "test_cases_quarantined": 1,
-    "gaps": 4
+    "test_cases_quarantined": 0,
+    "gaps": 0
   },
   "attribution": {
-    "mode": "hybrid",
-    "lock": null,
+    "mode": "model",
+    "lock": "requirements/verification.rrlock",
     "lane": null,
     "targets": {
       "//:controller_test": {
@@ -66,9 +66,9 @@
         "ran": true
       },
       "//:setpoint_test": {
-        "cases": 3,
-        "owned": 2,
-        "quarantined": 1,
+        "cases": 4,
+        "owned": 4,
+        "quarantined": 0,
         "owners": [
           "REQ-3",
           "REQ-4"
@@ -87,28 +87,13 @@
         "ran": true
       }
     },
-    "quarantined": [
-      {
-        "case": "//:setpoint_test#tests::requires_a_unit",
-        "code": "multi-tag",
-        "entities": [
-          "REQ-3",
-          "REQ-4"
-        ],
-        "declared": [
-          "REQ-3",
-          "REQ-4"
-        ],
-        "claims": [],
-        "detail": "//:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one"
-      }
-    ],
+    "quarantined": [],
     "issues": [],
     "granularity": {
-      "owned_by_literal": 0,
-      "owned_by_pattern": 0,
+      "owned_by_literal": 9,
+      "owned_by_pattern": 9,
       "owned_by_whole": 0,
-      "owned_by_tag": 16,
+      "owned_by_tag": 0,
       "coarse_claims": 0
     }
   },
@@ -118,7 +103,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_accepts_range_limits",
       "owner": "REQ-4",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -131,7 +116,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_heats_below_band",
       "owner": "REQ-1",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -144,7 +129,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
       "owner": "REQ-6",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -157,7 +142,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
       "owner": "REQ-6",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -170,7 +155,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
       "owner": "REQ-6",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -183,7 +168,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
       "owner": "REQ-4",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -196,7 +181,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
       "owner": "REQ-4",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -209,7 +194,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
       "owner": "REQ-4",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -222,7 +207,7 @@
       "target": "//:controller_test",
       "path": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
       "owner": "REQ-2",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -235,7 +220,7 @@
       "target": "//:display_test",
       "path": "display_test.DisplayTest::test_setpoint_shows_unit",
       "owner": "REQ-7",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -248,7 +233,7 @@
       "target": "//:interlock_test",
       "path": "Interlock::NanReadingTrips",
       "owner": "REQ-5",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "sil",
       "declared": [
@@ -261,7 +246,7 @@
       "target": "//:interlock_test",
       "path": "Interlock::StaysTrippedUntilBelowReset",
       "owner": "REQ-5",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "sil",
       "declared": [
@@ -274,7 +259,7 @@
       "target": "//:interlock_test",
       "path": "Interlock::TripsAtLimit",
       "owner": "REQ-5",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "sil",
       "declared": [
@@ -283,11 +268,23 @@
       "file": "interlock/interlock_test.cc"
     },
     {
+      "case": "//:setpoint_test#tests::checks_the_range_after_converting",
+      "target": "//:setpoint_test",
+      "path": "tests::checks_the_range_after_converting",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ]
+    },
+    {
       "case": "//:setpoint_test#tests::parses_celsius_and_fahrenheit",
       "target": "//:setpoint_test",
       "path": "tests::parses_celsius_and_fahrenheit",
       "owner": "REQ-3",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -299,7 +296,7 @@
       "target": "//:setpoint_test",
       "path": "tests::rejects_out_of_range",
       "owner": "REQ-4",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "simulation",
       "declared": [
@@ -310,21 +307,20 @@
       "case": "//:setpoint_test#tests::requires_a_unit",
       "target": "//:setpoint_test",
       "path": "tests::requires_a_unit",
-      "owner": null,
-      "via": null,
+      "owner": "REQ-3",
+      "via": "model",
       "status": "passed",
+      "level": "simulation",
       "declared": [
-        "REQ-3",
-        "REQ-4"
-      ],
-      "quarantine": "multi-tag"
+        "REQ-3"
+      ]
     },
     {
       "case": "record:panel_inspection#inspection.TM-2::panel-shows-setpoint-unit",
       "target": "record:panel_inspection",
       "path": "inspection.TM-2::panel-shows-setpoint-unit",
       "owner": "REQ-7",
-      "via": "tag",
+      "via": "model",
       "status": "passed",
       "level": "inspection",
       "declared": [
@@ -390,7 +386,7 @@
     {
       "id": "UN-2",
       "title": "Set the target temperature in Celsius or Fahrenheit",
-      "status": "FAILED",
+      "status": "VALIDATED",
       "description": "Occupants enter a target like \"21.5C\" or \"70F\" on the wall panel and can read back what they set.",
       "basis": "derived",
       "derived_from": [
@@ -441,8 +437,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_heats_below_band",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_heats_below_band",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -513,8 +509,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_stops_above_band_and_holds_inside_it",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -566,27 +562,27 @@
     {
       "id": "REQ-3",
       "title": "Parse setpoints in \u00b0C and \u00b0F",
-      "status": "INVALID",
+      "status": "VERIFIED",
       "description": "The panel shall accept \"<number>C\" and \"<number>F\" (case-insensitive, optional whitespace) and convert to \u00b0C.",
       "basis": "own",
       "set": {
-        "complete": false,
+        "complete": true,
         "members": 2,
-        "passed": 1,
+        "passed": 2,
         "failed": 0,
         "error": 0,
         "skipped": 0,
         "missing": 0,
         "not_run": 0,
         "moved": 0,
-        "quarantined": 1
+        "quarantined": 0
       },
       "members": [
         {
           "case": "//:setpoint_test#tests::parses_celsius_and_fahrenheit",
           "target": "//:setpoint_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests::parses_celsius_and_fahrenheit",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -594,12 +590,11 @@
         {
           "case": "//:setpoint_test#tests::requires_a_unit",
           "target": "//:setpoint_test",
-          "selector": "tag",
-          "via": "tag",
-          "state": "quarantined",
-          "owned": false,
-          "level": "simulation",
-          "reason": "multi-tag"
+          "selector": "tests::requires_a_unit",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
         }
       ],
       "evidence": [
@@ -608,10 +603,16 @@
           "status": "passed",
           "level": "simulation",
           "target": "//:setpoint_test"
+        },
+        {
+          "name": "tests::requires_a_unit",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
         }
       ],
       "demanded_level": "simulation",
-      "provided_level": null,
+      "provided_level": "simulation",
       "satisfies": [
         "UN-2"
       ],
@@ -647,8 +648,7 @@
         },
         {
           "ids": [
-            "REQ-3",
-            "REQ-4"
+            "REQ-3"
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
@@ -660,28 +660,28 @@
     {
       "id": "REQ-4",
       "title": "Reject setpoints outside 5-30 \u00b0C",
-      "status": "INVALID",
+      "status": "VERIFIED",
       "description": "The panel shall reject any setpoint that converts to below 5 \u00b0C or above 30 \u00b0C.",
       "category": "safety",
       "basis": "own",
       "set": {
-        "complete": false,
+        "complete": true,
         "members": 6,
-        "passed": 5,
+        "passed": 6,
         "failed": 0,
         "error": 0,
         "skipped": 0,
         "missing": 0,
         "not_run": 0,
         "moved": 0,
-        "quarantined": 1
+        "quarantined": 0
       },
       "members": [
         {
           "case": "//:controller_test#tests.test_controller::test_accepts_range_limits",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_accepts_range_limits",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -689,8 +689,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -698,8 +698,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -707,8 +707,17 @@
         {
           "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:setpoint_test#tests::checks_the_range_after_converting",
+          "target": "//:setpoint_test",
+          "selector": "tests::checks_the_range_after_converting",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -716,21 +725,11 @@
         {
           "case": "//:setpoint_test#tests::rejects_out_of_range",
           "target": "//:setpoint_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests::rejects_out_of_range",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
-        },
-        {
-          "case": "//:setpoint_test#tests::requires_a_unit",
-          "target": "//:setpoint_test",
-          "selector": "tag",
-          "via": "tag",
-          "state": "quarantined",
-          "owned": false,
-          "level": "simulation",
-          "reason": "multi-tag"
         }
       ],
       "evidence": [
@@ -759,6 +758,12 @@
           "target": "//:controller_test"
         },
         {
+          "name": "tests::checks_the_range_after_converting",
+          "status": "passed",
+          "level": "simulation",
+          "target": "//:setpoint_test"
+        },
+        {
           "name": "tests::rejects_out_of_range",
           "status": "passed",
           "level": "simulation",
@@ -766,7 +771,7 @@
         }
       ],
       "demanded_level": "simulation",
-      "provided_level": null,
+      "provided_level": "simulation",
       "satisfies": [
         "UN-2"
       ],
@@ -804,13 +809,12 @@
       "verified_in": [
         {
           "ids": [
-            "REQ-3",
             "REQ-4"
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
-          "line": 54,
-          "symbol": "fn requires_a_unit"
+          "line": 62,
+          "symbol": "fn rejects_out_of_range"
         },
         {
           "ids": [
@@ -818,8 +822,8 @@
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
-          "line": 62,
-          "symbol": "fn rejects_out_of_range"
+          "line": 72,
+          "symbol": "fn checks_the_range_after_converting"
         },
         {
           "ids": [
@@ -864,8 +868,8 @@
         {
           "case": "//:interlock_test#Interlock::NanReadingTrips",
           "target": "//:interlock_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "Interlock::*",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "sil"
@@ -873,8 +877,8 @@
         {
           "case": "//:interlock_test#Interlock::StaysTrippedUntilBelowReset",
           "target": "//:interlock_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "Interlock::*",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "sil"
@@ -882,8 +886,8 @@
         {
           "case": "//:interlock_test#Interlock::TripsAtLimit",
           "target": "//:interlock_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "Interlock::*",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "sil"
@@ -985,8 +989,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -994,8 +998,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -1003,8 +1007,8 @@
         {
           "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
           "target": "//:controller_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -1086,8 +1090,8 @@
         {
           "case": "//:display_test#display_test.DisplayTest::test_setpoint_shows_unit",
           "target": "//:display_test",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "display_test.DisplayTest::test_setpoint_shows_unit",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "simulation"
@@ -1095,8 +1099,8 @@
         {
           "case": "record:panel_inspection#inspection.TM-2::panel-shows-setpoint-unit",
           "target": "record:panel_inspection",
-          "selector": "tag",
-          "via": "tag",
+          "selector": "inspection.TM-2::panel-shows-setpoint-unit",
+          "via": "model",
           "state": "passed",
           "owned": true,
           "level": "inspection"
@@ -1190,7 +1194,7 @@
     {
       "id": "MIT-2",
       "title": "Validate setpoints at entry",
-      "status": "FAILED",
+      "status": "VERIFIED",
       "description": "Require an explicit unit and a bounded range for every setpoint.",
       "basis": "derived",
       "derived_from": [
@@ -1248,7 +1252,7 @@
     {
       "id": "RISK-2",
       "title": "Implausible setpoint accepted",
-      "status": "FAILED",
+      "status": "MITIGATED",
       "basis": "derived",
       "derived_from": [
         "MIT-2"
@@ -1297,38 +1301,11 @@
   ],
   "modules": {
     "interlock": "VERIFIED",
-    "setpoint": "FAILED",
-    "thermostat": "FAILED"
+    "setpoint": "VERIFIED",
+    "thermostat": "VERIFIED"
   },
   "high_open_risks": [],
   "pyramid_violations": [],
   "unknown_evidence": {},
-  "gaps": [
-    {
-      "kind": "multi-tag",
-      "entity": "//:setpoint_test#tests::requires_a_unit",
-      "message": "//:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one",
-      "route": "autonomous"
-    },
-    {
-      "kind": "invalid",
-      "entity": "REQ-3",
-      "message": "quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner",
-      "route": "autonomous",
-      "demanded_level": "simulation"
-    },
-    {
-      "kind": "invalid",
-      "entity": "REQ-4",
-      "message": "quarantined case(s) name it: //:setpoint_test#tests::requires_a_unit (multi-tag); it verifies nothing through them until each has one owner",
-      "route": "autonomous",
-      "demanded_level": "simulation"
-    },
-    {
-      "kind": "unpinned-sets",
-      "entity": "",
-      "message": "membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3, REQ-4, REQ-5, REQ-6, REQ-7; lock them with `rr sets lock --write`",
-      "route": "autonomous"
-    }
-  ]
+  "gaps": []
 }

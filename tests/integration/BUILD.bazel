@@ -149,9 +149,18 @@ py_test(
     deps = ["//python"],
 )
 
-# The multi-id cases above are quarantined on purpose (that is what this report
-# pins), so a quarantine must not fail the build here; check = True re-proves
+# This report keeps on_attribution_error = "warn" only because its two
+# quarantines are intentional fixtures, pinned by its goldens: the 0.2/0.3
+# deprecated multi-id paths still record every id, and attribution must
+# quarantine them (multi-tag, REQ-1/REQ-3/REQ-4 INVALID):
+#   //tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls
+#     (RR_VERIFIES("REQ-3") then RR_VERIFIES("REQ-1") in one test)
+#   //tests/integration:rust_hook_test#rust_hook_test::multiple_ids
+#     (rr::verifies!("REQ-4", "REQ-1"))
+# Any other quarantine is a bug the golden diff shows. check = True re-proves
 # from report.json alone that no case is owned twice (:report_check_test).
+# A product report never sets "warn": a quarantine must fail it (see
+# examples/thermostat).
 rr_report(
     name = "report",
     check = True,

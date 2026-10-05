@@ -91,3 +91,39 @@ def test_evidence_guide_says_so_while_pending():
     with open(guide, encoding="utf-8") as fh:
         text = fh.read()
     assert (INTERIM_MARKER in text) == PENDING
+
+
+def _example(*parts):
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "examples", "thermostat", *parts)
+    if not os.path.exists(path):  # not in the Bazel runfiles: the Python suite checks it
+        pytest.skip(f"examples/thermostat/{'/'.join(parts)} is not available here")
+    return path
+
+
+def test_thermostat_example_shows_the_end_state():
+    """The example is what 0.3 asks of a project: model mode, a lock, one id
+    per case, and a report that a quarantine fails (no "warn")."""
+    import json
+
+    from rules_requirements import checkreport
+
+    model, issues = read_model(_example("requirements"))
+    assert model.config.attribution == "model"
+    assert model.config.sets_lock == "verification.rrlock"
+    assert not [i for i in issues if i.severity == "error"], issues
+    with open(_example("BUILD.bazel"), encoding="utf-8") as fh:
+        build = fh.read()
+    assert "on_attribution_error" not in build
+    assert 'lock = "requirements/verification.rrlock"' in build
+    with open(_example("report.golden.json"), encoding="utf-8") as fh:
+        doc = json.load(fh)
+    assert checkreport.check_report(doc) == []
+    assert doc["attribution"]["mode"] == "model"
+    assert doc["attribution"]["lock"] == "requirements/verification.rrlock"
+    assert doc["attribution"]["quarantined"] == []
+    assert doc["summary"]["test_cases_quarantined"] == 0
+    assert doc["summary"]["test_cases_unowned"] == 0
+    # Every case has one owner, through a claim; its tag (when it has one) agrees.
+    for row in doc["cases"]:
+        assert row["via"] == "model" and isinstance(row["owner"], str), row
+        assert row["declared"] in ([], [row["owner"]]), row

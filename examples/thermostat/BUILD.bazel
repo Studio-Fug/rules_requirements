@@ -1,8 +1,9 @@
 # The thermostat example: model -> implementation -> tests -> evidence -> report.
 #
-#   bazel test //...                      # unit tests, model validation, golden report
+#   bazel test //...                      # unit tests, model + lock validation, golden report
 #   bazel build //:report                 # bazel-bin/report.{html,json,md}
 #   bazel run //:report_json_golden_test.update   # after an intended change
+#   bazel run //:sets_lock_test.update    # re-lock the verification sets, then review the diff
 
 load("@pypi//:requirements.bzl", "requirement")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
@@ -10,16 +11,20 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
-load("@rules_requirements//rr:defs.bzl", "rr_annotations_test", "rr_editor", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test")
+load("@rules_requirements//rr:defs.bzl", "rr_annotations_test", "rr_editor", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test", "rr_sets_lock_test")
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 
 # --------------------------------------------------------------------------- #
-# The requirements model (validated by :model_test).                          #
+# The requirements model (validated by :model_test, lock included).          #
 # --------------------------------------------------------------------------- #
 
+# `config.attribution: model`: the requirements' `verified_by` claims decide
+# which requirement each test case verifies (one at most); the lock pins the
+# members of every verification set.
 rr_model(
     name = "model",
     srcs = glob(["requirements/*.yaml"]),
+    lock = "requirements/verification.rrlock",
     strict = True,
 )
 
@@ -118,19 +123,29 @@ rr_evidence(
     ],
 )
 
-# `setpoint/src/lib.rs` still names two ids in one `rr::verifies!` call, so
-# that case is quarantined; until it is split, the report is built anyway
-# (on_attribution_error = "warn") and shows REQ-3 and REQ-4 INVALID.
+EVIDENCE = [
+    ":evidence",
+    "evidence/panel_inspection.rr.yaml",
+]
+
+# A quarantined test case (one naming two requirements, or claimed by two)
+# fails this build; :report_check_test re-proves from report.json alone that
+# no test case verifies two requirements.
 rr_report(
     name = "report",
     srcs = SOURCES,
     check = True,
-    evidence = [
-        ":evidence",
-        "evidence/panel_inspection.rr.yaml",
-    ],
+    evidence = EVIDENCE,
     model = [":model"],
-    on_attribution_error = "warn",
+)
+
+# The lock agrees with the evidence: no member missing, none unlocked, no
+# owner changed (`rr sets check`). `bazel run //:sets_lock_test.update`
+# rewrites requirements/verification.rrlock after an intended change.
+rr_sets_lock_test(
+    name = "sets_lock_test",
+    evidence = EVIDENCE,
+    model = ":model",
 )
 
 rr_golden_test(

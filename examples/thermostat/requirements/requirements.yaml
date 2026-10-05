@@ -1,3 +1,9 @@
+# Each requirement claims the test cases that verify it (`verified_by`): a
+# literal case path, or a pattern whose only wildcard is '*'. A test case
+# verifies at most one requirement, so no two requirements' claims may select
+# one case (`rr validate` proves it: `shared-case`). The tags in the tests
+# (`@pytest.mark.rr`, `RR_VERIFIES`, ...) only cross-check these claims, and
+# verification.rrlock pins every set's members (`bazel run //:sets_lock_test.update`).
 requirements:
   - id: REQ-1
     title: Heat when the room is below the setpoint band
@@ -6,6 +12,9 @@ requirements:
       setpoint - 0.5 °C.
     satisfies: [UN-1]
     modules: [thermostat]
+    verified_by:
+      - target: //:controller_test
+        cases: ["tests.test_controller::test_heats_below_band"]
 
   - id: REQ-2
     title: Stop heating above the band; hold state inside it
@@ -15,6 +24,9 @@ requirements:
       (hysteresis), so it does not cycle rapidly.
     satisfies: [UN-1]
     modules: [thermostat]
+    verified_by:
+      - target: //:controller_test
+        cases: ["tests.test_controller::test_stops_above_band_and_holds_inside_it"]
 
   - id: REQ-3
     title: Parse setpoints in °C and °F
@@ -23,6 +35,11 @@ requirements:
       optional whitespace) and convert to °C.
     satisfies: [UN-2]
     modules: [setpoint]
+    verified_by:
+      - target: //:setpoint_test
+        cases:
+          - "tests::parses_celsius_and_fahrenheit"
+          - "tests::requires_a_unit"
 
   - id: REQ-4
     title: Reject setpoints outside 5-30 °C
@@ -30,6 +47,15 @@ requirements:
     satisfies: [UN-2]
     category: safety
     modules: [setpoint, thermostat]
+    verified_by:
+      - target: //:controller_test
+        cases:
+          - "tests.test_controller::test_rejects_setpoints_outside_range[*]"
+          - "tests.test_controller::test_accepts_range_limits"
+      - target: //:setpoint_test
+        cases:
+          - "tests::rejects_out_of_range"
+          - "tests::checks_the_range_after_converting"
 
   - id: REQ-5
     title: Independent over-temperature cutoff
@@ -39,6 +65,9 @@ requirements:
     category: safety
     method: TM-1
     modules: [interlock]
+    verified_by:
+      - target: //:interlock_test
+        cases: ["Interlock::*"]
 
   - id: REQ-6
     title: Fail safe on an invalid sensor reading
@@ -47,6 +76,9 @@ requirements:
       number or outside the sensor's -40..85 °C range.
     category: safety
     modules: [thermostat]
+    verified_by:
+      - target: //:controller_test
+        cases: ["tests.test_controller::test_invalid_reading_turns_heater_off[*]"]
 
   - id: REQ-7
     title: Show the setpoint with its unit
@@ -54,3 +86,9 @@ requirements:
     satisfies: [UN-2]
     method: TM-2
     modules: [thermostat]
+    verified_by:
+      - target: //:display_test
+        cases: ["display_test.DisplayTest::test_setpoint_shows_unit"]
+      - target: record:panel_inspection
+        level: inspection   # what the record provides; also when it is missing
+        cases: ["inspection.TM-2::panel-shows-setpoint-unit"]
