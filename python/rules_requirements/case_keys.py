@@ -195,9 +195,12 @@ def normalize_target(target: str, main_repo: str = "") -> str:
     """``target`` in the spelling claims use (:func:`~rules_requirements.labels.normalize_label`
     with ``config.main_repo``), so ``@@//p:n``, ``//p`` and a canonical
     ``@repo~//p:n`` file under the same key a model names. A target that is
-    no label (pseudo-targets pass through) is kept as recorded, with ``#``
-    (the key separator) replaced."""
-    return labels.try_normalize(target, main_repo) or target.replace("#", "_")
+    no label (pseudo-targets pass through) is kept as recorded. ``#`` (the
+    key separator) is replaced first, so the result is its own normal form
+    (``rr check-report`` reads a key as canonical when this leaves it
+    unchanged)."""
+    clean = target.replace("#", "_")
+    return labels.try_normalize(clean, main_repo) or clean
 
 
 def key_of(case: TestCase, main_repo: str | None = None) -> CaseKey:

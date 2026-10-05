@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
-from rules_requirements import case_selectors
+from rules_requirements import case_selectors, labels
 from rules_requirements.case_keys import (
     SYNTHETIC_PATH,
     CaseKey,
@@ -618,7 +618,10 @@ def attribute(
        ``same-path-multiple-owners``; when one of their files is such an
        absolute path that ends with two recorded relative ones (it may be
        either file), the issue is ``ambiguous-source``, always an error:
-       an ambiguity fails closed.
+       an ambiguity fails closed. Equal paths with different owners where
+       one is filed under a ``suite:``/``record:`` pseudo-target and a
+       source file is unknown are quarantined ``same-code-multiple-owners``
+       (a pseudo-target cannot be pinned to a build target).
     5. Members: each entity's owned keys; a pseudo-member per selector that
        matched nothing (``missing`` if the target ran, ``not-run`` if not,
        ``error`` if it is tainted or its only result is a failed synthetic
@@ -906,6 +909,8 @@ class _Attributor:
             # owners whose source is unknown, or whose recorded sources differ
             # (which may still be one file, spelled from two roots).
             owners_ = sorted({self.owner[k] for k in keys}, key=natural_key)
+            if len(owners_) > 1 and self.unpinned_same_path(keys):
+                continue
             if len(owners_) > 1:
                 listed = ", ".join(
                     f"{k} ({self.owner[k]}, {self.cases[k].file or 'source unknown'})"
@@ -932,6 +937,37 @@ class _Attributor:
                     "so it cannot verify two requirements",
                     entities=tuple(owners_),
                 )
+
+    def unpinned_same_path(self, keys: list[CaseKey]) -> bool:
+        """Quarantine ``keys`` (one case path, more than one owner) as
+        ``same-code-multiple-owners`` when one of them is filed under a
+        ``suite:`` / ``record:`` pseudo-target and a source file is not
+        recorded for every one of them: a pseudo-target cannot be pinned to a
+        build target, so the same test's results (a copy of one JUnit file,
+        say) may be counted for two requirements, and that ambiguity fails
+        closed. Two real build labels keep the ``same-path-multiple-owners``
+        warning; recorded files that differ prove two tests."""
+        if not any(labels.is_pseudo(k.target) for k in keys) or all(self.cases[k].file for k in keys):
+            return False
+        before = {k: self.owner[k] for k in keys}
+        for key in sorted(keys, key=_key_order):
+            others = ", ".join(f"{k} (owned by {before[k]})" for k in sorted(keys, key=_key_order) if k != key)
+            self.quarantine[key] = Quarantine(
+                key,
+                SAME_CODE,
+                (before[key],),
+                f"{key} (owned by {before[key]}, {self.owner_origin(key)}) has the case path of {others}, and a "
+                "suite:/record: pseudo-target cannot be pinned to a build target, so they may be one test's "
+                "results counted twice (a copy of one JUnit file, say); a test case verifies at most one "
+                "requirement, so none of them verifies anything until one entity owns them all, every source "
+                "file is recorded (rr.file), or the evidence is passed under its target's bazel-testlogs path",
+                self.cases[key].declared,
+                tuple(self.claims_of(key)),
+            )
+        for key in keys:
+            del self.owner[key]
+            del self.via[key]
+        return True
 
     def owner_origin(self, key: CaseKey) -> str:
         if self.via.get(key) == VIA_TAG:
@@ -1093,6 +1129,9 @@ class _Attributor:
         if claim.pattern is None or not claim.literal:
             return None
         try:
+            # A bad selector (padded, not NFC, a name tag: bad-selector) names
+            # no case: its key would not be canonical.
+            case_selectors.check(claim.pattern)
             return CaseKey(claim.target, case_selectors.literal_path(claim.pattern))
         except ValueError:
             return None

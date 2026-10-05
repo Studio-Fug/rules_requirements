@@ -11,6 +11,7 @@ the seeded fuzz of the owner invariant, and the unit behaviour of
 import ast
 import dataclasses
 import inspect
+import json
 import os
 import random
 import re
@@ -24,7 +25,7 @@ import pytest
 from conftest import write
 
 from rules_requirements import attribution as rr_attribution
-from rules_requirements import bazel, ingest, rr, trace
+from rules_requirements import bazel, case_keys, ingest, rr, trace
 from rules_requirements import lock as rr_lock
 from rules_requirements import model as rr_model
 from rules_requirements.annotations import Reference
@@ -1207,12 +1208,13 @@ _PATTERNS = (None, "*", "m::*", "m::t*", "m::t1", "m::t2", "n::*", "*::t1", "m::
 _PATHS = ("m::t1", "m::t2", "m::t[a]", "n::t1", "n::u", "x", "m::t*")
 _TARGETS = ("//a:t", "//b:t", "//c:t")
 _FILES = ("", "", "f.py", "g.py")
+_SUITE = "suite:pytest"  # JUnit outside a testlogs tree: a pseudo-target
 
 
 def _fuzz_model(rnd):
     claims = {e: [] for e in _ENTS}
     for _ in range(rnd.randint(0, 6)):
-        ent, target, pattern = rnd.choice(_ENTS), rnd.choice(_TARGETS), rnd.choice(_PATTERNS)
+        ent, target, pattern = rnd.choice(_ENTS), rnd.choice((*_TARGETS, _SUITE)), rnd.choice(_PATTERNS)
         level = rnd.choice(["", "", "sil", "hil"])
         item = (
             VerifiedBy(target, whole=True, reason="r", level=level)
@@ -1278,13 +1280,23 @@ def _fuzz_evidence(rnd):
         if rnd.random() < 0.08:
             ev.add(TestCase("exit-status", "error", source=f"{base}/test.xml", target=target,
                             properties={"rr.scope": "target"}))  # fmt: skip
+    if rnd.random() < 0.3:  # a copy of some results outside bazel-testlogs (suite:pytest)
+        for path in rnd.sample(_PATHS, rnd.randint(1, 3)):
+            classname, _, name = path.rpartition("::")
+            declared = tuple(rnd.sample(_ENTS, rnd.choice([0, 1, 1])))
+            props = {"rr.file": rnd.choice(_FILES)}
+            ev.add(TestCase(name, rnd.choice(["passed", "passed", "failed"]), classname, declared,
+                            source="extra/server.xml", suite="pytest", properties=props))  # fmt: skip
+    for case in ev.cases:  # other spellings of the same targets
+        if case.target and rnd.random() < 0.1:
+            case.target = rnd.choice(["@@", "@"]) + case.target
     return ev
 
 
 def _fuzz_lock(rnd, ev):
     if rnd.random() >= 0.3:
         return None
-    keys = sorted({(c.target, f"{c.classname}::{c.name}" if c.classname else c.name) for c in ev.cases})
+    keys = sorted({(k.target, k.path) for k in (case_keys.key_of(c, "") for c in ev.cases)})
     keys += [(rnd.choice(_TARGETS), rnd.choice(_PATHS))]
     chosen = dict.fromkeys(rnd.sample(keys, min(len(keys), rnd.randint(1, 3))))
     return rr_lock.Lock(tuple(rr_lock.LockEntry(t, p, rnd.choice(_ENTS)) for t, p in chosen))
@@ -1303,7 +1315,7 @@ def test_fuzz_one_owner_invariant_static_witness_and_invalid():
     same-code-multiple-owners one); every entity a quarantine names reads
     INVALID, and nothing else does."""
     rnd = random.Random(FUZZ_SEED)
-    seen = {"quarantines": 0, "conflicts": 0, "multi-tag": 0, "same-code": 0, "owned": 0, INVALID: 0}
+    seen = {"quarantines": 0, "conflicts": 0, "multi-tag": 0, "same-code": 0, "pseudo": 0, "owned": 0, INVALID: 0}
     for trial in range(FUZZ_TRIALS):
         model = _fuzz_model(rnd)
         ev = _fuzz_evidence(rnd)
@@ -1332,6 +1344,7 @@ def test_fuzz_one_owner_invariant_static_witness_and_invalid():
                 assert {d for d in q.declared if d in _ENTS} <= set(q.entities), (trial, q)
             else:
                 seen["same-code"] += 1
+                seen["pseudo"] += q.key.target == _SUITE  # one path under suite:pytest and a build label
         for ent in att.entities:
             quarantined = any(m.state == "quarantined" for m in att.members_of(ent))
             assert (mx.status(ent) == INVALID) == quarantined, (trial, ent)
@@ -1572,3 +1585,68 @@ def test_attribution_reads(tmp_path):
     }
     assert att.cases[key].to_dict()["case"] == "//w:t#c::a"
     assert isinstance(att, Attribution) and att.mode == "hybrid"
+
+
+# --------------------------------------------------------------------------- #
+# The 0.3.0 release review                                                    #
+# --------------------------------------------------------------------------- #
+
+_TWO_CLAIMS = (
+    "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //pkg:t, cases: ['m::*']}]}\n"
+    "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: 'suite:pytest', cases: ['m::*']}]}\n"
+)
+_JUNIT = (
+    '<testsuites><testsuite name="pytest"><testcase classname="m" name="test_one"{f}/>'
+    '<testcase classname="m" name="test_two"{f}/></testsuite></testsuites>'
+)
+
+
+def test_one_junit_fed_under_its_target_and_as_unscoped_evidence_cannot_verify_two_requirements(tmp_path):
+    """Release review (medium): a byte-identical copy of //pkg:t's JUnit outside
+    bazel-testlogs files the same results under suite:pytest. Claimed by REQ-2
+    there and by REQ-1 under //pkg:t, one test execution read VERIFIED for
+    both with warnings only. A pseudo-target cannot be pinned to a build
+    target, so whether it is the same code is unknown: it fails closed."""
+    from rules_requirements import checkreport, report
+
+    paths = []
+    for rel in ("bazel-testlogs/pkg/t/test.xml", "extra/server.xml"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True)
+        path.write_text(_JUNIT.format(f=""))
+        paths.append(str(path))
+    mx = build_matrix(model_at(tmp_path, _TWO_CLAIMS, config="{attribution: model}"), ingest.collect(paths))
+    att = mx.attribution
+    assert not att.owner
+    assert quarantines(att) == {
+        f"{t}#m::test_{n}": (SAME_CODE, (r,))
+        for t, r in (("//pkg:t", "REQ-1"), ("suite:pytest", "REQ-2"))
+        for n in ("one", "two")
+    }
+    assert mx.status("REQ-1") == mx.status("REQ-2") == INVALID
+    assert checkreport.check_report(json.loads(report.render_json(mx))) == []
+
+
+def test_a_pseudo_target_case_whose_source_files_are_recorded_and_differ_keeps_its_owner(tmp_path):
+    """Recorded files that differ prove two tests: only the warning remains."""
+    paths = []
+    for rel, f in (("bazel-testlogs/pkg/t/test.xml", "a/test_m.py"), ("extra/server.xml", "b/test_m.py")):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True)
+        path.write_text(_JUNIT.format(f=f' file="{f}"'))
+        paths.append(str(path))
+    mx = build_matrix(model_at(tmp_path, _TWO_CLAIMS, config="{attribution: model}"), ingest.collect(paths))
+    assert not mx.attribution.quarantined
+    assert set(owners(mx.attribution).values()) == {"REQ-1", "REQ-2"}
+    assert issues(mx.attribution, "same-path-multiple-owners")
+
+
+def test_a_bad_literal_selector_names_no_case_key(tmp_path):
+    """A padded literal selector matches nothing; its expected member carries no
+    key, so the report never writes a non-canonical case key."""
+    model = Model(
+        requirements={"REQ-1": Requirement("REQ-1", "a", verified_by=(VerifiedBy("//p:t", cases=("c::a ",)),))}
+    )
+    att = build_matrix(model, evidence(tc("a"))).attribution
+    (member,) = att.members_of("REQ-1")
+    assert member.key is None and member.state == "missing"

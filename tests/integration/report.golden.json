@@ -27,6 +27,8 @@
   },
   "attribution": {
     "mode": "hybrid",
+    "main_repo": "",
+    "variants": [],
     "lock": null,
     "lane": null,
     "targets": {

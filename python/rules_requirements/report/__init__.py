@@ -128,9 +128,12 @@ def _member_kind(member: Member) -> str:
         return "pattern"
 
 
-def attribution_dict(att: Attribution, lane: Lane = NO_LANE) -> dict[str, Any]:
-    """The ``attribution`` block: mode, lock, lane, per-target counts,
-    quarantines (with every claim's origin), issues and granularity."""
+def attribution_dict(att: Attribution, lane: Lane = NO_LANE, config: cfg.Config | None = None) -> dict[str, Any]:
+    """The ``attribution`` block: mode, ``main_repo`` and ``variants`` (what
+    ``rr check-report`` needs to re-prove key spellings and same-code
+    ownership), lock, lane, per-target counts, quarantines (with every
+    claim's origin), issues and granularity."""
+    config = config or cfg.Config()
     targets: dict[str, dict[str, Any]] = {}
     for target, run in att.targets.items():
         keys = [k for k in att.cases if k.target == target]
@@ -156,6 +159,8 @@ def attribution_dict(att: Attribution, lane: Lane = NO_LANE) -> dict[str, Any]:
     granularity["coarse_claims"] = sum(i.code == "coarse-claim" for i in att.issues)
     return {
         "mode": att.mode,
+        "main_repo": config.main_repo,
+        "variants": [list(group) for group in config.variant_groups()],
         "lock": _shown(att.lock.path) if att.lock is not None else None,
         "lane": lane.name or None,
         "targets": targets,
@@ -356,7 +361,7 @@ def to_dict(matrix: Matrix, title: str = "", *, lane: Lane = NO_LANE) -> dict[st
         "title": title or str(m.project.get("name", "Requirements traceability")),
         "project": dict(sorted(m.project.items())),
         "summary": summary,
-        "attribution": attribution_dict(att, lane) if att is not None else None,
+        "attribution": attribution_dict(att, lane, m.config) if att is not None else None,
         "cases": case_rows(att) if att is not None else [],
         "levels": [{"name": lvl.name, "rank": lvl.rank} for lvl in m.config.levels],
         "user_needs": needs,

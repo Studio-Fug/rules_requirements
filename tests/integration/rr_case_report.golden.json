@@ -27,6 +27,8 @@
   },
   "attribution": {
     "mode": "hybrid",
+    "main_repo": "",
+    "variants": [],
     "lock": "tests/integration/rr_case.rrlock",
     "lane": null,
     "targets": {

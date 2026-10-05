@@ -452,3 +452,267 @@ def test_an_entity_holding_a_quarantined_case_must_read_invalid():
     ent = next(e for e in _verifiable(doc) if any(mb["state"] == "quarantined" for mb in e["members"]))
     ent["status"] = "VERIFIED"
     assert any(f"{ent['id']} holds a quarantined case but reads VERIFIED" in p for p in checkreport.check_report(doc))
+
+
+# --- the 0.3.0 release review: what check-report re-proves from the JSON alone ---
+
+
+def _small_report(tmp_path, *, mode="model", config="", cases=None):
+    """A real report: REQ-1 owns //a:t's cases, REQ-2 //c:t's (claimed in model
+    mode; in hybrid mode there are no claims and the cases' tags own them)."""
+    from test_attribution import evidence, model_at, tc
+
+    claims = mode == "model"
+    reqs = (
+        "  - {id: REQ-1, title: a, satisfies: [UN-1]"
+        + (", verified_by: [{target: //a:t, cases: ['m::*']}]" if claims else "")
+        + "}\n  - {id: REQ-2, title: b, satisfies: [UN-1]"
+        + (", verified_by: [{target: //c:t, cases: ['*']}]" if claims else "")
+        + "}\n  - {id: REQ-3, title: c, satisfies: [UN-1]}\n"
+    )
+    model = model_at(tmp_path, reqs, config="{attribution: " + mode + (", " + config if config else "") + "}")
+    cases = cases or [
+        tc("t1", classname="m", target="//a:t", declared=("REQ-1",), properties={"rr.file": "f.py"}),
+        tc("café", classname="m", target="//a:t", declared=("REQ-1",)),
+        tc("z", classname="k", target="//c:t", declared=("REQ-2",)),
+    ]
+    from rules_requirements.lock import NO_LOCK
+
+    doc = json.loads(report.render_json(build_matrix(model, evidence(*cases), lock=NO_LOCK)))
+    assert checkreport.check_report(doc) == [], checkreport.check_report(doc)
+    return doc
+
+
+def _forge(doc, src_key, target, path, owner, *, file=None):
+    """Copy the owned row ``src_key`` under ``target#path``, owned by ``owner``,
+    with every count consistent (members, evidence[], targets, summary,
+    granularity): only the key spelling, or the code it runs, is wrong."""
+    d = copy.deepcopy(doc)
+    row = next(r for r in d["cases"] if r["case"] == src_key)
+    src_member = next(m for e in _verifiable(d) for m in e["members"] if m["case"] == src_key and m["owned"])
+    key = f"{target}#{path}"
+    new = dict(row, case=key, target=target, path=path, owner=owner, declared=[owner])
+    new.pop("file", None)
+    if file:
+        new["file"] = file
+    d["cases"].append(new)
+    ent = _entity(d, owner)
+    member = {k: v for k, v in src_member.items() if k not in ("case", "target", "selector")}
+    _add_member(ent, {"case": key, "target": target, "selector": "*", **member})
+    ent.setdefault("evidence", []).append(
+        {"name": path, "status": row["status"], "level": src_member.get("level", ""), "target": target}
+    )
+    t = d["attribution"]["targets"].setdefault(
+        target, {"cases": 0, "owned": 0, "quarantined": 0, "owners": [], "synthetic": False, "ran": True}
+    )
+    t["cases"] += 1
+    t["owned"] += 1
+    t["owners"] = sorted(set(t["owners"]) | {owner})
+    d["summary"]["test_cases"] += 1
+    d["summary"]["test_cases_owned"] += 1
+    d["attribution"]["granularity"]["owned_by_" + ("tag" if row["via"] == "tag" else "pattern")] += 1
+    return d
+
+
+_T1 = "//a:t#m::t1"
+_CAFE = "//a:t#m::café"
+
+
+@pytest.mark.parametrize(
+    ("target", "path", "config", "said"),
+    [
+        ("@//a:t", "m::t1", "", "is not canonical"),
+        ("@@//a:t", "m::t1", "", "is not canonical"),
+        ("@ws//a:t", "m::t1", "main_repo: ws", "is not canonical"),
+        ("//a", "m::t1", "", "is not canonical"),  # not //a:a, but a spelling no report writes
+        ("//a:t", "m::t1 ", "", "is not canonical"),
+        ("//a:t", " m::t1", "", "is not canonical"),
+        ("//a:t", "m::t1 [rr:REQ-2]", "", "name tag"),
+        ("//a:t", "m::café", "", "is not canonical"),  # NFD
+    ],
+    ids=["at", "atat", "at-main-repo", "short-label", "trailing-blank", "leading-blank", "name-tag", "nfd"],
+)
+def test_check_report_rejects_a_case_owned_twice_under_another_spelling_of_its_key(
+    tmp_path, target, path, config, said
+):
+    """Release review (high): rows keyed on raw strings let one case be owned
+    by REQ-1 as //a:t#m::t1 and by REQ-2 as @//a:t#m::t1 (or with a trailing
+    blank, an [rr:ID] tag, NFD...): by the tool's own definition one case with
+    two owners. The identical spelling was always rejected (the control)."""
+    doc = _small_report(tmp_path, config=config)
+    src = _CAFE if "caf" in path else _T1
+    assert checkreport.check_report(_forge(doc, src, "//a:t", src.partition("#")[2], "REQ-2"))  # the control
+    forged = _forge(doc, src, target, path, "REQ-2")
+    problems = checkreport.check_report(forged)
+    assert any(said in p and f"{target}#{path}" in p for p in problems), problems
+
+
+def test_check_report_reads_main_repo_from_the_report(tmp_path):
+    """``@ws//a:t`` is another repository unless the report says ws is the main one."""
+    doc = _small_report(tmp_path, config="main_repo: ws, variants: [['//a:t', '@ws//b:t']]")
+    assert doc["attribution"]["main_repo"] == "ws"
+    assert doc["attribution"]["variants"] == [["//a:t", "//b:t"]]
+    forged = _forge(doc, _T1, "@ws//a:t", "m::t1", "REQ-2")
+    assert any("is not canonical" in p for p in checkreport.check_report(forged))
+    forged["attribution"]["main_repo"] = ""
+    assert not any("is not canonical" in p for p in checkreport.check_report(forged))
+    forged["attribution"]["main_repo"] = 7
+    assert any("main_repo" in p for p in checkreport.check_report(forged))
+
+
+@pytest.mark.parametrize("state", ["missing", "not-run", "moved"])
+def test_a_pseudo_member_under_another_spelling_of_an_owned_case_is_rejected(tmp_path, state):
+    """A missing/not-run member of REQ-2 naming REQ-1's case as @@//a:t#m::t1
+    evaded the 'names a case of the report' check, which compared raw strings."""
+    doc = _small_report(tmp_path)
+    _add_member(_entity(doc, "REQ-2"), {"case": "@@//a:t#m::t1", "target": "@@//a:t", "selector": "m::t1",
+                                        "via": "model", "state": state, "owned": False})  # fmt: skip
+    problems = checkreport.check_report(doc)
+    assert any("REQ-2: member @@//a:t#m::t1: its target '@@//a:t' is not canonical" in p for p in problems), problems
+
+
+def test_a_targets_entry_under_another_spelling_is_rejected(tmp_path):
+    doc = _small_report(tmp_path)
+    doc["attribution"]["targets"]["@//a:t"] = dict(doc["attribution"]["targets"]["//a:t"], cases=0, owned=0, owners=[])
+    assert any("attribution.targets: its target '@//a:t'" in p for p in checkreport.check_report(doc))
+
+
+def test_a_row_without_string_target_and_path_is_rejected(tmp_path):
+    doc = _small_report(tmp_path)
+    row = next(r for r in doc["cases"] if r["case"] == _T1)
+    row["target"] = None
+    assert any("target and path must be strings" in p for p in checkreport.check_report(doc))
+
+
+def test_check_report_rejects_one_test_code_owned_by_two_entities_in_two_targets(tmp_path):
+    """Release review (medium): the same file and case path in //a:t (REQ-1)
+    and //b:t (REQ-2) is what attribute() quarantines as
+    same-code-multiple-owners; the audit re-proves it from file, path, target."""
+    doc = _small_report(tmp_path)
+    forged = _forge(doc, _T1, "//b:t", "m::t1", "REQ-2", file="f.py")
+    problems = checkreport.check_report(forged)
+    assert any("run the same test code (file f.py, path m::t1) but are owned by REQ-1, REQ-2" in p for p in problems)
+    other_file = _forge(doc, _T1, "//b:t", "m::t1", "REQ-2", file="g.py")
+    assert checkreport.check_report(other_file) == []  # two files: two tests
+    same_owner = _forge(doc, _T1, "//b:t", "m::t1", "REQ-1", file="f.py")
+    assert checkreport.check_report(same_owner) == []
+
+
+def test_check_report_rejects_one_path_owned_twice_across_declared_variants(tmp_path):
+    doc = _small_report(tmp_path, config="variants: [['//a:t', '//b:t']]")
+    forged = _forge(doc, _T1, "//b:t", "m::t1", "REQ-2")  # no file recorded: only the variants say so
+    problems = checkreport.check_report(forged)
+    assert any("variants //a:t, //b:t, path m::t1" in p for p in problems), problems
+    forged["attribution"]["variants"] = "//a:t,//b:t"
+    assert any("attribution.variants" in p for p in checkreport.check_report(forged))
+
+
+def test_check_report_rejects_a_pseudo_target_path_owned_by_another_entity_without_recorded_sources(tmp_path):
+    doc = _small_report(tmp_path)
+    forged = _forge(doc, _T1, "suite:pytest", "m::t1", "REQ-2")
+    problems = checkreport.check_report(forged)
+    assert any("under a pseudo-target" in p for p in problems), problems
+    pinned = _forge(doc, _T1, "suite:pytest", "m::t1", "REQ-2", file="g.py")
+    assert checkreport.check_report(pinned) == []
+
+
+@pytest.mark.parametrize("via", ["model", "tag"])
+def test_check_report_rejects_an_owned_case_that_declares_two_ids(tmp_path, via):
+    """Release review (medium): attribute() quarantines a case naming two ids
+    (multi-tag) before it reads a claim, so such a row owns nothing."""
+    mode = "hybrid" if via == "tag" else "model"
+    doc = _small_report(tmp_path, mode=mode)
+    row = next(r for r in doc["cases"] if r["case"] == _T1)
+    assert row["via"] == via
+    row["declared"] = ["REQ-1", "REQ-2"]
+    problems = checkreport.check_report(doc)
+    assert any(f"{_T1} declares REQ-1, REQ-2 but is owned by REQ-1" in p for p in problems), problems
+
+
+def test_check_report_rejects_a_tag_owner_its_tag_does_not_name_and_tags_owning_in_model_mode(tmp_path):
+    doc = _small_report(tmp_path, mode="hybrid")
+    other = copy.deepcopy(doc)
+    next(r for r in other["cases"] if r["case"] == _T1)["declared"] = ["REQ-3"]
+    assert any(
+        "owned by REQ-1 through its tag, but it declares ['REQ-3']" in p for p in checkreport.check_report(other)
+    )
+    model_mode = copy.deepcopy(doc)
+    model_mode["attribution"]["mode"] = "model"
+    problems = checkreport.check_report(model_mode)
+    assert any("through its tag in a 'model' report" in p for p in problems), problems
+    assert any("is passed via 'tag' in a model-mode report" in p for p in problems), problems
+
+
+def test_check_report_rejects_an_owned_member_whose_state_is_not_its_cases_result(tmp_path):
+    """Release review (low, a): the row says failed, the member passed, the entity VERIFIED."""
+    doc = _small_report(tmp_path)
+    next(r for r in doc["cases"] if r["case"] == _T1)["status"] = "failed"
+    problems = checkreport.check_report(doc)
+    assert any(f"REQ-1: owned member {_T1} is passed, but its case is failed" in p for p in problems), problems
+
+
+def test_check_report_rejects_an_own_verdict_its_set_does_not_back(tmp_path):
+    """Release review (low, c): VERIFIED through a moved member, or with no
+    members at all; INVALID without a quarantined member."""
+    doc = _small_report(tmp_path)
+    moved = copy.deepcopy(doc)
+    _add_member(_entity(moved, "REQ-2"), {"case": "//c:t#k::gone", "target": "//c:t", "selector": "lock",
+                                          "via": "lock", "state": "moved", "owned": False})  # fmt: skip
+    assert any("REQ-2 reads VERIFIED on its own set, which holds 1 moved" in p for p in checkreport.check_report(moved))
+    empty = copy.deepcopy(doc)
+    _entity(empty, "REQ-3")["status"] = "VERIFIED"
+    empty["summary"]["requirements_verified"] += 1
+    empty["summary"]["requirements_unverified"] -= 1
+    assert any("REQ-3 reads VERIFIED on its own set, which has no passed member" in p
+               for p in checkreport.check_report(empty))  # fmt: skip
+    invalid = copy.deepcopy(doc)
+    _entity(invalid, "REQ-2")["status"] = "INVALID"
+    invalid["summary"]["requirements_verified"] -= 1
+    invalid["summary"]["requirements_invalid"] += 1
+    assert any("REQ-2 reads INVALID but holds no quarantined case" in p for p in checkreport.check_report(invalid))
+
+
+def test_check_report_rejects_a_rollup_from_an_entity_that_is_not_a_child(tmp_path):
+    """Release review (low, d): REQ-3 'derived from REQ-1' with no refines
+    relation makes REQ-1's case the evidence of REQ-3."""
+    doc = _small_report(tmp_path)
+    ent = _entity(doc, "REQ-3")
+    ent["basis"], ent["derived_from"] = "derived", ["REQ-1"]
+    assert any("REQ-3 is derived from REQ-1, which is not one of its children" in p
+               for p in checkreport.check_report(doc))  # fmt: skip
+    own = _entity(doc, "REQ-2")
+    own["derived_from"] = ["REQ-1"]
+    assert any("REQ-2: basis own, but derived from REQ-1" in p for p in checkreport.check_report(doc))
+
+
+def _inject_alias(doc, rnd):
+    """The fuzz's second injector: an owned case copied under another spelling
+    of its key, owned by a second entity, every count kept consistent."""
+    owned = [r for r in doc["cases"] if r["owner"] is not None and r["path"] != "[target]"]
+    if not owned:
+        return None
+    row = rnd.choice(owned)
+    other = rnd.choice([e["id"] for e in _verifiable(doc) if e["id"] != row["owner"]])
+    target, path = row["target"], row["path"]
+    spelling = rnd.choice(["@", "@@", "blank", "tag"] if target.startswith("//") else ["blank", "tag"])
+    if spelling in ("@", "@@"):
+        target = spelling + target
+    elif spelling == "blank":
+        path += " "
+    else:
+        path += f" [rr:{other}]"
+    return _forge(doc, row["case"], target, path, other), f"{target}#{path}"
+
+
+def test_the_fuzz_never_lets_an_alias_spelling_own_a_case_twice():
+    rnd = random.Random(SEED + 3)
+    injected = 0
+    for trial, doc in _fuzz_reports(1500, SEED + 4):
+        got = _inject_alias(doc, rnd)
+        if got is None:
+            continue
+        bad, key = got
+        injected += 1
+        problems = checkreport.check_report(bad)
+        assert any(key in p and ("not canonical" in p or "name tag" in p) for p in problems), (trial, problems)
+    assert injected > 100

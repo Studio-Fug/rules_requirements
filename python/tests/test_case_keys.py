@@ -16,6 +16,7 @@ from rules_requirements.case_keys import (
     is_unscoped,
     key_of,
     name_tags,
+    normalize_target,
     pseudo_target,
     run_dims_from_path,
     run_targets,
@@ -358,3 +359,17 @@ def test_a_caseless_report_outside_testlogs_ran_under_its_suite_names(tmp_path, 
 def test_a_caseless_testlogs_report_keeps_its_path_target(tmp_path):
     testlogs = write(tmp_path, "bazel-testlogs/app/config_test/test.xml", "<testsuite name='pytest' tests='0'/>")
     assert run_targets(ingest.collect([testlogs])) == {"//app:config_test"}
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["//p:t", "@@//p:t", "@//p", "@ws//p:t", "@@rules_x~//p:t", "@@a~~ext~b//p:t", "suite:py#x", "//p:a#b",
+     "@//p:a#b", "record:r", "weird label", "@@//p:t#x"],
+)  # fmt: skip
+def test_normalize_target_is_its_own_normal_form(target):
+    """rr check-report reads a key's target as canonical when normalize_target
+    leaves it unchanged, so whatever it returns must be a fixed point (a '#'
+    is replaced before the label is normalized, not after)."""
+    once = normalize_target(target, "ws")
+    assert normalize_target(once, "ws") == once
+    assert "#" not in once

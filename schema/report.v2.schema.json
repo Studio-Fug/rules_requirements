@@ -139,6 +139,8 @@
       "type": "object",
       "required": [
         "mode",
+        "main_repo",
+        "variants",
         "lock",
         "lane",
         "targets",
@@ -152,6 +154,18 @@
             "hybrid",
             "model"
           ]
+        },
+        "main_repo": {
+          "type": "string"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
         },
         "lock": {
           "type": [

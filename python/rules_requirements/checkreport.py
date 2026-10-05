@@ -34,7 +34,12 @@ and checks that
 from __future__ import annotations
 
 import json
+import unicodedata
 from typing import Any, Mapping
+
+from rules_requirements.case_keys import normalize_target
+from rules_requirements.ingest import NAME_TAG
+from rules_requirements.labels import PSEUDO_PREFIXES
 
 SCHEMA = "rules_requirements/report/v2"
 OWNED_STATES = ("passed", "failed", "error", "skipped")
@@ -50,6 +55,45 @@ _REQUIREMENT_COUNTS = {
     "requirements_incomplete": "INCOMPLETE",
     "requirements_invalid": "INVALID",
 }
+
+
+_OWN_OK = ("VERIFIED", "UNDER-VERIFIED", "VALIDATED")
+"""The verdicts an entity's own set must back (with at least one passed member, nothing open)."""
+_OPEN_STATES = ("failed", "error", "skipped", "missing", "not-run", "moved", "quarantined")
+
+
+def key_problem(key: Any, main_repo: str = "") -> str | None:
+    """Why ``key`` is no canonical case key (``None`` when it is one).
+
+    ``rr report`` files every case under one spelling (:func:`~rules_requirements.case_keys.key_of`):
+    the target is normalized (``@//p:n``, ``@@//p:n``, ``@<main_repo>//p:n`` and
+    ``//p`` are ``//p:p``; pseudo-targets pass through), and the path is NFC with
+    no surrounding blanks and no ``[rr:ID]`` name tag at the end of the case
+    name. Any other spelling would make one test case two keys, each of which
+    could have an owner.
+    """
+    if not isinstance(key, str):
+        return f"{key!r} is not a case key"
+    target, sep, path = key.partition("#")
+    if not sep or not target or not path:
+        return f"{key!r} is not <target>#<path>"
+    bad = target_problem(target, main_repo)
+    if bad is not None:
+        return f"{key}: {bad}"
+    if path != unicodedata.normalize("NFC", path).strip():
+        return f"{key}: its path {path!r} is not canonical (NFC, no surrounding blanks)"
+    # The end of the case name: whatever follows the last '::' is part of it.
+    if NAME_TAG.search(path.rpartition("::")[2]):
+        return f"{key}: its path {path!r} ends with an [rr:ID] name tag, which ingest strips from case names"
+    return None
+
+
+def target_problem(target: str, main_repo: str = "") -> str | None:
+    """Why ``target`` is not the one spelling ``rr report`` files cases under (``None``: it is)."""
+    canonical = normalize_target(target, main_repo)
+    if not target or canonical != target:
+        return f"its target {target!r} is not canonical (rr report writes {canonical!r})"
+    return None
 
 
 class ReportError(ValueError):
@@ -122,7 +166,23 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
             elif ent.get("members"):
                 problems.append(f"{ent['id']}: a {section[:-1].replace('_', ' ')} holds no verification set")
 
-    # The inverse matrix: one row, one scalar owner per case.
+    att = doc.get("attribution")
+    if not isinstance(att, dict):
+        problems.append("attribution: missing")
+        att = {}
+    raw_targets = att.get("targets")
+    targets: dict[str, Any] = raw_targets if isinstance(raw_targets, dict) else {}
+    mode = att.get("mode")
+    main_repo = att.get("main_repo", "")
+    if not isinstance(main_repo, str):
+        problems.append(f"attribution.main_repo: {main_repo!r} is not a repository name")
+        main_repo = ""
+    for target in targets:
+        bad = target_problem(target, main_repo)
+        if bad is not None:
+            problems.append(f"attribution.targets: {bad}; one target under two spellings could own a case twice")
+
+    # The inverse matrix: one row, one scalar owner per case, under one key spelling.
     owner: dict[str, str | None] = {}
     quarantine_code: dict[str, str] = {}
     rows = _list(doc, "cases", problems)
@@ -134,29 +194,44 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
         key = row["case"]
         if key in owner:
             problems.append(f"{key} is listed twice in cases")
-        if row.get("target") is not None and row.get("path") is not None and key != f"{row['target']}#{row['path']}":
+        if not isinstance(row.get("target"), str) or not isinstance(row.get("path"), str):
+            problems.append(f"{key}: its target and path must be strings ({row.get('target')!r}, {row.get('path')!r})")
+        elif key != f"{row['target']}#{row['path']}":
             problems.append(f"{key}: its key is not <target>#<path> ({row['target']!r}, {row['path']!r})")
+        bad = key_problem(key, main_repo)
+        if bad is not None:
+            problems.append(f"{bad}; one test case under two spellings could have two owners")
         value = row.get("owner")
         if value is not None and not isinstance(value, str):
             problems.append(f"{key}: owner {value!r} is not a scalar id; a test case verifies at most one requirement")
             value = None
         elif isinstance(value, str) and value not in verifiable:
             problems.append(f"{key}: owner {value!r} is no user need, requirement or mitigation of this report")
-        if value is not None and row.get("via") not in ("model", "tag"):
-            problems.append(f"{key}: owned by {value} via {row.get('via')!r}")
-        if value is None and row.get("via") is not None:
-            problems.append(f"{key}: owned by nobody, but via {row.get('via')!r}")
+        via = row.get("via")
+        if value is not None and via not in ("model", "tag"):
+            problems.append(f"{key}: owned by {value} via {via!r}")
+        if value is None and via is not None:
+            problems.append(f"{key}: owned by nobody, but via {via!r}")
+        raw_declared = row.get("declared")
+        ids = [str(d) for d in raw_declared] if isinstance(raw_declared, list) else []
+        if len(set(ids)) > 1 and (value is not None or row.get("quarantine") != "multi-tag"):
+            # attribute() quarantines a case naming two ids before it reads any claim.
+            problems.append(
+                f"{key} declares {', '.join(ids)} but is "
+                + (f"owned by {value}" if value is not None else f"quarantined as {row.get('quarantine')!r}")
+                + "; a case naming two ids is quarantined multi-tag and owns nothing"
+            )
+        if value is not None and via == "tag":
+            if ids != [value]:
+                problems.append(f"{key}: owned by {value} through its tag, but it declares {ids!r}")
+            if mode != "hybrid":
+                problems.append(f"{key}: owned by {value} through its tag in a {mode!r} report (only hybrid tags own)")
         owner[key] = value
         if isinstance(row.get("quarantine"), str):
             quarantine_code[key] = row["quarantine"]
         by_target.setdefault(str(row.get("target")), []).append(row)
 
-    att = doc.get("attribution")
-    if not isinstance(att, dict):
-        problems.append("attribution: missing")
-        att = {}
-    raw_targets = att.get("targets")
-    targets: dict[str, Any] = raw_targets if isinstance(raw_targets, dict) else {}
+    rows_by_key = {r["case"]: r for r in rows if isinstance(r, dict) and isinstance(r.get("case"), str)}
 
     # Members: the owned members partition the owned cases. Ownership is the
     # member's ``owned`` flag (the report writes Member.owned), never guessed
@@ -188,6 +263,15 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                 if case is not None and not isinstance(case, str):
                     problems.append(f"{eid}: member case {case!r} is not one case key")
                     continue
+                if case is not None:
+                    bad = key_problem(case, main_repo)
+                    if bad is not None:
+                        problems.append(f"{eid}: member {bad}")
+                    elif mb.get("target") != case.partition("#")[0]:
+                        problems.append(f"{eid}: member {case} is filed under the target {mb.get('target')!r}")
+                if mb.get("via") == "tag" and mode == "model" and state != "quarantined":
+                    # In model mode a tag only names an entity a quarantine makes INVALID.
+                    problems.append(f"{eid}: member {case!r} is {state} via 'tag' in a model-mode report")
                 if not isinstance(is_owned, bool):
                     problems.append(f"{eid}: member {case!r} does not say whether it is owned ({is_owned!r})")
                     continue
@@ -202,6 +286,16 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                         problems.append(f"{case} is an owned ({state}) member of {eid} but no case of this report")
                     elif owner[case] != eid:
                         problems.append(f"{case} is an owned ({state}) member of {eid} but owned by {owner[case]}")
+                    else:
+                        # Its state is its case's result, or error on a tainted target.
+                        trow = targets.get(case.partition("#")[0])
+                        tainted = isinstance(trow, dict) and bool(trow.get("tainted"))
+                        result = "error" if tainted else rows_by_key[case].get("status")
+                        if state != result:
+                            problems.append(
+                                f"{eid}: owned member {case} is {state}, but its case "
+                                + ("ran on a tainted target (error)" if tainted else f"is {result}")
+                            )
                 elif state in OWNED_STATES:
                     # A pseudo-member in an owned state: only an error for a
                     # case the evidence lacks, on a target that ran tainted or
@@ -233,6 +327,16 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                         quarantined_members.add((eid, case))
             if counted["quarantined"] and status.get(eid) != "INVALID":
                 problems.append(f"{eid} holds a quarantined case but reads {status.get(eid)}, not INVALID")
+            if not counted["quarantined"] and status.get(eid) == "INVALID":
+                problems.append(f"{eid} reads INVALID but holds no quarantined case")
+            # A verdict its own set must back: one passed member at least, nothing open.
+            if ent.get("basis") in ("own", "own+derived") and status.get(eid) in _OWN_OK:
+                open_ = [f"{counted[st]} {st}" for st in _OPEN_STATES if counted[st]]
+                if not counted["passed"] or open_:
+                    problems.append(
+                        f"{eid} reads {status.get(eid)} on its own set, which "
+                        + (f"holds {', '.join(open_)}" if open_ else "has no passed member")
+                    )
             summary = ent.get("set")
             if isinstance(summary, dict):
                 if summary.get("members") != len(members):
@@ -243,6 +347,38 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                         problems.append(f"{eid}: set.{field} is {summary.get(field)}, its members say {n}")
             else:
                 problems.append(f"{eid}: no set summary")
+    # A rollup reads only the entity's children (refines, satisfies, method,
+    # mitigates, implemented_by), never another entity's evidence.
+    children: dict[str, set[str]] = {}
+    for section, fields in (("requirements", ("refines", "satisfies", "method")), ("mitigations", ("mitigates",))):
+        for ent in _list(doc, section, []):
+            if not isinstance(ent, dict) or not isinstance(ent.get("id"), str):
+                continue
+            for name in fields:
+                parents = ent.get(name)
+                for parent in [parents] if isinstance(parents, str) else parents or []:
+                    children.setdefault(str(parent), set()).add(ent["id"])
+    for ent in _list(doc, "mitigations", []):
+        if isinstance(ent, dict) and isinstance(ent.get("id"), str):
+            children.setdefault(ent["id"], set()).update(map(str, ent.get("implemented_by") or []))
+    for section in (*VERIFIABLE_SECTIONS, *OTHER_SECTIONS):
+        for ent in _list(doc, section, []):
+            if not isinstance(ent, dict) or not isinstance(ent.get("id"), str):
+                continue
+            derived = ent.get("derived_from") or []
+            if not isinstance(derived, list):
+                problems.append(f"{ent['id']}: derived_from is not a list")
+                continue
+            if ent.get("basis") == "own" and derived:
+                problems.append(f"{ent['id']}: basis own, but derived from {', '.join(map(str, derived))}")
+            foreign = sorted(set(map(str, derived)) - children.get(ent["id"], set()))
+            if foreign:
+                problems.append(
+                    f"{ent['id']} is derived from {', '.join(foreign)}, which "
+                    + ("is not one of its children" if len(foreign) == 1 else "are not among its children")
+                    + " (refines, satisfies, method, mitigates or implemented_by)"
+                )
+
     # The 0.3.x evidence[] view: exactly the owned members, nothing else.
     for section in (*VERIFIABLE_SECTIONS, *OTHER_SECTIONS):
         for ent in _list(doc, section, problems):
@@ -281,11 +417,11 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
     for case, who in sorted(owner.items()):
         if who is not None and who not in member_of.get(case, ()):
             problems.append(f"{case} is owned by {who} but is no member of it")
+    problems.extend(_same_code_problems(rows, att, main_repo))
 
     # Quarantines: owned by nobody; the entities holding the case as a
     # quarantined member are exactly the verifiable ones named, each INVALID.
     quarantined = _list(att, "quarantined", problems)
-    rows_by_key = {r["case"]: r for r in rows if isinstance(r, dict) and isinstance(r.get("case"), str)}
     holders: dict[str, set[str]] = {}
     for eid, key in quarantined_members:
         holders.setdefault(key, set()).add(eid)
@@ -395,6 +531,62 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
         by = sum(int(gran.get(k) or 0) for k in kinds)
         if by != owned_n:
             problems.append(f"attribution.granularity counts {by} owned case(s), cases list {owned_n}")
+    return problems
+
+
+def _same_code_problems(rows: list[Any], att: Mapping[str, Any], main_repo: str) -> list[str]:
+    """One test's code owned by two entities: what attribute() step 4 quarantines,
+    re-proved from the rows (their ``file``, ``path`` and ``target``) and the
+    ``variants`` the report records."""
+    problems: list[str] = []
+    owned = [
+        r for r in rows if isinstance(r, dict) and isinstance(r.get("owner"), str) and isinstance(r.get("case"), str)
+    ]
+
+    def conflict(group: list[dict[str, Any]], why: str) -> None:
+        owners = sorted({str(r["owner"]) for r in group})
+        if len(owners) > 1:
+            keys = ", ".join(sorted(f"{r['case']} ({r['owner']})" for r in group))
+            problems.append(
+                f"{keys} run the same test code ({why}) but are owned by {', '.join(owners)}; attribute() "
+                "quarantines this as same-code-multiple-owners"
+            )
+
+    by_file: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for r in owned:
+        if isinstance(r.get("file"), str) and r["file"]:
+            by_file.setdefault((r["file"], str(r.get("path"))), []).append(r)
+    for (file, path), group in by_file.items():
+        if len({str(r.get("target")) for r in group}) > 1:
+            conflict(group, f"file {file}, path {path}")
+    raw = att.get("variants", [])
+    if not isinstance(raw, list) or not all(isinstance(g, list) and all(isinstance(t, str) for t in g) for g in raw):
+        problems.append(f"attribution.variants: {raw!r} is not a list of target lists")
+        raw = []
+    for group_targets in raw:
+        for target in group_targets:
+            bad = target_problem(target, main_repo)
+            if bad is not None:
+                problems.append(f"attribution.variants: {bad}")
+        members = set(group_targets)
+        by_path: dict[str, list[dict[str, Any]]] = {}
+        for r in owned:
+            if r.get("target") in members:
+                by_path.setdefault(str(r.get("path")), []).append(r)
+        for path, group in by_path.items():
+            conflict(group, f"variants {', '.join(group_targets)}, path {path}")
+    # A suite:/record: pseudo-target cannot be pinned to a build target: an
+    # equal path under another owner may be the same code unless every
+    # source file is recorded.
+    by_path_all: dict[str, list[dict[str, Any]]] = {}
+    for r in owned:
+        if r.get("path") != "[target]":
+            by_path_all.setdefault(str(r.get("path")), []).append(r)
+    for path, group in by_path_all.items():
+        if any(str(r.get("target")).startswith(PSEUDO_PREFIXES) for r in group) and not all(
+            isinstance(r.get("file"), str) and r["file"] for r in group
+        ):
+            conflict(group, f"path {path} under a pseudo-target, its source not recorded")
     return problems
 
 
