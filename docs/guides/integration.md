@@ -191,6 +191,7 @@ identity of what was tested so that older evidence is marked stale:
       --md "$GITHUB_WORKSPACE/traceability-report.md" \
       --fail-on failed
 - uses: actions/upload-artifact@v4
+  if: always()                           # upload the report also when the step above failed
   with:
     name: traceability
     path: traceability-*
@@ -198,11 +199,13 @@ identity of what was tested so that older evidence is marked stale:
 
 `rr report` exits 3 when a test case is quarantined — its evidence names two
 ids, or two entities claim it — after writing the reports, so the artifact is
-there to read; every entity it names reads INVALID. Add the one-owner checks
-to the same job:
+there to read (the upload step runs `if: always()`, or GitHub would skip it
+after the failed step); every entity it names reads INVALID. Add the
+one-owner checks to the same job:
 
 ```yaml
 - name: Attribution checks (one test case, one requirement)
+  if: always()                           # also after a quarantine (exit 3) or a failure
   run: |
     bazel query 'tests(//...)' > "$RUNNER_TEMP/targets.txt"
     bazel run @rules_requirements//python:rr -- validate requirements \

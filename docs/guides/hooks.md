@@ -42,7 +42,7 @@ selects); a test the model claims needs no hook call at all. See
 
 | Property | Meaning |
 | -------- | ------- |
-| `requirement` | The id the test case declares — one per case. (Repeated properties, and comma- or whitespace-separated values, are still read as several ids; that form is deprecated, and since 0.3 such a case is quarantined as `multi-tag` and counts for no requirement.) |
+| `requirement` | The id the test case declares — one per case. (Repeated properties, and comma- or whitespace-separated values, are read as several ids (whitespace since 0.3; 0.2 read `"REQ-1 REQ-2"` as one unknown id); that form is deprecated, and since 0.3 such a case is quarantined as `multi-tag` and counts for no requirement.) |
 | `requirements` | 0.2's name for comma-separated ids (googletest's hook wrote it); still read, like `requirement`. |
 | `rr.file` | The source file of the test code that produced the case, relative to the workspace (written by the pytest and unittest hooks, `JUnitWriter`, `CheckPlan` and `rr case --file`). Identifies the same test code run by several targets. |
 | `rr.scope` | `target` for a result about the whole run rather than a test case (an `exit-status` error, a report that could not be read). It declares no requirement; it taints every case claimed on its target. |

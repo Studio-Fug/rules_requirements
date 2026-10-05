@@ -4,7 +4,9 @@
 :class: note
 
 This guide takes a project from 0.2's union rule to 0.3's model mode in
-steps that each keep CI green: the first half runs on 0.2 (`rr cases`,
+steps that each keep CI green (a CI that runs `--strict`, `rr_model(strict =
+True)` or `rr_report(strict = True)`, or gates on `--fail-on gaps`, needs the
+extra steps the pin bump below lists): the first half runs on 0.2 (`rr cases`,
 `rr migrate plan`, `rr migrate apply --stage tags`, and since v0.2.1
 `rr migrate verify`, none of which changes a verdict); the second pins 0.3
 in hybrid mode, writes the claims with `rr migrate apply --stage model` and
@@ -666,7 +668,20 @@ bump fixes the shared targets, which 0.2 cannot express per case.
 
    Other 0.2 references (a bare label, `{target, level}`) still parse as
    whole-target claims with a `bare-target-reference` warning; leave them
-   for step 8.
+   for step 8, unless CI runs strict: `--strict`, `rr_model(strict = True)`
+   and `rr_report(strict = True)` escalate that warning (and the other new
+   0.3 warnings: `unknown-id`, `coarse-claim`, `suite-level-requirement`,
+   `unscoped-evidence`, `same-path-multiple-owners`, ...) to errors. Then
+   convert them in this change, set `config.rules: {bare-target-reference:
+   warning}` (strict still escalates it), or drop strict until step 8. Two
+   more effects of the bump: a whole-target claim of a target with no
+   results in this evidence (another lane's HIL target, say) is now an
+   expected not-run member, so its entity reads INCOMPLETE and `--fail-on
+   unverified` fails (pass that lane's evidence too, or report it with
+   `--lane`/`--lane-targets`); and without `config.sets_lock` the report
+   carries an `unpinned-sets` gap, so `--fail-on gaps` fails until the sets
+   are locked (set `sets_lock` and run `rr sets lock --write`, which works in
+   hybrid mode).
 3. Keep `attribution: hybrid`, the 0.3 default: a single-id tag still owns
    a case that no claim covers, so every module whose tags you rewrote keeps
    its owners. Set `config.main_repo` if other modules refer to your
@@ -724,7 +739,12 @@ config:
   sets_lock: verification.rrlock
 ```
 
-Verdicts are identical to the hybrid ones by construction. Keep the
+Verdicts over every lane's evidence are identical to the hybrid ones by
+construction. A single lane's report now shows a set that spans lanes as
+INCOMPLETE (its other lane's cases are not-run members), where hybrid mode,
+whose tags only own the cases present, ignored them: report lanes with
+`--lane`/`--lane-targets`, or gate per lane on the combined report
+({doc}`outputs`). Keep the
 single-id tags as cross-checks (a tag that disagrees with the model is a
 `tag-mismatch`); new tests need none. `rr attribution --suggest` prints the
 selector for any case still owned only by a tag, or tagged but unclaimed

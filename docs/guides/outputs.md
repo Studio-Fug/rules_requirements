@@ -95,7 +95,27 @@ INVALID, if an entity's `evidence` is not exactly the view of its owned
 members, if the counts (summary, sets, per-target counts, granularity)
 disagree with the rows they count, or if the file names a key twice in one
 object (a duplicate `owner` reads differently to different parsers); `2` if
-the file is not a `rules_requirements/report/v2` report. An `error` member
+the file is not a `rules_requirements/report/v2` report.
+
+It also re-proves what `attribute()` decides from the rows alone. Every case
+key (rows, members, `attribution.targets`) must be in its one spelling: the
+target normalized (`@//p:t`, `@@//p:t`, `//p` and, with the recorded
+`attribution.main_repo`, `@<main_repo>//p:t` are spellings of `//p:t`), the
+path NFC with no surrounding blanks and no `[rr:ID]` tag at the end of the
+case name. One test's code may have one owner: two owned rows with the same
+`file` and `path` in two targets, equal paths in one recorded
+`attribution.variants` group, or equal paths where one target is a `suite:` or
+`record:` pseudo-target and a `file` is missing, are rejected when their owners
+differ. A row declaring two ids must be quarantined `multi-tag`; an owner via
+`tag` must be the row's one declared id, in a `hybrid` report. An owned
+member's state is its row's `status` (or `error` on a tainted target); an
+entity that reads VERIFIED, UNDER-VERIFIED or VALIDATED on its own set
+(`basis` `own` or `own+derived`) needs a passed member and no failed, error,
+skipped, missing, not-run, moved or quarantined one; INVALID needs a
+quarantined member; and `derived_from` names only the entity's children
+(`refines`, `satisfies`, `method`, `mitigates`, `implemented_by`).
+
+An `error` member
 that is not owned is a pseudo-member: it names no case of the report, on a
 tainted or synthetic-only target. A `missing` or `not-run` member never names
 a case of the report either (only a `moved` or `quarantined` member may), so
@@ -115,7 +135,7 @@ a golden file and reviewed as a diff. Its JSON Schema is
 | `title` | `--title`, else the project's `name`, else `"Requirements traceability"` |
 | `project` | The model's `project:` metadata |
 | `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases` (one per case key: retries, runs, shards and evidence roots merged, target-scope results not counted), `test_cases_owned`, `test_cases_unowned`, `test_cases_quarantined`, `gaps` |
-| `attribution` | `mode` (`hybrid` / `model`), `lock` (its path, or `null`), `lane` (or `null`), `targets` (per target: `cases`, `owned`, `quarantined`, `owners`, `synthetic`, `ran`; `tainted` and `in_lane` when they apply), `quarantined` (each `{case, code, entities, declared, claims: [{entity, selector, location}], detail}`), `issues` (`{code, severity, message, case, entities, declared, target}`), `granularity` (`owned_by_literal`, `owned_by_pattern`, `owned_by_whole`, `owned_by_tag`, `coarse_claims`) |
+| `attribution` | `mode` (`hybrid` / `model`), `main_repo` (`config.main_repo`, `""` for none) and `variants` (`config.variants`, normalized), which `rr check-report` reads, `lock` (its path, or `null`), `lane` (or `null`), `targets` (per target: `cases`, `owned`, `quarantined`, `owners`, `synthetic`, `ran`; `tainted` and `in_lane` when they apply), `quarantined` (each `{case, code, entities, declared, claims: [{entity, selector, location}], detail}`), `issues` (`{code, severity, message, case, entities, declared, target}`), `granularity` (`owned_by_literal`, `owned_by_pattern`, `owned_by_whole`, `owned_by_tag`, `coarse_claims`) |
 | `cases` | The inverse matrix: every case key with **one owner or `null`** — `{case, target, path, owner, via, status, level, declared, quarantine, file, synthetic, flaky, duplicate}` (the last five when they apply). The input of `rr check-report`. |
 | `levels` | The configured levels: `{name, rank}` (`rank` is `null` for unordered levels) |
 | `user_needs`, `requirements`, `mitigations`, `risks`, `test_methods` | One object per entity (below) |

@@ -111,6 +111,12 @@ requirements:
   - id: REQ-1
     title: Turn the heater on below setpoint - hysteresis
     satisfies: [UN-1]
+    verified_by:   # the cases that verify it (0.3); the test's tag cross-checks
+      - target: //:controller_test
+        cases: ["test_controller::test_heats_below_setpoint"]
+  - id: REQ-2
+    title: Cut the heater off above the over-temperature limit
+    satisfies: [UN-1]
 risks:
   - id: RISK-1
     title: Room overheats because the heater is stuck on

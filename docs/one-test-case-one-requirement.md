@@ -73,7 +73,13 @@ case, the first rule that applies decides:
 After that, owned cases with the same test code are compared: the same source
 file and case path in two targets, or equal paths in targets that
 `config.variants` declares as one test code. If they have different owners,
-every one of them is quarantined (`same-code-multiple-owners`).
+every one of them is quarantined (`same-code-multiple-owners`). So are equal
+case paths with different owners when one of them is filed under a `suite:`
+or `record:` pseudo-target and a source file is not recorded for each: a
+pseudo-target (JUnit outside `bazel-testlogs`, say) cannot be pinned to a
+build target, so a copy of one target's results could otherwise count for a
+second requirement. Equal paths of two real build labels with unknown sources
+stay a `same-path-multiple-owners` warning.
 
 In **model mode** the model alone decides. Tags are cross-checks that can
 only raise a warning, and a test needs no tag at all. In **hybrid mode**, the
@@ -197,9 +203,16 @@ these off: `--strict` only escalates warnings to errors, and
 
 **L6: audit.** `rr check-report report.json` re-proves the partition from the
 published JSON alone, without the code that wrote it. It fails if any case
-key is owned by two entities, if an owner is not a single id, if a
-quarantined case is owned, if an entity a quarantine names is not INVALID, or
-if the counts disagree with the rows they count ({doc}`guides/outputs`).
+key is owned by two entities, if a key is not in the one spelling `rr
+report` writes (so one case cannot hide as two keys: `@//p:t`, a padded or
+non-NFC path, an `[rr:ID]` name tag; `attribution.main_repo` makes
+`@<main_repo>//` collapse too), if one test's code (same file and path, a
+`variants` group, or a pseudo-target without recorded sources) is owned by
+two entities, if a case naming two ids or a tag that names another id owns
+anything, if an owner is not a single id, if a quarantined case is owned, if
+an entity a quarantine names is not INVALID, if a verdict its own set cannot
+back or a rollup from a non-child is claimed, or if the counts disagree with
+the rows they count ({doc}`guides/outputs`).
 `rr_report` adds it as `<name>_check_test` whenever it builds a JSON report.
 Property tests guard the code itself: one regression test per path by which a
 case could acquire a requirement, and a seeded fuzz of attribution that

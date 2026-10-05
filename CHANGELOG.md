@@ -50,10 +50,19 @@ one case to verify two. Semantic release: verdicts change on purpose.
   pytest records only the nearest scope's id; `JUnitWriter.cases` is
   read-only; `rr_report` adds `<name>_check_test` with a JSON report.
 - `attribution: hybrid` is the default, so single-id tags keep working.
+- Verdicts that move at the bump: whitespace separates ids, `[rr:ID]` name
+  tags declare ids, a whole-target claim of a target without results reads
+  INCOMPLETE, one stale member under-verifies the set, a skipped-only set
+  reads INCOMPLETE, and `--fail-on gaps` fails on `unpinned-sets` without a
+  lock. `--strict` (and `strict = True` in Bazel) also fails on the new 0.3
+  warnings, such as `bare-target-reference`.
+- One case path owned twice where one target is a `suite:`/`record:`
+  pseudo-target and a source file is unknown is quarantined.
 
 ### Removed
 
-- Nothing yet.
+- No command, rule or report key; some Python constructor positions changed
+  (`JUnitWriter`, `VerifiedBy`, `CaseRow`: pass fields by keyword).
 
 ### Deprecated
 
