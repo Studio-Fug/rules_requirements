@@ -373,6 +373,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "quarantined",
+          "owned": false,
           "level": "simulation",
           "reason": "multi-tag"
         },
@@ -382,6 +383,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "passed",
+          "owned": true,
           "level": "simulation"
         },
         {
@@ -390,6 +392,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "quarantined",
+          "owned": false,
           "level": "simulation",
           "reason": "multi-tag"
         }
@@ -436,6 +439,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "passed",
+          "owned": true,
           "level": "simulation"
         }
       ],
@@ -481,6 +485,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "quarantined",
+          "owned": false,
           "level": "simulation",
           "reason": "multi-tag"
         },
@@ -490,6 +495,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "passed",
+          "owned": true,
           "level": "sil"
         }
       ],
@@ -536,6 +542,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "quarantined",
+          "owned": false,
           "level": "simulation",
           "reason": "multi-tag"
         },
@@ -545,6 +552,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "passed",
+          "owned": true,
           "level": "sil"
         }
       ],
@@ -591,6 +599,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "failed",
+          "owned": true,
           "level": "simulation"
         }
       ],
@@ -635,6 +644,7 @@
           "selector": "tag",
           "via": "tag",
           "state": "passed",
+          "owned": true,
           "level": "simulation"
         }
       ],
