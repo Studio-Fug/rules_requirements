@@ -784,10 +784,13 @@ def errors(ws):
 
 
 def test_renaming_an_entity_renames_its_lock_entries_with_it(ledger):
-    ws = locked_ledger(ledger)
+    # Another entity's entry (REQ-3 claims suite::c) is left exactly as it was.
+    ws = locked_ledger(ledger, LOCKED + '    "suite::c": REQ-3\n')
+    ws.update("REQ-3", {**claim("suite::c"), "title": "Cut the heater"})
     assert ws.rename("REQ-1", "REQ-10") == []
     lock = lock_text(ledger)
     assert '"suite::a": REQ-10' in lock and '"suite::b": REQ-10' in lock and "REQ-1\n" not in lock
+    assert '"suite::c": REQ-3\n' in lock and "REQ-30" not in lock
     assert errors(ws) == []
     att = ws.snapshot().attribution
     assert (
@@ -795,6 +798,37 @@ def test_renaming_an_entity_renames_its_lock_entries_with_it(ledger):
         and att.lock.owner_of("//t:ctl_test", "suite::b") == "REQ-10"
     )
     assert entity_payload(ws, "REQ-10")["set"]["passed"] == 2
+
+
+def test_a_save_that_rewrites_the_lock_refuses_when_another_editor_changed_the_lock(ledger, monkeypatch):
+    """Two editors of one checkout: the first prepares a rename (which
+    rewrites the lock); before it commits, the second runs update_lock and
+    writes the lock first. The rename must fail changed-on-disk (409), and
+    the second editor's lock must still be on disk: a lock the first read is
+    checked like a model file, so neither save is lost."""
+    from rules_requirements.server import workspace
+
+    first = locked_ledger(ledger, LOCKED.replace('    "suite::b": REQ-1\n', ""))
+    second = ledger_ws(ledger)
+    real = workspace._Transaction.commit
+    raced = []
+
+    def commit(txn):
+        if txn.ws is first and not raced:
+            raced.append(second.update_lock())  # the other editor saves the lock meanwhile
+        return real(txn)
+
+    monkeypatch.setattr(workspace._Transaction, "commit", commit)
+    model_before = pathlib.Path(os.path.join(ledger, "req/model.yaml")).read_text(encoding="utf-8")
+    with pytest.raises(WorkspaceError) as exc:
+        first.rename("REQ-1", "REQ-10")
+    assert exc.value.status == 409
+    assert [c["code"] for c in exc.value.data["conflicts"]] == ["changed-on-disk"]
+    assert "req/verification.rrlock changed on disk" in str(exc.value)
+    assert [e["case"] for e in raced[0]["added"]] == ["//t:ctl_test#suite::b"]
+    lock = lock_text(ledger)
+    assert '"suite::a": REQ-1\n' in lock and '"suite::b": REQ-1\n' in lock and "REQ-10" not in lock
+    assert pathlib.Path(os.path.join(ledger, "req/model.yaml")).read_text(encoding="utf-8") == model_before
 
 
 def test_deleting_an_entity_drops_its_lock_entries_with_it(ledger):
@@ -806,14 +840,20 @@ def test_deleting_an_entity_drops_its_lock_entries_with_it(ledger):
     assert errors(ws) == []  # no lock-invalid left behind
 
 
-def test_the_guard_refuses_a_lock_entry_whose_owner_the_save_removes(ledger):
+def test_the_guard_refuses_a_lock_entry_whose_owner_the_save_removes(ledger, monkeypatch):
     from rules_requirements import edit
-    from rules_requirements.server.workspace import GUARDED
+    from rules_requirements.server import workspace
 
-    assert "lock-invalid" in GUARDED
     ws = locked_ledger(ledger)
     txn = ws._txn()  # a delete that forgets the lock
     txn.edit("req/model.yaml", lambda t: edit.delete_entity(t, "REQ-1"), {"REQ-1": None})
+    # GUARDED is the guard's vocabulary: a conflict whose code it does not
+    # list fails closed (no save), so lock-invalid must be in it.
+    monkeypatch.setattr(workspace, "GUARDED", tuple(c for c in workspace.GUARDED if c != "lock-invalid"))
+    with pytest.raises(WorkspaceError, match="lock-invalid, which GUARDED does not list") as unlisted:
+        txn.check()
+    assert unlisted.value.status == 500
+    monkeypatch.undo()
     result = txn.check()
     assert {c.code for c in result.conflicts} == {"lock-invalid"}
     assert {c.case for c in result.conflicts} == {"//t:ctl_test#suite::a", "//t:ctl_test#suite::b"}

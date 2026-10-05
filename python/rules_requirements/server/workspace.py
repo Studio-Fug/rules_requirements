@@ -86,7 +86,9 @@ class WorkspaceError(Exception):
 
 
 # Problems a save may not introduce (refused with 409). Hard errors of the
-# one-owner rule: none of them can be configured off.
+# one-owner rule: none of them can be configured off. Every conflict
+# Workspace.check builds names one of these codes (it refuses the save as a
+# guard error otherwise), so this tuple is the guard's whole vocabulary.
 GUARDED = (
     "shared-case",
     "same-code-multiple-owners",
@@ -555,6 +557,12 @@ class Workspace:
                     "a test case verifies at most one requirement"
                 )
             conflicts.append(Conflict(q.code, msg, str(q.key), q.entities, owner or "", "attribution" if owner else ""))
+        unlisted = sorted({c.code for c in conflicts} - set(GUARDED))
+        if unlisted:
+            # Fail closed: a conflict the guard does not know is still no save.
+            raise WorkspaceError(
+                f"the save guard found {', '.join(unlisted)}, which GUARDED does not list; nothing was saved", 500
+            )
         return Check(conflicts, candidate, after_att, issues, _tag_takeovers(before_att, after_att, old))
 
     @staticmethod
