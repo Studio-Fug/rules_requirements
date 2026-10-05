@@ -640,3 +640,25 @@ def test_nearest_case_hints_are_bounded(tmp_path):
     assert nearest("//a:t", "mod1::test_1x") == "mod1::test_1"
     assert nearest("//a:t", "mod1::test_1x") is None  # the budget is spent: no more difflib work
     assert nearest("//a:none", "x") is None
+
+
+def test_counts_test_cases_once_per_resolved_case(tmp_path, model):
+    """Retried attempts, a target-scope exit status and a duplicate are
+    observations, not test cases: P21 merges them, and counts() agrees."""
+    ev = Evidence()
+    for case in (
+        TestCase("x", "failed", "c", source="bazel-testlogs/p/t/test_attempts/attempt_1.xml", target="//p:t"),
+        TestCase("x", "passed", "c", source="bazel-testlogs/p/t/test.xml", target="//p:t"),
+        TestCase(
+            "exit-status",
+            "passed",
+            source="bazel-testlogs/p/t/test.xml",
+            target="//p:t",
+            properties={"rr.scope": "target"},
+        ),
+        TestCase("y", "passed", "c", source="bazel-testlogs/p/t/test.xml", target="//p:t"),
+        TestCase("y", "passed", "c", source="bazel-testlogs/p/t/test.xml", target="//p:t"),
+    ):
+        ev.add(case)
+    m = build_matrix(model, ev)
+    assert len(ev.cases) == 5 and m.counts()["test_cases"] == len(m.attribution.cases) == 2

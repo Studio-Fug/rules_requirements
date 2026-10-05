@@ -56,7 +56,7 @@ a golden file and reviewed as a diff. Top-level keys:
 | `schema` | `"rules_requirements/report/v1"` |
 | `title` | `--title`, else the project's `name`, else `"Requirements traceability"` |
 | `project` | The model's `project:` metadata |
-| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases`, `gaps` |
+| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases` (one per case key: retries, runs, shards and evidence roots merged, target-scope results not counted), `gaps` |
 | `levels` | The configured levels: `{name, rank}` (`rank` is `null` for unordered levels) |
 | `user_needs`, `requirements`, `mitigations`, `risks`, `test_methods` | One object per entity (below) |
 | `modules` | `{module: status}` rollup |

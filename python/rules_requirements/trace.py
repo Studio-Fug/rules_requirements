@@ -244,7 +244,9 @@ class Matrix:
             "risks_mitigated": n(cfg.RISK, MITIGATED),
             "mitigations": n(cfg.MITIGATION),
             "mitigations_verified": n(cfg.MITIGATION, VERIFIED),
-            "test_cases": len(self.evidence.cases),
+            # The cases attribution resolved (one per key: attempts, runs,
+            # shards and roots merged; target-scope results are no case).
+            "test_cases": len(self.attribution.cases) if self.attribution is not None else len(self.evidence.cases),
             "gaps": len(self.gaps),
         }
 
