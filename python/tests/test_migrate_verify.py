@@ -426,3 +426,24 @@ def test_cli(tmp_path, capsys, monkeypatch):
     assert rc == 2 and "names more than one id" in err
     rc = cli.main(["migrate", "verify", "--worksheet", str(tmp_path / "none.rrplan"), "--evidence", good])
     assert rc == 2 and "cannot read worksheet" in capsys.readouterr().err
+
+
+def test_a_caseless_report_outside_testlogs_ran_under_its_suite_name(tmp_path):
+    """A non-Bazel pytest report that collected nothing (an empty
+    <testsuite name='pytest'>) ran the target its cases are keyed under,
+    suite:pytest, not suite:<file stem>: --allow-missing does not excuse
+    a decided case of it."""
+    doc = {
+        "schema": migrate.SCHEMA,
+        "groups": [{"target": "suite:pytest", "group": "m", "counts_toward": ["REQ-1", "REQ-2"],
+                    "tags": ["REQ-1", "REQ-2"], "owner": "REQ-1", "cases": [{"path": "m::t"}]}],
+    }  # fmt: skip
+    path = tmp_path / "reports" / "run1.xml"
+    path.parent.mkdir()
+    path.write_text("<testsuite name='pytest' tests='0'/>", encoding="utf-8")
+    res = migrate.verify(doc, ingest.collect([str(path)]), allow_missing=True)
+    assert [o.describe() for o in res.offences] == [
+        "suite:pytest#m::t: a decided case has no result in the evidence, though its target ran "
+        "(expected [REQ-1], found no result)"
+    ]
+    assert res.missing == []

@@ -576,8 +576,11 @@ It checks, case by case (by {ref}`case key <case-keys>`, so pytest, node,
   when its **target** has no result file at all in the new evidence. A
   target with any result file ran: a case, a target-scope or Bazel
   synthetic result, or a `test.xml` that holds no testcase (pytest collected
-  nothing). A case missing from a target that did run stays an error: it was
-  renamed or lost by the rewrite.
+  nothing). Outside a testlogs tree such an empty report ran the targets its
+  cases would be keyed under: `suite:<name>` for each of its `<testsuite>`
+  names, the file stem only for an unnamed suite or none. A case missing
+  from a target that did run stays an error: it was renamed or lost by the
+  rewrite.
 
 It prints one line per offending case, with the ids expected and found, and
 exits 1 on any:

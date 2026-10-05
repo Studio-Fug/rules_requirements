@@ -267,6 +267,18 @@ def _unreadable(path: str, target: str, why: str) -> TestCase:
     )
 
 
+def suite_names(path: str) -> tuple[str, ...]:
+    """The names of every ``<testsuite>`` in the JUnit report at ``path``, in
+    document order without repeats (``""`` for an unnamed one): the suite
+    names its cases would be keyed under. ``()`` when it cannot be read or
+    holds no ``<testsuite>``."""
+    try:
+        root = ET.parse(path).getroot()  # noqa: S314 - a test report, as in JUnitIngestor.ingest
+    except (ET.ParseError, OSError):
+        return ()
+    return tuple(dict.fromkeys(el.get("name", "") for el in root.iter("testsuite")))
+
+
 class JUnitIngestor(Ingestor):
     name = "junit"
     suffixes = (".xml",)

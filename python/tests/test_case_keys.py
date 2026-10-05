@@ -18,6 +18,7 @@ from rules_requirements.case_keys import (
     name_tags,
     pseudo_target,
     run_dims_from_path,
+    run_targets,
     target_of,
     workspace_relative,
 )
@@ -322,3 +323,38 @@ def test_testcase_file_attribute_is_the_source_when_no_rr_file_says(tmp_path):
     assert rows["codec::round_trip"].file == "fw/codec_test.cc"
     assert rows["codec::own"].file == "fw/other.cc"
     assert rows["codec::none"].file == ""
+
+
+@pytest.mark.parametrize(
+    "report, expected",
+    [
+        ("<testsuite name='pytest' tests='0'/>", {"suite:pytest"}),
+        (
+            "<testsuites><testsuite name='config_test' tests='0'/><testsuite name='codec' tests='0'/></testsuites>",
+            {"suite:config_test", "suite:codec"},
+        ),
+        ("<testsuites><testsuite name='a' tests='0'/><testsuite tests='0'/></testsuites>", {"suite:a", "suite:run1"}),
+        ("<testsuites/>", {"suite:run1"}),
+    ],
+    ids=["named", "two-suites", "one-unnamed", "no-suite"],
+)
+def test_a_caseless_report_outside_testlogs_ran_under_its_suite_names(tmp_path, report, expected):
+    """A report with no testcase and no build target in its path is keyed
+    as its cases would be: by each testsuite name (a pytest run that
+    collected nothing is suite:pytest, as its cases are when it collects
+    some), and by the file stem only for an unnamed suite or none."""
+    path = write(tmp_path, "reports/run1.xml", report)
+    ev = ingest.collect([path])
+    assert ev.files == [path] and ev.cases == []
+    assert run_targets(ev) == expected
+    # The same report with one case: its key's target is among them.
+    named = report.replace("tests='0'/>", "tests='1'><testcase classname='m' name='t'/></testsuite>", 1)
+    if named != report:
+        with_case = ingest.collect([write(tmp_path, "reports/run1.xml", named)])
+        (key,) = index_cases(with_case)
+        assert key.target in expected
+
+
+def test_a_caseless_testlogs_report_keeps_its_path_target(tmp_path):
+    testlogs = write(tmp_path, "bazel-testlogs/app/config_test/test.xml", "<testsuite name='pytest' tests='0'/>")
+    assert run_targets(ingest.collect([testlogs])) == {"//app:config_test"}
