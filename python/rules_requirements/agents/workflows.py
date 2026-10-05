@@ -94,7 +94,8 @@ class Context:
         return self.matrix.attribution
 
     def members_of(self, entity: str) -> tuple[Member, ...]:
-        """``entity``'s verification set (:meth:`Attribution.members_of`)."""
+        """``entity``'s verification set
+        (:meth:`~rules_requirements.attribution.Attribution.members_of`)."""
         att = self.attribution
         return att.members_of(entity) if att is not None else ()
 

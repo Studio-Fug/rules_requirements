@@ -387,7 +387,7 @@ class Workspace:
             "selectors": _selector_counts(members),
         }
 
-    def candidate(self, txn: _Transaction) -> Model:
+    def _candidate(self, txn: _Transaction) -> Model:
         """The model as it would read with ``txn`` written."""
         texts: dict[str, str | None] = {}
         for rel, text in txn.texts.items():
@@ -821,11 +821,11 @@ class Workspace:
                 for k in att.cases
                 if k.target == key.target and k != key and not k.synthetic and claim.matches(k.path)
             ]
-            lits = [case_selectors.escape(p) for p in sorted(others, key=natural_key)]
+            literals = [case_selectors.escape(p) for p in sorted(others, key=natural_key)]
             at = selectors.index(claim.pattern) if claim.pattern in selectors else len(selectors)
-            selectors = selectors[:at] + [x for x in lits if x not in selectors] + selectors[at + 1 :]
+            selectors = selectors[:at] + [x for x in literals if x not in selectors] + selectors[at + 1 :]
             expand.append(f"{claim.entity} selects it with the glob {claim.pattern!r}")
-            note = f"replace glob {claim.pattern!r} of {key.target} by {len(lits)} literal selector(s)"
+            note = f"replace glob {claim.pattern!r} of {key.target} by {len(literals)} literal selector(s)"
         if selectors:
             data["cases"] = selectors
             items[claim.index] = data
@@ -1260,7 +1260,7 @@ class _Transaction:
     def check(self) -> Check:
         """Verify the edits and run the save guard on the model they produce."""
         self.verify()
-        return self.ws.check(self.ws.candidate(self), edited=self.edited(), aliases=self.aliases, lock=self.lock)
+        return self.ws.check(self.ws._candidate(self), edited=self.edited(), aliases=self.aliases, lock=self.lock)
 
     def commit(self) -> None:
         result = self.check()

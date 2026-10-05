@@ -567,7 +567,8 @@ class ClaimConflict:
 
 def claim_conflicts(model: Model) -> list[ClaimConflict]:
     """Every pair of claims of two entities that can select one case — the
-    witnesses :meth:`_Validator.check_claims` reports as errors. Claims with a
+    witnesses :func:`validate` reports as ``shared-case`` and
+    ``same-code-multiple-owners`` errors. Claims with a
     bad selector are skipped (they are a ``bad-selector`` error of their own)."""
     by_target: dict[str, list[Claim]] = {}
     for claim in model.claims():

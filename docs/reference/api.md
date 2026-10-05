@@ -138,7 +138,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: EntityChange, diff_models, summarize, render_text
 
 .. automodule:: rules_requirements.server.workspace
-   :members: Workspace, WorkspaceError, entity_payload
+   :members: Workspace, WorkspaceError, Conflict, Check, entity_payload
 
 .. automodule:: rules_requirements.server.app
    :members: Api, serve
@@ -150,5 +150,8 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: LLM, ClaudeLLM, LLMError, LLMUnavailable, default_llm
 
 .. automodule:: rules_requirements.agents.workflows
-   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant
+   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant, assign_cases, linked_tests
+
+.. automodule:: rules_requirements.agents.worksheet
+   :members: propose, record
 ```

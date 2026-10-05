@@ -593,6 +593,16 @@ def test_bad_selectors_and_targets_of_the_edited_entity_are_refused(ledger):
     assert err.data["conflicts"][0]["code"] == "bad-selector"
     err = refused(ws, ws.update, "REQ-2", claim("suite::c", target="no label"))
     assert err.data["conflicts"][0]["code"] == "bad-target"
+    # A bad selector already in the model blocks no other edit of its entity.
+    text = LEDGER_REQS.replace(
+        "  - id: REQ-2\n    title: Accept setpoints\n",
+        "  - id: REQ-2\n    title: Accept setpoints\n    verified_by: [{target: //t:ctl_test, cases: ['suite::\\x']}]\n",
+    )
+    write(ledger, "req/model.yaml", text)
+    ws = ledger_ws(ledger)
+    assert any(i.code == "bad-selector" for i in ws.snapshot().issues)
+    ws.add_note("REQ-2", "fix the selector")
+    assert ws.model.get("REQ-2").notes[0].text == "fix the selector"
 
 
 def test_same_code_in_two_targets_is_refused_statically_and_by_attribution(tmp_path):
