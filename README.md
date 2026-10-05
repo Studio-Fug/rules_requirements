@@ -21,7 +21,8 @@ every item, whether it is *verified the way it needs to be*.
  user needs ──satisfied by──▶ requirements ◀──implemented by── mitigations ──control──▶ risks
     (UN)                         (REQ)                            (MIT)                (RISK)
                                    ▲
-                    verified by tests (JUnit), at a demanded rigor (test method / level)
+           verified by a set of test cases (JUnit), at a demanded rigor (test method / level);
+           a test case verifies at most one requirement
 ```
 
 The vocabulary follows the design-control and risk-management structure of
@@ -51,10 +52,19 @@ reference.
   - Rust — `rr::verifies!("REQ-1");` (with a libtest → JUnit wrapper)
   - node:test — `verifies(t, "REQ-1")` with `rr_node_test`, one JUnit case per test
   - anything else — `JUnitWriter` (and `CheckPlan`) for hand-rolled (e.g. hardware-in-the-loop) harnesses
-- **Migration to one test case, one requirement** — `rr cases` lists every
-  test case by its stable key, `rr migrate plan` writes the attribution
-  worksheet, and `rr migrate apply --stage tags` rewrites Python test tags to
-  the decided owners (see [CHANGELOG.md](CHANGELOG.md) for what is new).
+- **One test case, one requirement — enforced.** `verified_by` claims test
+  cases by selector (`{target: //web:clocksync_test, cases: ["clocksync::*"]}`);
+  two requirements claiming one case is a model error with an example case; a
+  case whose evidence names two ids is quarantined (it counts for nobody, and
+  every requirement it names reads **INVALID**); a generated lock
+  (`verification.rrlock`) pins each requirement's set of cases, so a deleted
+  test reads **INCOMPLETE**; and `rr check-report` re-proves from a published
+  JSON report alone that no case has two owners.
+- **Migration from many-to-many** — `rr cases` lists every test case by its
+  stable key, `rr migrate plan` writes the attribution worksheet,
+  `rr migrate apply --stage tags` rewrites Python test tags to the decided
+  owners and `--stage model` writes the claims (see
+  [CHANGELOG.md](CHANGELOG.md) for what is new).
 - **Pluggable evidence ingestion.** JUnit is the standard; Rust libtest output and
   signed-off inspection records are built in, and new formats are one small
   `Ingestor` class (or a `rules_requirements.ingestors` entry point) away.
@@ -84,7 +94,7 @@ reference.
 
 ```starlark
 # MODULE.bazel
-bazel_dep(name = "rules_requirements", version = "0.2.1")
+bazel_dep(name = "rules_requirements", version = "0.3.0")
 git_override(
     module_name = "rules_requirements",
     remote = "https://github.com/Studio-Fug/rules_requirements.git",

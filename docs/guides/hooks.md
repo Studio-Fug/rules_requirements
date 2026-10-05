@@ -16,6 +16,12 @@ hook. The older multi-id forms (`@pytest.mark.rr("REQ-1", "REQ-2")`,
 every id in 0.3, but are deprecated and warn with `MultipleRequirementsWarning`;
 the case is then quarantined and counts for none of them — see
 [Deprecated: several ids per test case](#multi-id-deprecation).
+
+With `config.attribution: model` the model's `verified_by` claims decide which
+requirement a case verifies, and the id a hook writes is only a cross-check
+(`tag-mismatch` when it disagrees, `unclaimed-tag` on a case no claim
+selects); a test the model claims needs no hook call at all. See
+{doc}`../one-test-case-one-requirement`.
 ```
 
 | Framework | Declare | Bazel | Without Bazel |
@@ -751,7 +757,11 @@ its id is recorded.
 A case whose evidence names several ids is quarantined: it counts for no
 requirement, and every requirement it names reads INVALID. 0.4 rejects
 multi-id declarations outright. Split such a test into one test per requirement, or
-keep the one id it really verifies. To find every remaining use, turn the
+keep the one id it really verifies. The thermostat example did both for its
+Rust test `requires_a_unit`, which called `rr::verifies!("REQ-3", "REQ-4")`:
+its assertions check the syntax, so it keeps REQ-3, and REQ-4 gained a test
+of its own that checks the range after converting °F,
+`checks_the_range_after_converting`. To find every remaining use, turn the
 warning into an error: `pytest -W error::DeprecationWarning`, or
 `python -W error::DeprecationWarning` for a script. Under pytest a marker
 declaration then errors the first test it applies to, at setup, and the rest of

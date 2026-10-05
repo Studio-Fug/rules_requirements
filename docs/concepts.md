@@ -85,9 +85,10 @@ filed under a key, `<target>#<path>` ({ref}`case-keys`): retries, repeated
 runs, shards and several evidence roots of one case merge into one result.
 
 **A test case verifies at most one requirement**; a set of test cases may
-together verify one. Which entity a case verifies — its *owner* — is decided
-in one place, {py:func}`rules_requirements.attribution.attribute`, from two
-inputs:
+together verify one ({doc}`one-test-case-one-requirement` explains the rule
+and why it cannot be bypassed). Which entity a case verifies — its *owner* —
+is decided in one place, {py:func}`rules_requirements.attribution.attribute`,
+from two inputs:
 
 Claims (the model)
 : `verified_by` on requirements and mitigations and `validated_by` on user

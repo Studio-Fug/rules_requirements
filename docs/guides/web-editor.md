@@ -49,7 +49,10 @@ only entity of a one-object file removes the file unless other documents
 (say, `project:`) live in it.
 
 **One owner per test case.** A test case verifies at most one requirement
-(user need or mitigation); a set of cases may together verify one. Before any
+(user need or mitigation); a set of cases may together verify one
+({doc}`../one-test-case-one-requirement`). The editor can no more break that
+rule than a hand edit can: it writes claims, and the owner of every case is
+still decided by attribution. Before any
 save — a form, a rename, a note, a finding applied — the editor builds the
 model the save would write and runs the same checks as `rr validate` and
 `rr report` over it: the `shared-case` and `same-code-multiple-owners`

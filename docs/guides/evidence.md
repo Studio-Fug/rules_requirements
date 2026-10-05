@@ -59,6 +59,14 @@ quarantines it (`multi-tag`), so it counts for no requirement and every id it
 names reads INVALID. The hooks that can write such evidence warn
 ({ref}`multi-id-deprecation`), and 0.4 rejects it.
 
+What a declared id is worth depends on `config.attribution`
+({ref}`attribution-modes`). In `hybrid` mode a single declared id owns a case
+that no claim selects. In `model` mode the model's claims decide every owner,
+and a declared id is only a cross-check: one that disagrees with the claim
+owning its case is a `tag-mismatch`, one on a case no claim selects an
+`unclaimed-tag`. A case therefore needs no tag at all once the model claims
+it ({doc}`../one-test-case-one-requirement`).
+
 ## Built-in ingestors
 
 | Name | Reads | Recognised by |
@@ -108,11 +116,14 @@ That label is what `verified_by` entries match.
 ```{note}
 For tests that Bazel retried (`--flaky_test_attempts`, `flaky = True`), the logs
 of the earlier attempts are kept under `<name>/test_attempts/attempt_N.xml` and
-map to the same label. Walking the whole `bazel-testlogs` directory therefore
-counts a failed earlier attempt as a failure — deliberately: a test that only
-passes on retry is not dependable evidence. To judge only the final attempt,
-pass a glob that selects the final results:
-`--evidence "$(bazel info bazel-testlogs)/**/test.xml"`.
+map to the same label. Since 0.3 they are merged with the final `test.xml`
+case by case rather than counted twice: the final attempt decides the result,
+and a case that failed earlier and passed on retry is *flaky* — by default
+(`config.flaky: under-verify`) its requirement reads UNDER-VERIFIED, never
+VERIFIED. Walk the whole `bazel-testlogs` directory to let the report see
+retries; a glob that selects only the final results
+(`"$(bazel info bazel-testlogs)/**/test.xml"`) hides them, and a retry-masked
+pass then reads as a plain pass.
 ```
 
 **Targets without a report.** When a test writes no JUnit of its own (a plain
@@ -161,6 +172,9 @@ evidence:
 
 Entries may also give `message`, `duration` and their own `target`; without
 any `target:`, a record's case key uses the pseudo-target `record:<file stem>`.
+The model claims records like any other case:
+`{target: "record:panel_inspection", cases: ["inspection.TM-2::panel-shows-setpoint-unit"]}`
+(the case path is `<classname>::<name>`).
 The legacy `requirements: [REQ-7]` list is still read; a record naming more
 than one id keeps them all, which makes it a `multi-tag` case. A missing
 `name` becomes `record-<n>`. A missing or unknown `status` becomes `error`: a planned

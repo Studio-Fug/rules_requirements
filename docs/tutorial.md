@@ -3,7 +3,9 @@
 The repository's [`examples/thermostat`](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
 is a deliberately small product developed the way this tool intends: user
 needs first, then requirements and a risk analysis, then code and tests that
-trace back to them — ending in a report that a golden test pins in review. It
+trace back to them — ending in a report that a golden test pins in review.
+Every requirement names the test cases that verify it, and each test case
+verifies exactly one requirement ({doc}`one-test-case-one-requirement`). It
 is split into three components, one per supported test framework:
 
 | Component | Language | Hook | Requirements |
@@ -38,7 +40,9 @@ after control. Each **mitigation** is one risk control measure:
 
 `project.yaml` sets the risk acceptability threshold used to check the residual
 estimates (`high × rare` scores 4 × 1 = 4 and `medium × unlikely` 3 × 2 = 6, both
-within 6):
+within 6). It also puts the model in charge of which requirement each test case
+verifies (`attribution: model`) and names the lock that pins every
+requirement's set of cases (`sets_lock`, step 6):
 
 ```{literalinclude} ../examples/thermostat/requirements/project.yaml
 :language: yaml
@@ -48,7 +52,12 @@ within 6):
 
 Requirements say what the product must do. Some satisfy user needs; others
 exist because a mitigation needs them (REQ-5, REQ-6), and they trace upward
-through the mitigation instead:
+through the mitigation instead. Each one also **claims** the test cases that
+verify it (`verified_by`): a target and the case paths it owns, literally or
+with `*` as the only wildcard — `test_rejects_setpoints_outside_range[*]`
+takes every parameter of that pytest test, `Interlock::*` every googletest
+case of the interlock suite. No two requirements may claim one case
+({ref}`claims`):
 
 ```{literalinclude} ../examples/thermostat/requirements/requirements.yaml
 :language: yaml
@@ -62,8 +71,14 @@ text must be signed off by inspection:
 :language: yaml
 ```
 
-`bazel test //:model_test` validates all of this. The trace graph, coloured by
-the final verdicts:
+`bazel test //:model_test` validates all of this — the claims included: had
+REQ-4 also claimed `tests::requires_*`, it would fail with
+
+```text
+requirements/requirements.yaml:55: error: [shared-case] REQ-4 and REQ-3 both claim cases of //:setpoint_test ('tests::requires_*' vs 'tests::requires_a_unit'), e.g. 'tests::requires_a_unit' (REQ-3 claims it at requirements/requirements.yaml:39). A test case verifies at most one requirement: narrow one selector.
+```
+
+The trace graph, coloured by the final verdicts:
 
 ```{raw} html
 <div class="rr-graph-wrap">
@@ -101,6 +116,11 @@ Code carries `@rr(...)` annotations naming what it implements
 
 ## 5. Tests, one hook per language
 
+The model's claims decide which requirement a test verifies, so a test needs
+no tag. Each test here still names its one requirement through its framework's
+hook, as a cross-check: a tag that disagrees with the claim owning its case is
+a `tag-mismatch` gap in the report.
+
 pytest tests use the `rr` marker:
 
 ```{literalinclude} ../examples/thermostat/tests/test_controller.py
@@ -125,11 +145,15 @@ which is what TM-1 demands of REQ-5:
 :end-before: "TEST(Interlock, StaysTrippedUntilBelowReset)"
 ```
 
-Rust tests call `rr::verifies!`:
+Rust tests call `rr::verifies!`. Until 0.3, `requires_a_unit` called
+`rr::verifies!("REQ-3", "REQ-4")`; a test case verifies at most one
+requirement, so that case was quarantined and both requirements read INVALID.
+Its assertions are about syntax, so it now verifies REQ-3, and the range check
+after converting °F, which is REQ-4's, is a test of its own:
 
 ```{literalinclude} ../examples/thermostat/setpoint/src/lib.rs
 :language: rust
-:lines: 60-68
+:lines: 52-58,70-77
 :dedent: 4
 ```
 
@@ -142,8 +166,9 @@ Finally, the inspection TM-2 demands is recorded as evidence in its own right
 
 ## 6. The build
 
-The `BUILD.bazel` file wires it together — the model, one test per hook, an
-annotation check, and the evidence → report → golden chain:
+The `BUILD.bazel` file wires it together — the model with its lock, one test
+per hook, an annotation check, and the evidence → report → golden chain, with
+the lock checked against the same evidence:
 
 ```{literalinclude} ../examples/thermostat/BUILD.bazel
 :language: starlark
@@ -157,26 +182,43 @@ $ bazel test //...
 //:display_test                                                          PASSED
 //:interlock_test                                                        PASSED
 //:model_test                                                            PASSED
+//:report_check_test                                                     PASSED
 //:report_json_golden_test                                               PASSED
 //:report_md_golden_test                                                 PASSED
 //:setpoint_test                                                         PASSED
+//:sets_lock_test                                                        PASSED
 $ bazel build //:report
-evidence: 5 file(s), 17 test case(s) | validation: 1/2 needs | verification: 5/7 requirements (0 failed, 0 unverified, 0 under-verified, 2 invalid, 0 incomplete) | risks: 1/2 mitigated | gaps: 4
-INVALID: REQ-3, REQ-4
-ATTRIBUTION ERROR: multi-tag: //:setpoint_test#tests::requires_a_unit declares REQ-3, REQ-4; a test case verifies at most one requirement, so it verifies none of them until its evidence names one
+evidence: 5 file(s), 18 test case(s) | validation: 2/2 needs | verification: 7/7 requirements (0 failed, 0 unverified, 0 under-verified, 0 invalid, 0 incomplete) | risks: 2/2 mitigated | gaps: 0
 ```
 
 `//:report` runs the four test targets inside a build action (`rr_evidence`),
 adds the inspection record, scans the sources for annotations and renders
-`bazel-bin/report.html`, `report.json` and `report.md`.
+`bazel-bin/report.html`, `report.json` and `report.md`. A quarantined test
+case would fail this build. `//:report_check_test` re-proves from
+`report.json` alone that no test case is owned by two requirements
+(`rr check-report`).
+
+**The lock.** `requirements/verification.rrlock` records, for every test
+case, the one requirement whose set holds it:
+
+```{literalinclude} ../examples/thermostat/requirements/verification.rrlock
+:language: yaml
+:lines: 1-8
+```
+
+`//:sets_lock_test` fails when the evidence and the lock disagree — a locked
+test that no longer runs, a new test no one locked, a case that changed
+owner — so a deleted or renamed test cannot silently shrink a requirement's
+set. After an intended change, `bazel run //:sets_lock_test.update` rewrites
+the lock; its diff is reviewed with the change, like a golden file.
 
 ## 7. The report
 
-This is the example's golden Markdown report, exactly as checked in. REQ-3 and
-REQ-4 read **INVALID**: the Rust test `tests::requires_a_unit` calls
-`rr::verifies!("REQ-3", "REQ-4")`, and a test case verifies at most one
-requirement, so the case is quarantined — it counts for neither, and both read
-INVALID until it names one (see {ref}`evidence`):
+This is the example's golden Markdown report, exactly as checked in. Every
+requirement is verified, by a set of test cases it alone owns: each member
+lists the selector that claims it (`via model`), and the "Case attribution"
+table shows every case of every target owned once, none unowned, none
+quarantined:
 
 ```{include} ../examples/thermostat/report.golden.md
 :heading-offset: 2
@@ -197,9 +239,17 @@ traceability argument:
   `thermostat/controller.py`: REQ-2 turns **FAILED**, and with it UN-1's
   validation and the golden test.
 - **Lose the sign-off.** Delete `evidence/panel_inspection.rr.yaml` from the
-  report's evidence: REQ-7 is only **UNDER-VERIFIED** by the automated text
-  check, because TM-2 demands inspection, and the gap is routed to
-  `human-gate`.
+  report's evidence: REQ-7's claimed inspection record did not run, so its set
+  is not whole — REQ-7 reads **INCOMPLETE** and UN-2 PARTIAL — and the
+  `incomplete` gap is routed to `human-gate`, because the missing member is an
+  inspection (the claim's `level`).
+- **Name two requirements in one test.** Put `rr::verifies!("REQ-3",
+  "REQ-4")` back into `requires_a_unit`: the case is quarantined, REQ-3 and
+  REQ-4 read **INVALID**, and `bazel build //:report` fails (`rr report` exits
+  3) with an `ATTRIBUTION ERROR: multi-tag` line naming the case.
+- **Claim one case twice.** Add `tests::requires_*` to REQ-4's claims on
+  `//:setpoint_test`: `//:model_test` fails with the `shared-case` error shown
+  in step 3, before any test runs.
 
 Accept an intended change with `bazel run //:report_md_golden_test.update`
 (and its `json` twin); the diff of the golden file is the change to the

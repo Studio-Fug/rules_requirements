@@ -229,6 +229,51 @@ configuration; claims of different entities across one group are compared the
 same way (`same-code-multiple-owners`). Both are errors no configuration can
 turn off. Overlapping selectors of *one* entity are only `redundant-selector`.
 
+(attribution-modes)=
+## Who owns a case: `hybrid` and `model`
+
+`config.attribution` says what happens to a case that no claim selects
+({doc}`../one-test-case-one-requirement` has the full decision):
+
+| Mode | A case no claim selects | A tag on a claimed case |
+| ---- | ----------------------- | ----------------------- |
+| `hybrid` (the 0.3 default) | owned by its tag, when it declares exactly one id | a cross-check (`tag-mismatch` if it disagrees) |
+| `model` (the 0.4 default) | unowned (`unclaimed-tag` if it has a tag) | a cross-check (`tag-mismatch` if it disagrees) |
+
+In both modes a case whose evidence names two ids is quarantined, and two
+entities can never claim one case. Hybrid keeps a 0.2 project's tag-based
+attribution working while it moves to claims; model mode is the end state, in
+which the model is the single, reviewable record of which case verifies what.
+`rr attribution --suggest` prints the selector to add for every tag-owned
+case, and `rr migrate apply --stage model` writes them all
+({doc}`migrating-to-per-case`).
+
+The [thermostat example](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
+is in model mode. Its configuration and one requirement's claims, a literal
+pytest case, a glob over a parametrized test's ids and two Rust tests:
+
+```yaml
+config:
+  attribution: model
+  sets_lock: verification.rrlock
+requirements:
+  - id: REQ-4
+    title: Reject setpoints outside 5-30 °C
+    verified_by:
+      - target: //:controller_test
+        cases:
+          - "tests.test_controller::test_rejects_setpoints_outside_range[*]"
+          - "tests.test_controller::test_accepts_range_limits"
+      - target: //:setpoint_test
+        cases:
+          - "tests::rejects_out_of_range"
+          - "tests::checks_the_range_after_converting"
+```
+
+Its tests keep their single-id tags (`@pytest.mark.rr("REQ-4")`,
+`rr::verifies!("REQ-4")`) as cross-checks; a test without one is owned just
+the same.
+
 (verification-lock)=
 ## The verification-set lock
 
@@ -261,6 +306,19 @@ another owner or none `moved` (with `lock-owner-changed`) — each makes the set
 INCOMPLETE until the lock is regenerated and its diff reviewed. An owned case
 the lock does not list is an `unlocked-member` gap. Without a lock, reports
 carry one `unpinned-sets` gap naming the entities whose sets are not pinned.
+
+The workflow: run the tests, then lock, then review the diff with the change
+that caused it.
+
+```console
+$ bazel test //...
+$ rr sets lock --model requirements/ --evidence bazel-testlogs --write
+$ git diff requirements/verification.rrlock
+```
+
+In a hermetic Bazel project the same is `bazel run //:sets_lock_test.update`
+(`rr_sets_lock_test`, as in the thermostat example), and `bazel test //...`
+then checks the lock against the evidence.
 
 From the command line:
 

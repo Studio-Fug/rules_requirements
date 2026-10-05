@@ -54,6 +54,20 @@ error.
 `config.sets_lock`; `--no-lock` reads none (the sets are then not pinned: an
 `unpinned-sets` gap).
 
+### The gates at a glance
+
+Exit 3 is new in 0.3; `0`, `1` and `2` mean what they meant in 0.2. The
+commands that enforce one owner per test case
+({doc}`../one-test-case-one-requirement`), and when each one fails:
+
+| Command | Fails with | When | In Bazel |
+| ------- | ---------- | ---- | -------- |
+| `rr validate` | `1` | a model error: `shared-case`, `same-code-multiple-owners`, a bad selector or target, a lock that is invalid or disagrees with the claims | `rr_model`'s `<name>_test` |
+| `rr report` | `2` / `3` / `1` | an invalid model / a quarantined case / an error-level attribution issue or a `--fail-on` condition | `rr_report` (the build fails) |
+| `rr check-report` | `1` (`2`: not a v2 report) | the published JSON breaks the partition or its counts | `rr_report`'s `<name>_check_test` |
+| `rr sets check` | `1` | the lock and the evidence disagree: a missing case, an unlocked member, an owner change, a stale entry | `rr_sets_lock_test` |
+| `rr attribution --check` | `1` | a quarantine, a missing case, lock drift or an error-level issue | — |
+
 ### Lanes
 
 A requirement's set may span lanes — software tests in one pipeline, HITL

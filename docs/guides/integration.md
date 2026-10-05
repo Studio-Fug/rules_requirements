@@ -8,7 +8,7 @@ rules_requirements into such a repository without a flag day.
 
 ```starlark
 # MODULE.bazel
-bazel_dep(name = "rules_requirements", version = "0.2.1")
+bazel_dep(name = "rules_requirements", version = "0.3.0")
 git_override(
     module_name = "rules_requirements",
     remote = "https://github.com/Studio-Fug/rules_requirements.git",
@@ -87,8 +87,12 @@ Existing traceability markers usually carry over unchanged:
   with the same `level=` keyword.
 - JUnit written by other tooling works as long as it uses the `requirement`
   property ({ref}`junit-properties`).
-- Whole-target `verified_by` lists keep working: each Bazel test label maps to
-  its `bazel-testlogs/.../test.xml`.
+- 0.2's whole-target `verified_by` lists still parse — a bare label or
+  `{target, level}` is a whole-target claim, with a `bare-target-reference`
+  warning — as long as no two entities name the same target. That would let one
+  test case verify two requirements, so since 0.3 it is a `shared-case` model
+  error: narrow both claims to the cases each one owns
+  ({ref}`claims`, {doc}`migrating-to-per-case`).
 - A docstring convention such as `Requirements: PR-1, PR-2` is recognised by
   adding a pattern to `config.annotation_patterns`
   ({doc}`annotations`):
@@ -116,6 +120,55 @@ config:
 The shape and reference checks stay errors: a dangling reference is always a
 bug.
 
+## One owner per test case
+
+**A test case verifies at most one requirement**
+({doc}`../one-test-case-one-requirement`). A project coming from 0.2, where a
+test counted toward every id it was tagged with and every requirement listing
+its target, moves there in steps that each keep CI green:
+{doc}`migrating-to-per-case` walks through them. The end state, which
+[`examples/thermostat`](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
+shows, is:
+
+```yaml
+# requirements/project.yaml
+config:
+  prefixes: {requirement: PR}
+  attribution: model                 # the claims decide; tags only cross-check
+  sets_lock: verification.rrlock     # every set's members, pinned
+  main_repo: my_product              # '@my_product//x:y' reads as '//x:y'
+```
+
+with `verified_by` claims per case (`{target: //web:clocksync_test, cases:
+["clocksync::*"]}`), single-id tags (or none), and a lock written by `rr sets
+lock --write` and reviewed like a golden file. 0.3 defaults to
+`attribution: hybrid`, so a single-id tag still owns a case no claim covers
+while you get there.
+
+In Bazel, for the hermetic suites:
+
+```starlark
+rr_model(
+    name = "model",
+    srcs = glob(["requirements/*.yaml"]),
+    lock = "requirements/verification.rrlock",  # :model_test checks it against the claims
+)
+
+rr_report(
+    name = "report",
+    model = [":model"],
+    evidence = [":evidence"],
+    # check = True is the default with a JSON report: :report_check_test runs
+    # `rr check-report` on report.json. A quarantined case fails the build.
+)
+
+rr_sets_lock_test(  # `bazel run :sets_lock_test.update` re-locks
+    name = "sets_lock_test",
+    model = ":model",
+    evidence = [":evidence"],
+)
+```
+
 ## CI: aggregate real test logs
 
 Suites that run only in CI or on hardware cannot run inside `rr_evidence`.
@@ -130,10 +183,11 @@ identity of what was tested so that older evidence is marked stale:
   run: |
     bazel run @rules_requirements//python:rr -- report \
       --model "$GITHUB_WORKSPACE/requirements" \
-      --evidence "$(bazel info bazel-testlogs)/**/test.xml" \
+      --evidence "$(bazel info bazel-testlogs)" \
       --current-build dut_git_sha="$GITHUB_SHA" \
       --queue-out "$GITHUB_WORKSPACE/traceability-queue.json" \
       --html "$GITHUB_WORKSPACE/traceability-report.html" \
+      --json "$GITHUB_WORKSPACE/traceability-report.json" \
       --md "$GITHUB_WORKSPACE/traceability-report.md" \
       --fail-on failed
 - uses: actions/upload-artifact@v4
@@ -142,11 +196,36 @@ identity of what was tested so that older evidence is marked stale:
     path: traceability-*
 ```
 
+`rr report` exits 3 when a test case is quarantined — its evidence names two
+ids, or two entities claim it — after writing the reports, so the artifact is
+there to read; every entity it names reads INVALID. Add the one-owner checks
+to the same job:
+
+```yaml
+- name: Attribution checks (one test case, one requirement)
+  run: |
+    bazel query 'tests(//...)' > "$RUNNER_TEMP/targets.txt"
+    bazel run @rules_requirements//python:rr -- validate requirements \
+      --known-targets "$RUNNER_TEMP/targets.txt"
+    bazel run @rules_requirements//python:rr -- sets check \
+      --model requirements --evidence "$(bazel info bazel-testlogs)"
+    bazel run @rules_requirements//python:rr -- check-report \
+      "$GITHUB_WORKSPACE/traceability-report.json"
+```
+
+`--known-targets` turns a claim on a label that does not exist (a typo would
+otherwise read as not-run forever) into an `unknown-target` error; `rr sets
+check` fails when a locked case is missing or an owned one is not locked;
+`rr check-report` re-proves from the published JSON (written with `--json`)
+that no case has two owners.
+
 - Keep the test jobs as the pass/fail gate and let the report job describe the
   state; tighten `--fail-on` (`unverified`, `gaps`) once coverage is meant to be
   complete.
-- The `**/test.xml` glob keeps the logs of retried flaky attempts out of the
-  evidence ({doc}`evidence`).
+- Pass the whole `bazel-testlogs` directory rather than a `**/test.xml` glob
+  if you retry tests: the earlier attempts under `test_attempts/` are merged
+  with the final result, and a pass that needed a retry then reads
+  UNDER-VERIFIED (`config.flaky`) instead of a plain pass ({doc}`evidence`).
 - Hardware harnesses should stamp their evidence with the same identity keys
   you pass to `--current-build` — `JUnitWriter(..., artifact={"dut_git_sha":
   sha})` ({doc}`hooks`) — so a bench result from an older build is reported as
@@ -154,6 +233,13 @@ identity of what was tested so that older evidence is marked stale:
 - The work queue is the natural input for follow-up automation: `autonomous`
   gaps are candidates for an agent; `human-gate` gaps need a bench session or a
   reviewer.
+- **Lanes.** When hardware runs in another pipeline, stamp each report with its
+  lane: `--lane software --lane-targets targets.txt` (the targets this lane
+  runs). Members in other lanes' targets read "out of lane" and stay out of the
+  queue, but verdicts never change: a requirement whose set spans both lanes
+  reads INCOMPLETE in each lane's report, and only a report over both lanes'
+  evidence can read VERIFIED. In Bazel: `rr_report(lane = ..., lane_targets =
+  ...)`.
 
 A repository can use both paths at once: `rr_evidence` + `rr_report` +
 `rr_golden_test` for the hermetic suites, pinned in review, and the aggregated

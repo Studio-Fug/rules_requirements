@@ -360,6 +360,20 @@ projects whose evidence comes from `rr_evidence`; with real `bazel-testlogs`
 run `rr sets check` / `rr sets lock` from the CLI. To start a lock, create an
 empty `lock` file and run the `.update` target.
 
+The thermostat example wires the three together the way a product should: an
+`rr_model` with `lock`, an `rr_report` with the default
+`on_attribution_error = "fail"` and `check = True`, and an
+`rr_sets_lock_test` over the same evidence, so `bazel test //...` fails on a
+shared claim (`:model_test`), a quarantined case (`:report`), a report that
+breaks the partition (`:report_check_test`) and a set that changed without
+its lock (`:sets_lock_test`):
+
+```{literalinclude} ../../examples/thermostat/BUILD.bazel
+:language: starlark
+:start-at: "EVIDENCE = ["
+:end-before: "rr_golden_test("
+```
+
 ### `rr_golden_test`
 
 ```starlark

@@ -1,12 +1,15 @@
 # Migrating to one requirement per test case
 
-```{admonition} Draft
+```{admonition} The path from 0.2 to 0.3
 :class: note
 
-This guide describes the migration tooling that ships in v0.2: `rr cases`,
-`rr migrate plan`, `rr migrate apply --stage tags` and (since v0.2.1)
-`rr migrate verify`. None of them changes a verdict. The guide will be completed as later releases add case selectors in
-the model (v0.3.0) and make multi-id tags an error (v0.4.0).
+This guide takes a project from 0.2's union rule to 0.3's model mode in
+steps that each keep CI green: the first half runs on 0.2 (`rr cases`,
+`rr migrate plan`, `rr migrate apply --stage tags`, and since v0.2.1
+`rr migrate verify`, none of which changes a verdict); the second pins 0.3
+in hybrid mode, writes the claims with `rr migrate apply --stage model` and
+locks the sets. {doc}`../one-test-case-one-requirement` explains the rule
+itself.
 ```
 
 A test case should verify **at most one** requirement. A set of test cases may
@@ -28,7 +31,8 @@ patterns make one test count twice:
 
 From v0.3.0 such evidence is quarantined (it counts for nobody) and a target
 claimed by two requirements is a model error. Migrating on v0.2 first keeps
-CI green throughout: every step below is valid under today's rules.
+CI green throughout: every step of the first half is valid under 0.2's
+rules, so the 0.3 pin bump only has to fix what 0.2 cannot express.
 
 ## The steps
 
@@ -46,6 +50,19 @@ CI green throughout: every step below is valid under today's rules.
 6. **Check.** Re-run the tests, check their evidence against the worksheet
    with `rr migrate verify`, and re-run the plan. What is left is the work
    for v0.3.0's case selectors.
+
+On 0.3:
+
+7. **Pin 0.3 in hybrid mode.** Bump the pin. Turn every target two entities
+   still share into per-case selectors, so the model is valid; keep
+   `attribution: hybrid` (the default), so the single-id tags keep owning
+   their cases. Confirm with `rr attribution --check` that nothing is
+   quarantined before merging.
+8. **Move to model mode.** `rr migrate apply --stage model` writes an explicit
+   selector for every case each entity owns today and proves the owner table
+   unchanged; then set `config.attribution: model`.
+9. **Lock.** `rr sets lock --write` pins every set's members; gate CI on
+   `rr sets check` and `rr check-report`.
 
 ## Case keys
 
@@ -612,32 +629,151 @@ test, a split you have to make by hand) or a `split` target waiting for case
 selectors. `rr report` verdicts change honestly as tags move. A requirement
 that was VERIFIED only through a shared test now shows what it really has.
 
-## What comes next
+## On 0.3: pin the release in hybrid mode
 
-In v0.3.0 a requirement's `verified_by` can name individual cases of a target
-(`{target: //web:clocksync_test, cases: ["clocksync::*"]}`). The model then
-rejects any case claimed by two entities, and evidence that still names two
-ids for one case counts for nobody. Once the tags carry one id each and fresh
-evidence shows the decided owners, `rr migrate apply PLAN.rrplan --stage model
-[--compress] [--dry-run]` writes those selectors: one per case each entity
-owns through a tag today (with `--compress`, a `*` glob where it selects
-exactly that entity's cases, none of them skipped, and overlaps no other
-claim; a synthetic-only target gets `whole: true` with a reason). Before
-writing, it proves that the owner table over the evidence given is unchanged
-under `attribution: model` and that `check_claims` passes; it refuses a
-quarantine and any worksheet decision the evidence contradicts. A case the
-worksheet decided but the evidence given does not hold (another lane's test,
-say) keeps the worksheet's owner: it gets a literal selector of that entity,
-and the stage is refused unless exactly that entity's claims select it (no
+0.3 changes semantics on purpose: a case whose evidence names two ids is
+quarantined (it counts for nobody, every id it names reads INVALID, and
+`rr report` exits 3), and a target that two entities claim — two
+requirements listing one target in `verified_by`, say — is a `shared-case`
+model error. The first half of this guide removed the multi-id tags; the pin
+bump fixes the shared targets, which 0.2 cannot express per case.
+
+1. Bump the pin (`bazel_dep(name = "rules_requirements", version = "0.3.0")`
+   and its override) and run `rr validate requirements/`. Every
+   `shared-case` error names the two entities, both selectors and an example
+   case.
+2. Replace each shared whole-target reference with the cases each entity
+   owns, as the worksheet decided them. `rr cases --evidence bazel-testlogs
+   --target //web:clocksync_test` lists the exact case paths:
+
+   ```yaml
+   # before (0.2): both requirements list the whole target
+   #   - id: PR-13
+   #     verified_by: [//web:improv_provision_test]
+   #   - id: PR-29
+   #     verified_by: [//web:improv_provision_test]
+   - id: PR-13
+     verified_by:
+       - target: //web:improv_provision_test
+         cases:
+           - "improv_provision::provisionViaBle: sends the correct wifi-settings wire and returns the redirect"
+           - "improv_provision::provisionViaBle: surfaces a device error notification as a rejection"
+   - id: PR-29
+     verified_by:
+       - target: //web:improv_provision_test
+         cases: ["improv_provision::provisionViaBle: survives Android's first-attempt GATT flake via retry"]
+   ```
+
+   Other 0.2 references (a bare label, `{target, level}`) still parse as
+   whole-target claims with a `bare-target-reference` warning; leave them
+   for step 8.
+3. Keep `attribution: hybrid`, the 0.3 default: a single-id tag still owns
+   a case that no claim covers, so every module whose tags you rewrote keeps
+   its owners. Set `config.main_repo` if other modules refer to your
+   targets as `@your_repo//...`.
+4. Before merging, check the attribution over fresh evidence from every lane
+   (software and HITL):
+
+   ```console
+   $ rr attribution --model requirements/ --evidence bazel-testlogs hitl-testlogs --check
+   ```
+
+   It exits 1 on any quarantine, missing case or error-level issue.
+   `rr report` would exit 3 on the same quarantines.
+
+Verdicts change honestly at the bump. A requirement that was VERIFIED only
+through a test it shared now shows what it has on its own; a requirement whose
+set spans the software and HITL lanes reads INCOMPLETE in each lane's
+report and VERIFIED only in a report over both lanes' evidence. Announce it
+as a correction, not a regression.
+
+## Moving to model mode: `rr migrate apply --stage model`
+
+In hybrid mode a tag can still own a case, and a test deleted or renamed
+silently leaves its requirement's set. Model mode makes the model the single
+record: every owner comes from a claim, and tags only cross-check them.
+
+Once the tags carry one id each and fresh evidence shows the decided
+owners, `rr migrate apply PLAN.rrplan --stage model [--compress]
+[--dry-run]` writes the claims: one selector per case each entity owns
+through a tag today (with `--compress`, a `*` glob where it selects exactly
+that entity's cases, none of them skipped, and overlaps no other claim; a
+synthetic-only target gets `whole: true` with a reason). Before writing, it
+proves that the owner table over the evidence given is unchanged under
+`attribution: model` and that `check_claims` passes; it refuses a quarantine
+and any worksheet decision the evidence contradicts. A case the worksheet
+decided but the evidence given does not hold (another lane's test, say)
+keeps the worksheet's owner: it gets a literal selector of that entity, and
+the stage is refused unless exactly that entity's claims select it (no
 claim, for `none`); a `--compress` glob never reaches such a case of another
 owner. Cases in neither the evidence nor the worksheet are not seen: pass
 every lane's evidence, or re-run `rr attribution --check` over it afterwards.
-Then set `config: {attribution: model, sets_lock: verification.rrlock}` and
-run `rr sets lock --write`. In
-v0.4.0 a multi-id tag becomes a collection, import or compile error.
+
+```console
+$ rr migrate apply requirements/attribution.rrplan --stage model --compress \
+    --model requirements/ --evidence bazel-testlogs hitl-testlogs --dry-run
+$ rr migrate apply requirements/attribution.rrplan --stage model --compress \
+    --model requirements/ --evidence bazel-testlogs hitl-testlogs
+```
+
+Then switch the mode and name the lock:
+
+```yaml
+config:
+  attribution: model
+  sets_lock: verification.rrlock
+```
+
+Verdicts are identical to the hybrid ones by construction. Keep the
+single-id tags as cross-checks (a tag that disagrees with the model is a
+`tag-mismatch`); new tests need none. `rr attribution --suggest` prints the
+selector for any case still owned only by a tag, or tagged but unclaimed
+(`unclaimed-tag`) afterwards.
+
+## Locking the sets
+
+```console
+$ bazel test //...
+$ rr sets lock --model requirements/ --evidence bazel-testlogs hitl-testlogs --write
+$ git diff requirements/verification.rrlock
+```
+
+The lock maps every case to the one entity whose set holds it and adds
+those cases as expected members: from now on a deleted, renamed or filtered
+test makes its requirement INCOMPLETE (`missing-case`) instead of quietly
+shrinking its set. It never creates ownership. Review its diff like a golden
+file, and re-lock with every intended change ({ref}`verification-lock`).
+In a hermetic Bazel project, `rr_model(lock = ...)` checks it statically and
+`rr_sets_lock_test` against `rr_evidence`; `bazel run :<name>.update`
+re-locks (the thermostat example does this).
+
+Finally gate on it. In CI, after the report:
+
+```yaml
+- name: Attribution checks (one test case, one requirement)
+  run: |
+    bazel query 'tests(//...)' > "$RUNNER_TEMP/targets.txt"
+    bazel run @rules_requirements//python:rr -- validate requirements --known-targets "$RUNNER_TEMP/targets.txt"
+    bazel run @rules_requirements//python:rr -- sets check --model requirements --evidence "$(readlink -f bazel-testlogs)"
+    bazel run @rules_requirements//python:rr -- check-report traceability-report.json
+```
+
+Then tighten the model: `bare-target-reference: error` and
+`whole-target-reference: error` under `config.rules` once the remaining
+whole-target claims are per case (or carry a reason), and `config.variants`
+for targets that run the same test code. Record the policy and why you chose
+it in your development plan ({ref}`standards-one-owner`).
+
+## What 0.4 changes
+
+v0.4.0 makes `attribution: model` the default (hybrid warns
+`hybrid-mode`) and multi-id authoring impossible: a collection, import or
+compile error. A project that has finished this guide needs no changes.
+
+## Smaller 0.3 changes
 
 Smaller v0.3.0 changes a script reading the reports or the Python API may
-notice:
+notice (the [release notes](../release-notes.md) list every change):
 
 - A case is named by its case key, `<target>#<path>`, where 0.2 wrote
   `<target> <classname>::<name>`: in the JSON report's `unknown_evidence` and
