@@ -95,6 +95,16 @@ def test_render_round_trips_and_is_deterministic():
     assert entries(parse_lock(render_lock(()))) == []
 
 
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029", "\x7f", "\x9b", "\uffff", "\ufffe", "\ud800"])
+def test_render_escapes_what_yaml_cannot_carry_raw(char):
+    """XML 1.0 allows NEL, U+2028, DEL, C1 controls and U+FFFF-ish characters in
+    a case name; the written lock must still parse back to the same entries."""
+    lock = Lock((LockEntry("//p:t", f"c::n{char}x", "REQ-1"), LockEntry("//p:t", "c::😀 é\tx", "REQ-2")))
+    text = render_lock(lock)
+    assert char not in text and "😀 é" in text  # escaped only where needed
+    assert entries(parse_lock(text)) == entries(lock)
+
+
 def test_render_quotes_ids_yaml_would_misread():
     text = render_lock([LockEntry("//a:t", "c::x", "no"), LockEntry("//a:t", "c::y", "REQ-1")])
     assert '"c::x": "no"\n' in text and '"c::y": REQ-1\n' in text

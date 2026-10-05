@@ -228,10 +228,23 @@ _PLAIN_ID = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:[-.][A-Za-z0-9_]+)*$")
 _YAML_WORDS = re.compile(r"^(?:y|n|yes|no|on|off|true|false|null)$", re.IGNORECASE)
 
 
+# Characters a YAML stream may not carry raw (DEL, C1 controls, surrogates,
+# U+FFFE/U+FFFF) or reads as a line break (NEL, U+2028, U+2029). JSON escapes
+# the C0 controls itself; these are written as \uXXXX escapes, which a
+# double-quoted YAML scalar reads back (anything else is kept as it is,
+# readable).
+_YAML_UNSAFE = re.compile("[\x7f-\x9f\u2028\u2029\ud800-\udfff\ufffe\uffff]")
+
+
+def _quoted(text: str) -> str:
+    """``text`` as a YAML double-quoted scalar that parses back to ``text``."""
+    return _YAML_UNSAFE.sub(lambda m: f"\\u{ord(m.group(0)):04x}", json.dumps(text, ensure_ascii=False))
+
+
 def _scalar(text: str, plain: re.Pattern[str]) -> str:
     if plain.match(text) and not _YAML_WORDS.match(text):
         return text
-    return json.dumps(text, ensure_ascii=False)  # a JSON string is a YAML double-quoted scalar
+    return _quoted(text)  # a JSON string is a YAML double-quoted scalar
 
 
 def render_lock(entries: Lock | Iterable[LockEntry]) -> str:
@@ -250,7 +263,7 @@ def render_lock(entries: Lock | Iterable[LockEntry]) -> str:
     for target in sorted(by_target, key=natural_key):
         out.append(f"  {_scalar(target, _PLAIN_LABEL)}:\n")
         for entry in sorted(by_target[target], key=lambda e: natural_key(e.path)):
-            out.append(f"    {json.dumps(entry.path, ensure_ascii=False)}: {_scalar(entry.owner, _PLAIN_ID)}\n")
+            out.append(f"    {_quoted(entry.path)}: {_scalar(entry.owner, _PLAIN_ID)}\n")
     return "".join(out)
 
 
