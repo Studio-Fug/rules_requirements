@@ -40,6 +40,7 @@ from rules_requirements.case_keys import (
     index_cases,
     is_unscoped,
     normalize_target,
+    run_dims_from_path,
 )
 from rules_requirements.config import Config
 from rules_requirements.ingest import ERROR, FAILED, PASSED, SKIPPED, Evidence, TestCase
@@ -181,9 +182,11 @@ class TargetRun:
     """How one target ran in this evidence.
 
     ``taint`` holds its failing target-scope results (``rr.scope=target``: an
-    exit status, a load error, an unreadable report, a failing root hook).
-    They are never members and never count as passing; every member claimed
-    on the target reads ``error`` instead.
+    exit status, a load error, an unreadable report, a failing root hook),
+    and the failed synthetic result of a shard or run that crashed while
+    other repetitions reported per-case results. They are never members and
+    never count as passing; every member claimed on the target reads
+    ``error`` instead.
     """
 
     target: str
@@ -197,11 +200,19 @@ class TargetRun:
 
     @property
     def taint_message(self) -> str:
-        """``<name>: <first line of its message>`` of each target-scope failure."""
+        """``<name> (<shard/run>): <first line of its message>`` of each
+        target-scope failure; the slot (``shard_2_of_4``, ``run_3_of_5``) says
+        which repetition failed, when the target was sharded or repeated."""
         parts = []
         for case in self.taint:
-            first = (case.message or case.status).splitlines()[0][:200]
-            parts.append(f"{case_path(case.classname, case.name)}: {first}")
+            first = ((case.message or case.status).splitlines() or [case.status])[0][:200]
+            dims = run_dims_from_path(case.source)
+            slot = "_".join(
+                [f"shard_{dims.shard}_of_{dims.shards}"] * bool(dims.shards)
+                + [f"run_{dims.run}_of_{dims.runs}"] * bool(dims.runs)
+            )
+            where = f" ({slot})" if slot else ""
+            parts.append(f"{case_path(case.classname, case.name)}{where}: {first}")
         return "; ".join(parts)
 
 
@@ -473,7 +484,10 @@ def resolve_cases(
     final attempt wins (an earlier failure under a final pass is ``flaky``),
     the worst run wins, shards are unioned and evidence roots merged
     (:func:`~rules_requirements.case_keys.index_cases`). Target-scope results
-    are not cases: a failing one taints its target (:class:`TargetRun`). A
+    are not cases: a failing one taints its target (:class:`TargetRun`). So
+    does a failed synthetic ``[target]`` result of a target that also
+    reported per-case results: a shard or run that crashed before writing
+    its report, beside the repetitions that did (the worst run wins). A
     target also counts as run when it left a report without any case (an
     empty suite), so its claimed cases read ``missing``, not ``not-run``.
     """
@@ -482,9 +496,14 @@ def resolve_cases(
     taint: dict[str, list[TestCase]] = {}
     present: dict[str, None] = {}
     found: list[AttributionIssue | None] = []
+    # Targets that reported per-case results. Their failed synthetic result
+    # is a crashed shard or run (Bazel's generated test.xml for the
+    # repetition that wrote no JUnit): a failure of the whole target run.
+    with_cases = {key.target for key, row in rows.items() if not row.target_scope and not row.synthetic}
     for key, row in rows.items():
         present.setdefault(key.target)
-        if row.target_scope:
+        crashed = row.synthetic and row.status in (FAILED, ERROR) and key.target in with_cases
+        if row.target_scope or crashed:
             if row.status in (FAILED, ERROR):
                 taint.setdefault(key.target, []).append(_representative(row))
             continue

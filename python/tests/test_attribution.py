@@ -706,6 +706,82 @@ def test_P21_one_case_ingested_several_times(tmp_path):
     counted_once(mx)
 
 
+_CRASH_CLAIMS = {
+    "bare": '"//p:t"',
+    "whole": "{target: //p:t, whole: true, reason: r}",
+    "glob": "{target: //p:t, cases: ['c::*']}",
+    "literal": "{target: //p:t, cases: ['c::a', 'c::b']}",
+}
+
+
+def _crashed_repetition(slot):
+    """c::a and c::b pass in the first shard or run; the second crashed before
+    writing JUnit, so Bazel generated its test.xml (a failed synthetic result)."""
+    return evidence(
+        tc("a", source=f"bazel-testlogs/p/t/{slot}_1_of_2/test.xml"),
+        tc("b", source=f"bazel-testlogs/p/t/{slot}_1_of_2/test.xml"),
+        tc(
+            "p/t",
+            "error",
+            classname="",
+            source=f"bazel-testlogs/p/t/{slot}_2_of_2/test.xml",
+            message="exited with error code 139",
+            properties={"rr.synthetic": "true"},
+        ),
+    )
+
+
+@pytest.mark.parametrize("slot", ["shard", "run"])
+@pytest.mark.parametrize("claim", sorted(_CRASH_CLAIMS))
+def test_P21_a_crashed_shard_or_run_beside_per_case_results_fails_the_target(tmp_path, slot, claim):
+    """The worst run wins: a repetition that crashed (Bazel's generated result)
+    taints the target, so no claim on it reads VERIFIED from the repetitions
+    that did report (v0.2.1 gave FAILED; it must not silently pass)."""
+    reqs = f"  - {{id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{_CRASH_CLAIMS[claim]}]}}\n"
+    mx = build_matrix(model_at(tmp_path, reqs), _crashed_repetition(slot))
+    att = mx.attribution
+    run = att.targets["//p:t"]
+    assert run.tainted and not run.synthetic_only
+    assert run.taint_message == f"p/t ({slot}_2_of_2): exited with error code 139"
+    assert CaseKey("//p:t", "[target]") not in att.cases  # a crash is no case
+    assert {m.state for m in att.members_of("REQ-1")} == {"error"}
+    assert mx.status("REQ-1") == FAILED
+    assert f"tainted: p/t ({slot}_2_of_2)" in att.members_of("REQ-1")[0].reason
+    assert not any(g.kind == "unattributed-failure" for g in mx.gaps)  # the failure is REQ-1's
+    counted_once(mx)
+
+
+@pytest.mark.parametrize("slot", ["shard", "run"])
+def test_P21_a_crashed_repetition_fails_a_locked_set(tmp_path, slot):
+    """With a lock, c::c (which ran only in the crashed repetition) is not merely
+    missing: the target is tainted, so the set reads FAILED, not INCOMPLETE."""
+    reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //p:t, cases: ['c::*']}]}\n"
+    lock = rr_lock.Lock(tuple(rr_lock.LockEntry("//p:t", f"c::{n}", "REQ-1") for n in "abc"))
+    mx = build_matrix(model_at(tmp_path, reqs), _crashed_repetition(slot), lock=lock)
+    assert states(mx.attribution, "REQ-1") == [
+        ("//p:t#c::a", "error"),
+        ("//p:t#c::b", "error"),
+        ("//p:t#c::c", "error"),
+    ]
+    assert mx.status("REQ-1") == FAILED
+
+
+def test_P21_a_passing_or_lone_synthetic_result_is_unchanged(tmp_path):
+    """Only a *failed* synthetic result beside per-case results is a crash; a
+    lone one is still the target's single case (FAILED or VERIFIED by it)."""
+    reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //p:t, cases: ['c::*']}]}\n"
+    ok = evidence(
+        tc("a", source="bazel-testlogs/p/t/shard_1_of_2/test.xml"),
+        tc("p/t", classname="", source="bazel-testlogs/p/t/shard_2_of_2/test.xml", properties={"rr.synthetic": "true"}),
+    )
+    mx = build_matrix(model_at(tmp_path, reqs), ok)
+    assert not mx.attribution.targets["//p:t"].tainted and mx.status("REQ-1") == VERIFIED
+    alone = evidence(tc("p/t", "error", classname="", source="bazel-testlogs/p/t/test.xml",
+                        properties={"rr.synthetic": "true"}))  # fmt: skip
+    mx = build_matrix(model_at(tmp_path / "alone", reqs), alone)
+    assert not mx.attribution.targets["//p:t"].tainted and mx.status("REQ-1") == FAILED
+
+
 def test_P22_duplicate_names_in_one_run(tmp_path):
     path = junit_at(
         tmp_path,

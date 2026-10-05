@@ -218,6 +218,11 @@ its path within that target, written `<target>#<path>`:
   which every shard has. A key seen only in an earlier attempt of a run that has a
   final report (typically the `[target]` result of an attempt that crashed)
   is not a case: its failure marks that run's passing cases *flaky*.
+  A failed `[target]` result of a shard or run that crashed (Bazel's
+  generated report) while other shards or runs of the target reported
+  per-case results is not a case either: like an `rr.scope=target` failure,
+  it taints the target, so every case claimed on it reads `error` and its
+  requirement FAILED (the report names the slot, e.g. `shard_2_of_4`).
 - A case whose classname and name are both empty gets the path `[unnamed]`.
 
 `rr cases` prints every key in a set of evidence, with its status, the ids its
