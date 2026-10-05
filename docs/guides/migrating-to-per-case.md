@@ -491,3 +491,15 @@ rejects any case claimed by two entities, and evidence that still names two
 ids for one case counts for nobody. `rr migrate apply --stage model` will write
 those selectors from the decided ownership. In v0.4.0 a multi-id tag becomes a
 collection, import or compile error.
+
+Smaller v0.3.0 changes a script reading the reports or the Python API may
+notice:
+
+- A case is named by its case key, `<target>#<path>`, where 0.2 wrote
+  `<target> <classname>::<name>`: in the JSON report's `unknown_evidence` and
+  in the `unknown-id` gap.
+- `summary.test_cases` counts case keys (retries, runs, shards and evidence
+  roots merged; target-scope results not counted), not raw results.
+- `TestCase.requirements` is a deprecated alias of `TestCase.declared`; it
+  still reads, writes and works in `dataclasses.replace(case,
+  requirements=...)`, but `dataclasses.asdict()` names the field `declared`.

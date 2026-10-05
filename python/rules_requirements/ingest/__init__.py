@@ -172,7 +172,9 @@ class TestCase:
     — tags, in order, without duplicates. It is plain data: nothing here
     says which requirement the case verifies (see :mod:`rules_requirements.ingest`).
     ``requirements`` is a deprecated read/write alias of it (and a
-    deprecated keyword of the constructor).
+    deprecated keyword of the constructor, which wins over ``declared=``,
+    so ``dataclasses.replace(case, requirements=...)`` works as in 0.2;
+    :func:`dataclasses.asdict` names the field ``declared``).
     """
 
     __test__ = False  # not a pytest test class
@@ -216,9 +218,9 @@ class TestCase:
         requirements: Iterable[str] | None = None,
     ) -> None:
         if requirements is not None:
+            # The deprecated alias wins over declared=: dataclasses.replace(case,
+            # requirements=...) passes the case's current declared= as well.
             warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
-            if _ids(declared):
-                raise TypeError("TestCase: pass declared= or the deprecated requirements=, not both")
             declared = requirements
         self.name = name
         self.status = status

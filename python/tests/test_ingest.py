@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import dataclasses
 import json
 import os
 import shutil
@@ -434,8 +435,12 @@ def test_declared_is_a_field_and_requirements_a_deprecated_alias():
     with pytest.warns(DeprecationWarning):
         legacy = TestCase("n", "passed", requirements=["R-4"])
     assert legacy.declared == ("R-4",)
-    with pytest.raises(TypeError, match="not both"), pytest.warns(DeprecationWarning):
-        TestCase("n", "passed", declared=("R-1",), requirements=("R-2",))
+    with pytest.warns(DeprecationWarning):  # the alias wins (dataclasses.replace passes both)
+        assert TestCase("n", "passed", declared=("R-1",), requirements=("R-2",)).declared == ("R-2",)
+    with pytest.warns(DeprecationWarning, match="use TestCase.declared"):
+        replaced = dataclasses.replace(legacy, requirements=("R-6", "R-7"))
+    assert replaced.declared == ("R-6", "R-7") and legacy.declared == ("R-4",)
+    assert dataclasses.replace(legacy, level="hil").declared == ("R-4",)
     # A bare string is one id, not its characters.
     assert TestCase("n", "passed", declared="R-5").declared == ("R-5",)
     # Ownership is nobody's field: a case has no owner to set.

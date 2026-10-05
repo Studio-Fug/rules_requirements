@@ -62,7 +62,7 @@ a golden file and reviewed as a diff. Top-level keys:
 | `modules` | `{module: status}` rollup |
 | `high_open_risks` | Ids of high-severity risks that are not MITIGATED |
 | `pyramid_violations` | Ids of requirements violating the cost pyramid |
-| `unknown_evidence` | `{id: [test case, ...]}` for evidence naming undefined ids |
+| `unknown_evidence` | `{id: [case key, ...]}` for evidence naming undefined ids; each case as its key `<target>#<path>` (0.2 wrote `<target> <classname>::<name>`) |
 | `gaps` | The gap queue (below) |
 
 Every entity object has `id`, `title` and `status`, plus `description`,
