@@ -20,7 +20,7 @@
     "mitigations": 1,
     "mitigations_verified": 0,
     "test_cases": 13,
-    "gaps": 9
+    "gaps": 11
   },
   "levels": [
     {
@@ -294,6 +294,18 @@
       "route": "human-gate",
       "demanded_level": "hil",
       "provided_level": "simulation"
+    },
+    {
+      "kind": "suite-level-requirement",
+      "entity": "//tests/integration:gtest_hook_test",
+      "message": "suite SuiteLevel (or a parent case in it) names REQ-3 above its test cases; suite-level requirements are not inherited by the cases (each test case declares its own one id)",
+      "route": "autonomous"
+    },
+    {
+      "kind": "suite-level-requirement",
+      "entity": "//tests/integration:gtest_hook_test",
+      "message": "suite NextSuite (or a parent case in it) names REQ-1 above its test cases; suite-level requirements are not inherited by the cases (each test case declares its own one id)",
+      "route": "autonomous"
     },
     {
       "kind": "unpinned-sets",
