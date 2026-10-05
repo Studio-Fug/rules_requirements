@@ -262,6 +262,25 @@ INCOMPLETE until the lock is regenerated and its diff reviewed. An owned case
 the lock does not list is an `unlocked-member` gap. Without a lock, reports
 carry one `unpinned-sets` gap naming the entities whose sets are not pinned.
 
+From the command line:
+
+```console
+$ rr sets lock  --model requirements/ --evidence bazel-testlogs            # print the diff
+$ rr sets lock  --model requirements/ --evidence bazel-testlogs --write    # write it
+$ rr sets check --model requirements/ --evidence bazel-testlogs            # the CI gate
+$ rr sets show PR-13 --model requirements/ --evidence bazel-testlogs       # one set
+```
+
+`rr sets lock` refuses while a case is quarantined (exit 3) and keeps every
+entry the evidence no longer holds unless `--allow-removals` is given (it
+lists them), so a crashed or filtered run never shrinks a set silently; owner
+changes are listed and allowed. `rr sets check` exits 1, restricted to the
+targets present in the evidence, on a missing case, an unlocked member, an
+owner change or a stale entry. `--sets-lock PATH` reads (and writes) another
+lock than `config.sets_lock`. In Bazel, `rr_model(lock = ...)` checks the lock
+statically and pins the reports' sets with it, and `rr_sets_lock_test` runs
+`rr sets check` over `rr_evidence` ({doc}`bazel`).
+
 In Python, {py:func}`rules_requirements.lock.plan_lock` computes the lock for
 an attribution (refusing while any case is quarantined, and listing removals
 and owner changes for review) and {py:func}`rules_requirements.lock.write_lock`
