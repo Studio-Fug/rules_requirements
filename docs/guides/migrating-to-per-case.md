@@ -502,4 +502,6 @@ notice:
   roots merged; target-scope results not counted), not raw results.
 - `TestCase.requirements` is a deprecated alias of `TestCase.declared`; it
   still reads, writes and works in `dataclasses.replace(case,
-  requirements=...)`, but `dataclasses.asdict()` names the field `declared`.
+  requirements=...)`, but `dataclasses.asdict()` names the field `declared`,
+  and passing both `declared=` and `requirements=` to the constructor is a
+  `TypeError` (two sets of ids for one case: neither may silently win).

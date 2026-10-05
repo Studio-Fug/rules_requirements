@@ -153,6 +153,17 @@ def _ids(value: Any) -> tuple[str, ...]:
 
 _ID_FIELDS = frozenset(("declared", "suite_declared"))
 
+
+class _Declared(tuple):  # type: ignore[type-arg]
+    """The ids a :class:`TestCase` holds in ``declared``: a plain tuple that
+    also says where it came from. ``dataclasses.replace(case, requirements=X)``
+    passes the case's own ``declared`` (one of these) beside the alias; any
+    other ``declared=`` passed together with ``requirements=`` is an explicit
+    second set of ids, and is refused."""
+
+    __slots__ = ()
+
+
 _FOR_ID_WARNING = (
     "Evidence.for_id is deprecated: it returns the cases that declare an id (tags), which is not the set "
     "of cases the entity owns; use build_matrix(...).attribution.members_of(entity_id)"
@@ -172,8 +183,9 @@ class TestCase:
     — tags, in order, without duplicates. It is plain data: nothing here
     says which requirement the case verifies (see :mod:`rules_requirements.ingest`).
     ``requirements`` is a deprecated read/write alias of it (and a
-    deprecated keyword of the constructor, which wins over ``declared=``,
-    so ``dataclasses.replace(case, requirements=...)`` works as in 0.2;
+    deprecated keyword of the constructor: ``dataclasses.replace(case,
+    requirements=...)`` works as in 0.2, while passing both ``declared=``
+    and ``requirements=`` explicitly is a TypeError;
     :func:`dataclasses.asdict` names the field ``declared``).
     """
 
@@ -218,8 +230,15 @@ class TestCase:
         requirements: Iterable[str] | None = None,
     ) -> None:
         if requirements is not None:
-            # The deprecated alias wins over declared=: dataclasses.replace(case,
-            # requirements=...) passes the case's current declared= as well.
+            # dataclasses.replace(case, requirements=...) passes the case's
+            # current declared= as well (a _Declared): the alias replaces it.
+            # An explicit declared= beside the alias is two sets of ids for
+            # one case; neither may silently win.
+            if not isinstance(declared, _Declared) and _ids(declared):
+                raise TypeError(
+                    "TestCase: pass declared= or the deprecated requirements=, not both "
+                    f"(declared={_ids(declared)!r}, requirements={_ids(requirements)!r})"
+                )
             warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
             declared = requirements
         self.name = name
@@ -244,6 +263,8 @@ class TestCase:
         # case naming two ids always reads as two (multi-tag downstream).
         if name in _ID_FIELDS:
             value = _ids(value)
+            if name == "declared":
+                value = _Declared(value)
         object.__setattr__(self, name, value)
 
     @property
