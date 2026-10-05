@@ -444,7 +444,9 @@ def build_matrix(
     its invariant: verdicts read only the attribution's verification sets,
     never the evidence's tags. ``lock`` is the verification-set lock; without
     one, the lock ``config.sets_lock`` names is read (a lock that cannot be
-    read is a ``lock-invalid`` issue, and the sets are not pinned).
+    read is a ``lock-invalid`` issue, and the sets are not pinned);
+    :data:`~rules_requirements.lock.NO_LOCK` reads none (the sets are not
+    pinned: ``unpinned-sets``).
 
     ``references`` (from :func:`rules_requirements.annotations.scan`) adds
     implementation/verification source links and the ``no-implementation``
@@ -453,7 +455,9 @@ def build_matrix(
     """
     c = model.config
     problem = ""
-    if lock is None:
+    if lock is rr_lock.NO_LOCK:
+        lock = None  # explicitly none: not even the configured one
+    elif lock is None:
         try:
             lock = rr_lock.configured_lock(model)
         except rr_lock.LockError as exc:

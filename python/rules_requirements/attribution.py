@@ -46,7 +46,7 @@ from rules_requirements.case_keys import (
 from rules_requirements.config import Config
 from rules_requirements.ingest import ERROR, FAILED, PASSED, SKIPPED, Evidence, TestCase
 from rules_requirements.ingest.junit import target_from_path
-from rules_requirements.lock import Lock
+from rules_requirements.lock import NO_LOCK, Lock
 from rules_requirements.model import VERIFIABLE_KINDS, Claim, Model
 from rules_requirements.util import dedupe, natural_key
 
@@ -617,10 +617,13 @@ def attribute(
        owner); the quarantined keys that name it.
     6. :meth:`Attribution.check_invariant`.
 
-    ``lock`` is the verification-set lock to expect members from (None: no
-    lock; this function reads no files). ``current_build`` marks members
+    ``lock`` is the verification-set lock to expect members from (None or
+    :data:`~rules_requirements.lock.NO_LOCK`: no lock; this function reads
+    no files). ``current_build`` marks members
     stamped with another build ``stale``.
     """
+    if lock is NO_LOCK:
+        lock = None
     attribution = _Attributor(model, evidence, current_build, lock).run()
     attribution.check_invariant()
     return attribution

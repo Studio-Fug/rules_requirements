@@ -269,6 +269,9 @@ writes it. An owner change is allowed, also for a target the evidence at hand
 did not run (the entry follows the one entity whose claims now select it);
 a removal — a case missing from a target that ran, or an entry no claim
 selects any more — is kept in the lock until removals are allowed.
+{py:func}`rules_requirements.trace.build_matrix` reads the configured lock
+unless it is passed one; `lock=rules_requirements.lock.NO_LOCK` reads none
+(the sets are not pinned).
 
 (config-reference)=
 ## The `config:` section

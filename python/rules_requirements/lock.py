@@ -211,6 +211,15 @@ def load_lock(path: str, main_repo: str = "", shown: str = "") -> Lock:
     return parse_lock(text, where, main_repo)
 
 
+NO_LOCK = Lock(path="<no lock>")
+"""Pass as ``lock=`` to :func:`~rules_requirements.trace.build_matrix` (or
+:func:`~rules_requirements.attribution.attribute`) for "no lock", whatever
+``config.sets_lock`` names (``rr report --no-lock``): the sets are not
+pinned (an ``unpinned-sets`` gap), as without a configured lock. ``None``
+reads the configured lock; an empty :class:`Lock` pins every set to nothing.
+Compared by identity."""
+
+
 def configured_lock(model: Model) -> Lock | None:
     """The lock ``config.sets_lock`` names (None without one); raises :class:`LockError`."""
     if not model.config.sets_lock:

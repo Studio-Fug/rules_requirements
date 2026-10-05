@@ -614,6 +614,28 @@ def test_the_configured_lock_pins_the_sets(tmp_path):
     assert "unpinned-sets" in kinds(broken)
 
 
+def test_no_lock_reads_no_lock_whatever_the_config_names(tmp_path):
+    """``lock=NO_LOCK`` (rr report --no-lock) is "not pinned", unlike an empty
+    Lock (which pins every set to nothing) and unlike None (the configured one)."""
+    from rules_requirements.lock import NO_LOCK, Lock
+
+    lock = "schema: rules_requirements/verification-lock/v1\ncases:\n  //pkg:t:\n    suite::b: REQ-1\n"
+    write(tmp_path, "req/verification.rrlock", lock)
+    model = model_text(
+        tmp_path,
+        "config: {sets_lock: verification.rrlock}\nuser_needs: [{id: UN-1, title: n}]\n"
+        "requirements: [{id: REQ-1, title: r, satisfies: [UN-1]}]\n",
+        "req/m.yaml",
+    )
+    unpinned = matrix_for(tmp_path, model, [("a", "passed", ["REQ-1"], "")], lock=NO_LOCK)
+    assert unpinned.attribution.lock is None and unpinned.status("REQ-1") == VERIFIED
+    assert kinds(unpinned) == ["unpinned-sets"]
+    configured = matrix_for(tmp_path, model, [("a", "passed", ["REQ-1"], "")])
+    assert configured.status("REQ-1") == INCOMPLETE and "unpinned-sets" not in kinds(configured)
+    empty = matrix_for(tmp_path, model, [("a", "passed", ["REQ-1"], "")], lock=Lock())
+    assert "unlocked-member" in kinds(empty) and "unpinned-sets" not in kinds(empty)
+
+
 def test_tags_are_read_through_the_attribution_only(tmp_path, model):
     # A hand-built evidence object, cases added without Evidence.add.
     ev = Evidence(cases=[TestCase("t", "passed", classname="c", declared=("REQ-1",), target="//a:t")])
