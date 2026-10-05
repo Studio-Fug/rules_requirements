@@ -139,7 +139,9 @@ test, a filter), `not-run` (no evidence for its target at all — another lane,
 a target that never built), `moved` (a lock entry whose case now has another
 owner or none) or `quarantined`. A member's level is its case's own `level`,
 else its claim's, else `default_provided_level`; when the case and the claim
-disagree the lower one counts (`level-mismatch`).
+disagree the lower one counts (`level-mismatch`), and when either level is
+unordered (`inspection`, say: it has no rank) the case's own level counts, so
+a selector can never lend a case a level it did not provide.
 
 ### Requirements
 

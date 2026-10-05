@@ -1357,6 +1357,22 @@ def test_member_levels_and_level_mismatch(tmp_path):
     assert mx.status("REQ-1") == VERIFIED and mx.verdicts["REQ-1"].provided == "hil"
 
 
+@pytest.mark.parametrize("own, claimed", [("simulation", "inspection"), ("inspection", "hil")])
+def test_level_mismatch_with_an_unordered_level_counts_the_cases_own(tmp_path, own, claimed):
+    """An unordered level has no rank: on a mismatch the case's own level counts,
+    so a simulation test does not meet an inspection demand because its
+    selector says inspection (nor an inspection record a hil one)."""
+    reqs = (
+        f"  - {{id: REQ-1, title: a, satisfies: [UN-1], method: {claimed}, verified_by: "
+        f"[{{target: //p:t, cases: ['c::a'], level: {claimed}}}]}}\n"
+    )
+    mx = build_matrix(model_at(tmp_path, reqs), evidence(tc("a", level=own)))
+    (member,) = mx.attribution.members_of("REQ-1")
+    assert member.level == own and mx.status("REQ-1") == UNDER_VERIFIED
+    (mismatch,) = issues(mx.attribution, "level-mismatch")
+    assert mismatch.message.endswith(f"counted as {own}")
+
+
 def test_multi_tag_wins_over_attribution_conflict(tmp_path):
     """A case that declares REQ-3 and REQ-4 and that REQ-1 and REQ-2 both claim is
     a multi-tag (rule a before b): it names all four, and all four read INVALID."""

@@ -1112,11 +1112,15 @@ class _Attributor:
 
     def level_of(self, res: CaseResult, claim_level: str, ent: str = "") -> str:
         """The case's own level, else the claim's, else the default; the lower
-        of the two (``level-mismatch``) when both are given and differ."""
+        of the two (``level-mismatch``) when both are given and differ, and
+        the case's own when either is unordered (no rank to compare: the
+        claim cannot lend the case an unordered level such as inspection,
+        which only the same level meets)."""
         own = (res.level or "").strip().lower()
         claimed = (claim_level or "").strip().lower()
         if own and claimed and own != claimed:
-            lower = own if self._rank(own) <= self._rank(claimed) else claimed
+            unordered = self.c.rank(own) is None or self.c.rank(claimed) is None
+            lower = own if unordered or self._rank(own) <= self._rank(claimed) else claimed
             if ent:
                 self.issue(
                     "level-mismatch",
