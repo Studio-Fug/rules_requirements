@@ -118,14 +118,19 @@ rr_evidence(
     ],
 )
 
+# `setpoint/src/lib.rs` still names two ids in one `rr::verifies!` call, so
+# that case is quarantined; until it is split, the report is built anyway
+# (on_attribution_error = "warn") and shows REQ-3 and REQ-4 INVALID.
 rr_report(
     name = "report",
     srcs = SOURCES,
+    check = True,
     evidence = [
         ":evidence",
         "evidence/panel_inspection.rr.yaml",
     ],
     model = [":model"],
+    on_attribution_error = "warn",
 )
 
 rr_golden_test(

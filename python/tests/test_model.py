@@ -369,3 +369,17 @@ def test_lock_path_is_relative_to_the_config_file(tmp_path):
     assert m.lock_path() == str(tmp_path / "req" / "verification.rrlock")
     m, _ = read_model(str(tmp_path / "req"))
     assert m.lock_path() == str(tmp_path / "req" / "verification.rrlock")
+
+
+def test_an_absolute_lock_below_the_root_shows_relative(tmp_path):
+    """`--sets-lock` makes the lock absolute; reports and messages still show
+    it relative to the root (no machine-specific paths)."""
+    from dataclasses import replace
+
+    write(tmp_path, "req/a.yaml", "requirements: [{id: REQ-1, title: r}]\n")
+    m, _ = read_model(str(tmp_path / "req"), root=str(tmp_path))
+    lock = str(tmp_path / "req" / "other.rrlock")
+    m = replace(m, config=replace(m.config, sets_lock=lock))
+    assert m.lock_path(shown=True) == "req/other.rrlock" and m.lock_path() == lock
+    outside = replace(m, config=replace(m.config, sets_lock="/elsewhere/x.rrlock"))
+    assert outside.lock_path(shown=True) == "/elsewhere/x.rrlock"

@@ -6,6 +6,7 @@
 import json
 import os
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 import pytest
 from conftest import junit, write
@@ -208,6 +209,17 @@ def test_sets_needs_a_lock_and_a_known_entity(capsys, project):
     out = project / "elsewhere.rrlock"
     rc, _, _ = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--sets-lock", out, "--write")
     assert rc == 0 and out.exists()
+    # An empty file is a lock to start from (rr_sets_lock_test needs the file); a check of it fails.
+    empty = write(project, "empty.rrlock", "")
+    rc, _, err = run(capsys, "sets", "check", "--model", "req", *evidence(project), "--sets-lock", empty)
+    assert rc == 2 and "lock-invalid" in err
+    rc, _, _ = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--sets-lock", empty, "--write")
+    assert rc == 0 and "suite::a1" in Path(empty).read_text()
+    # --out writes elsewhere, relative to the workspace root.
+    copy = project / "copy.rrlock"
+    rc, _, _ = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--sets-lock", empty, "--write",
+                   "--out", "copy.rrlock")  # fmt: skip
+    assert rc == 0 and copy.read_text() == Path(empty).read_text()
 
 
 # --- rr check-report ---------------------------------------------------------

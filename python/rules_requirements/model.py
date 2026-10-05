@@ -425,6 +425,10 @@ class Model:
             return ""
         if not os.path.isabs(lock):
             lock = os.path.normpath(os.path.join(os.path.dirname(self.config_file), lock))
+        elif shown and self.root and lock.startswith(self.root.rstrip(os.sep) + os.sep):
+            # An absolute lock below the root (`--sets-lock` makes it absolute)
+            # shows relative to it, as model locations do: stable across machines.
+            return os.path.relpath(lock, self.root)
         if shown or os.path.isabs(lock):
             return lock
         return os.path.join(self.root, lock)

@@ -2,7 +2,20 @@
 
 RrModelInfo = provider(
     doc = "Requirements model files.",
-    fields = {"srcs": "depset of model files"},
+    fields = {
+        "srcs": "depset of model files",
+        "lock": "the verification-set lock (`File`), or None",
+    },
+)
+
+RrReportInfo = provider(
+    doc = "A traceability report built by rr_report.",
+    fields = {
+        "json": "the JSON report (`File`), or None",
+        "lane": "the lane it was built for (\"\" for none)",
+        "on_attribution_error": "\"fail\" or \"warn\"",
+        "lock": "the verification-set lock it read (`File`), or None",
+    },
 )
 
 RrEvidenceInfo = provider(
@@ -12,9 +25,14 @@ RrEvidenceInfo = provider(
 
 def _rr_model_impl(ctx):
     files = depset(ctx.files.srcs)
+    lock = ctx.file.lock
+
+    # The lock is no model file: it rides in the runfiles, never in `files`
+    # (which other rules pass to `rr` as the model).
+    runfiles = ctx.runfiles(files = ctx.files.srcs + ([lock] if lock else []))
     return [
-        DefaultInfo(files = files, runfiles = ctx.runfiles(files = ctx.files.srcs)),
-        RrModelInfo(srcs = files),
+        DefaultInfo(files = files, runfiles = runfiles),
+        RrModelInfo(srcs = files, lock = lock),
     ]
 
 rr_model_rule = rule(
@@ -22,6 +40,7 @@ rr_model_rule = rule(
     doc = "Groups requirements model files (see rr_model).",
     attrs = {
         "srcs": attr.label_list(allow_files = [".yaml", ".yml", ".json"], mandatory = True),
+        "lock": attr.label(allow_single_file = [".rrlock"], doc = "The verification-set lock (`rr sets lock`)."),
     },
 )
 
@@ -186,6 +205,18 @@ def _rr_report_impl(ctx):
         args.add("--strict")
     for k, v in ctx.attr.current_build.items():
         args.add("--current-build", "%s=%s" % (k, v))
+
+    # The model's lock (rr_model(lock = ...)): the sets are pinned by it.
+    locks = [m[RrModelInfo].lock for m in ctx.attr.model if RrModelInfo in m and m[RrModelInfo].lock]
+    if len(locks) > 1:
+        fail("%s: more than one model names a lock: %s" % (ctx.label, [f.short_path for f in locks]))
+    if locks:
+        args.add("--sets-lock", locks[0])
+    if ctx.attr.lane:
+        args.add("--lane", ctx.attr.lane)
+    if ctx.file.lane_targets:
+        args.add("--lane-targets", ctx.file.lane_targets)
+    args.add("--on-attribution-error", ctx.attr.on_attribution_error)
     if ctx.files.srcs:
         # Implementation links: scan these sources for @rr(...) annotations.
         args.add_all(["--scan", "--root", ".", "--files"])
@@ -193,12 +224,20 @@ def _rr_report_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._rr,
         arguments = [args],
-        inputs = ctx.files.model + evidence + ctx.files.srcs,
+        inputs = ctx.files.model + evidence + ctx.files.srcs + locks + ctx.files.lane_targets,
         outputs = outs,
         mnemonic = "RrReport",
         progress_message = "Building traceability report %{label}",
     )
-    return [DefaultInfo(files = depset(outs))]
+    return [
+        DefaultInfo(files = depset(outs)),
+        RrReportInfo(
+            json = ctx.outputs.json_out,
+            lane = ctx.attr.lane,
+            on_attribution_error = ctx.attr.on_attribution_error,
+            lock = locks[0] if locks else None,
+        ),
+    ]
 
 _rr_report = rule(
     implementation = _rr_report_impl,
@@ -208,6 +247,9 @@ _rr_report = rule(
         "title": attr.string(),
         "strict": attr.bool(),
         "current_build": attr.string_dict(),
+        "lane": attr.string(),
+        "lane_targets": attr.label(allow_single_file = True),
+        "on_attribution_error": attr.string(default = "fail", values = ["fail", "warn"]),
         "srcs": attr.label_list(allow_files = True),
         "html_out": attr.output(),
         "json_out": attr.output(),
@@ -216,24 +258,49 @@ _rr_report = rule(
     },
 )
 
-def rr_report(name, model, evidence = [], srcs = [], formats = _FORMATS, title = "", strict = False, current_build = {}, testonly = True, **kwargs):
+def rr_report(
+        name,
+        model,
+        evidence = [],
+        srcs = [],
+        formats = _FORMATS,
+        title = "",
+        strict = False,
+        current_build = {},
+        check = False,
+        lane = "",
+        lane_targets = None,
+        on_attribution_error = "fail",
+        testonly = True,
+        **kwargs):
     """Renders the traceability report for a model and its evidence.
 
     Outputs `<name>.html`, `<name>.json` and/or `<name>.md` (addressable as
     `:<name>.json` etc.). The JSON form is deterministic and suitable for
-    `rr_golden_test`.
+    `rr_golden_test`. The build fails when the model is invalid, when a test
+    case is quarantined (unless `on_attribution_error = "warn"`), and when an
+    attribution issue is an error (with `strict`, also every warning).
 
     Args:
       name: target name; also the output file stem.
-      model: `rr_model` target(s) or model files.
+      model: `rr_model` target(s) or model files. An `rr_model` with a `lock`
+        pins the verification sets with it.
       evidence: `rr_evidence` targets and/or JUnit / records files.
       srcs: source files to scan for `@rr(...)` annotations; the report then
         links each requirement to the code that implements and verifies it.
       formats: any of "html", "json", "md".
       title: report title (default: the project name).
-      strict: fail on model warnings too.
+      strict: fail on model and attribution warnings too (`rr report --strict`).
       current_build: current artifact identity; evidence recorded against a
         different one is stale.
+      check: also create `<name>_check_test`, which runs `rr check-report` on
+        `<name>.json` (needs "json" in `formats`).
+      lane: the lane the evidence comes from (`rr report --lane`).
+      lane_targets: a file listing the targets that lane runs, one label per
+        line (`--lane-targets`); not-run members of other targets read "out of
+        lane".
+      on_attribution_error: "fail" (a quarantined test case fails the build)
+        or "warn" (the report is built; the case still counts for nobody).
       testonly: Bazel testonly flag (default True: evidence comes from tests).
       **kwargs: common attributes (visibility, tags, ...).
     """
@@ -242,6 +309,8 @@ def rr_report(name, model, evidence = [], srcs = [], formats = _FORMATS, title =
         if fmt not in _FORMATS:
             fail("unknown report format %r (expected one of %s)" % (fmt, _FORMATS))
         outs[fmt + "_out"] = "%s.%s" % (name, fmt)
+    if check and "json" not in formats:
+        fail("rr_report(check = True) needs \"json\" in formats: rr check-report reads the JSON report")
     _rr_report(
         name = name,
         model = model,
@@ -249,6 +318,9 @@ def rr_report(name, model, evidence = [], srcs = [], formats = _FORMATS, title =
         title = title,
         strict = strict,
         current_build = current_build,
+        lane = lane,
+        lane_targets = lane_targets,
+        on_attribution_error = on_attribution_error,
         srcs = srcs,
         testonly = testonly,
         **dict(kwargs, **outs)

@@ -12,7 +12,7 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_test")
-load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test", "rr_wrapped_test")
+load("//rr:defs.bzl", "rr_annotations_test", "rr_evidence", "rr_golden_test", "rr_model", "rr_py_test", "rr_report", "rr_rust_test", "rr_sets_lock_test", "rr_wrapped_test")
 
 rr_model(
     name = "model",
@@ -149,10 +149,15 @@ py_test(
     deps = ["//python"],
 )
 
+# The multi-id cases above are quarantined on purpose (that is what this report
+# pins), so a quarantine must not fail the build here; check = True re-proves
+# from report.json alone that no case is owned twice (:report_check_test).
 rr_report(
     name = "report",
+    check = True,
     evidence = [":evidence"],
     model = [":model"],
+    on_attribution_error = "warn",
 )
 
 rr_golden_test(
@@ -169,9 +174,13 @@ rr_golden_test(
 
 # rr_case.h: per-case JUnit from a plain-assert C++ binary, without googletest.
 
+# The verification sets are pinned by rr_case.rrlock: :rr_case_model_test
+# checks it statically, the report reads it, and :rr_case_lock_test checks it
+# against the evidence (`bazel run :rr_case_lock_test.update` re-locks).
 rr_model(
     name = "rr_case_model",
     srcs = ["rr_case_model.yaml"],
+    lock = "rr_case.rrlock",
 )
 
 cc_test(
@@ -194,8 +203,16 @@ rr_evidence(
 
 rr_report(
     name = "rr_case_report",
+    check = True,
     evidence = [":rr_case_evidence"],
     model = [":rr_case_model"],
+)
+
+rr_sets_lock_test(
+    name = "rr_case_lock_test",
+    evidence = [":rr_case_evidence"],
+    lock = "rr_case.rrlock",
+    model = ":rr_case_model",
 )
 
 rr_golden_test(

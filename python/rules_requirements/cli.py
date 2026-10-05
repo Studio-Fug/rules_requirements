@@ -1020,6 +1020,14 @@ def cmd_attribution(args: argparse.Namespace) -> int:
     return 0
 
 
+def _blank_file(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return not fh.read().strip()
+    except OSError:
+        return False
+
+
 def _lock_target(args: argparse.Namespace, model: Model) -> str:
     """The lock path ``rr sets`` reads (``--sets-lock``, else config.sets_lock); "" without one."""
     if args.sets_lock:
@@ -1048,7 +1056,9 @@ def cmd_sets(args: argparse.Namespace) -> int:
         return 2
     shown = report._shown(path)
     previous: Lock | None = None
-    if os.path.exists(path):
+    if _blank_file(path) and args.sets_command == "lock":
+        pass  # an empty file to start from (rr_sets_lock_test needs the file to exist): no lock yet
+    elif os.path.exists(path):
         try:
             previous = rr_lock.load_lock(path, model.config.main_repo, shown=shown)
         except rr_lock.LockError as exc:

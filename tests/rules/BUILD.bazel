@@ -1,0 +1,65 @@
+# Analysis tests of rr_model(lock), rr_report(check, lane,
+# on_attribution_error) and rr_sets_lock_test, over a one-case fixture whose
+# targets also build and run: the report, its check test and the lock test.
+
+load("//rr:defs.bzl", "rr_model", "rr_report", "rr_sets_lock_test")
+load(":rules_test.bzl", "model_lock_test", "report_test", "sets_lock_test_test")
+
+rr_model(
+    name = "model",
+    srcs = ["model.yaml"],
+    lock = "verification.rrlock",
+)
+
+rr_report(
+    name = "report",
+    check = True,
+    evidence = ["evidence.xml"],
+    formats = ["json"],
+    lane = "software",
+    lane_targets = "lane.txt",
+    model = [":model"],
+    on_attribution_error = "warn",
+)
+
+# No lock, no lane, the default on_attribution_error.
+rr_report(
+    name = "plain_report",
+    evidence = ["evidence.xml"],
+    formats = ["json"],
+    model = ["plain.yaml"],
+)
+
+rr_sets_lock_test(
+    name = "lock_test",
+    evidence = ["evidence.xml"],
+    model = ":model",
+)
+
+model_lock_test(
+    name = "model_lock_analysis_test",
+    model = ":model",
+    validate_main = ":model_test.rr_main",
+)
+
+report_test(
+    name = "report_analysis_test",
+    check_main = ":report_check_test.rr_main",
+    expect_lock = True,
+    lane = "software",
+    on_attribution_error = "warn",
+    report = ":report",
+)
+
+report_test(
+    name = "plain_report_analysis_test",
+    expect_lock = False,
+    on_attribution_error = "fail",
+    report = ":plain_report",
+)
+
+sets_lock_test_test(
+    name = "sets_lock_test_analysis_test",
+    check_main = ":lock_test.rr_main",
+    update_main = ":lock_test.update.rr_main",
+)
