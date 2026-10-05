@@ -213,7 +213,11 @@ A user need's `validated_by` and a mitigation's `verified_by` claim cases of
 their own — a usability study that validates `UN-2`, say (in hybrid mode a
 case tagged with the need's id works too). Such a set is not graded by level
 (any pass counts) and joins the rollup as one more child: a failing usability
-study makes the need FAILED even if every requirement is verified.
+study makes the need FAILED even if every requirement is verified. A user
+need's or mitigation's verdict is therefore always a rollup: an own set that
+is INCOMPLETE (a skipped or missing member) or UNDER-VERIFIED makes it
+PARTIAL, never INCOMPLETE, while the set's own `incomplete` gap is still
+raised; only INVALID (a quarantined case names it) is carried through as is.
 
 (staleness)=
 ## Staleness

@@ -509,6 +509,9 @@ def build_matrix(
 
     # User needs and mitigations: their own sets (validated_by / verified_by
     # claims, tags) join the rollup as one more child; level is not graded.
+    # Their verdict is always a rollup (an INCOMPLETE or UNDER-VERIFIED own
+    # set reads PARTIAL, its `incomplete` gap still raised by find_gaps);
+    # only INVALID is carried through as is.
     def with_own(entity_id: str, kind: str, derived: list[str], all_ok: str, none: str) -> Verdict:
         members = attribution.members_of(entity_id)
         v = own(entity_id, kind, "")

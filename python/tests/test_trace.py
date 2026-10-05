@@ -684,3 +684,19 @@ def test_counts_test_cases_once_per_resolved_case(tmp_path, model):
         ev.add(case)
     m = build_matrix(model, ev)
     assert len(ev.cases) == 5 and m.counts()["test_cases"] == len(m.attribution.cases) == 2
+
+
+def test_a_need_or_mitigation_verdict_is_a_rollup_of_its_own_set(tmp_path):
+    """Decided: an INCOMPLETE own set makes a user need (or mitigation) PARTIAL,
+    not INCOMPLETE; the set's incomplete gap is still raised."""
+    model = model_text(
+        tmp_path,
+        "user_needs: [{id: UN-1, title: n, validated_by: [{target: //u:t, cases: ['u::*']}]}]\n"
+        "requirements: [{id: REQ-1, title: r, satisfies: [UN-1]}]\n",
+    )
+    ev = Evidence()
+    ev.add(TestCase("study", "passed", "u", target="//u:t"))
+    ev.add(TestCase("later", "skipped", "u", target="//u:t"))
+    m = build_matrix(model, ev)
+    assert m.status("UN-1") == PARTIAL and m.verdicts["UN-1"].basis == "own+derived"
+    assert ("incomplete", "UN-1") in {(g.kind, g.entity) for g in m.gaps}
