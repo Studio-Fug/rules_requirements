@@ -373,6 +373,16 @@ def test_the_evidence_view_is_exactly_the_owned_members():
     ent = _entity(dropped, row["owner"])
     ent["evidence"] = [e for e in ent["evidence"] if f"{e['target']}#{e['name']}" != row["case"]]
     assert any(f"{row['owner']}: evidence[] is not the view" in p for p in checkreport.check_report(dropped))
+    # The right key with another status, level or staleness is not the view either.
+    for field, value in (("status", "failed"), ("level", "hardware"), ("stale", True)):
+        changed = copy.deepcopy(doc)
+        ent = _entity(changed, row["owner"])
+        entry = next(e for e in ent["evidence"] if f"{e['target']}#{e['name']}" == row["case"])
+        if entry.get(field) == value:
+            value = {"status": "passed", "level": "simulation", "stale": False}[field]
+        entry[field] = value
+        problems = checkreport.check_report(changed)
+        assert f"{row['owner']}: evidence[] is not the view of its owned members" in problems, (field, problems)
     risk = copy.deepcopy(doc)
     _entity(risk, "RISK-1")["evidence"] = [{"name": row["path"], "status": "passed", "level": "simulation",
                                             "target": row["target"]}]  # fmt: skip

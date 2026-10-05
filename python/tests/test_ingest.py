@@ -457,6 +457,18 @@ def test_declared_is_a_field_and_requirements_a_deprecated_alias():
     tagged = TestCase("n", "passed", declared=("R-1",))
     with pytest.warns(DeprecationWarning):
         assert dataclasses.replace(tagged, requirements=["R-9"]).declared == ("R-9",)
+    # Only dataclasses' own replace() may pass a case's declared beside the
+    # alias: a user function that looks like it (named replace / _replace,
+    # holding the source case as a local obj / self) is two sets of ids.
+    def replace(obj, ids):
+        return TestCase(obj.name, obj.status, declared=obj.declared, requirements=ids)
+
+    def _replace(self, ids):
+        return TestCase(self.name, self.status, declared=self.declared, requirements=ids)
+
+    for lookalike in (replace, _replace):
+        with pytest.raises(TypeError, match="not both"):
+            lookalike(tagged, ["R-9"])
     # declared stays a plain tuple to every reader, copy and pickle included.
     import copy
     import pickle

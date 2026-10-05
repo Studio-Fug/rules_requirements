@@ -229,6 +229,20 @@ def test_stage_model_refuses_when_the_claims_would_give_an_absent_decided_case_a
                for r in stage.refused)  # fmt: skip
 
 
+def test_an_absent_case_decided_none_gets_no_selector(tmp_path):
+    """//h:t#h::1 is decided none on the worksheet and is not in the evidence;
+    no claim selects it. Nothing is written for it (no entity named "none",
+    no literal), and the stage is not refused: nobody owns it, as decided."""
+    model = load(write(tmp_path, "m.yaml", MODEL))
+    sheet = {"groups": [{"target": "//h:t", "owner": "none", "cases": [{"path": "h::1"}]}]}
+    stage = migrate.model_stage(model, evidence(), sheet)
+    assert not stage.refused, stage.refused
+    assert stage.unseen == {"//h:t#h::1": "none"}
+    assert stage.from_worksheet == []
+    assert "none" not in stage.additions and "none" not in stage.data
+    assert not any("//h:t" in targets for targets in stage.additions.values())
+
+
 def test_compress_keeps_its_globs_off_an_absent_case_decided_for_another_entity(tmp_path):
     model = load(write(tmp_path, "m.yaml", MODEL))
     sheet = {"groups": [{"target": "//p:t", "owner": "REQ-2", "cases": [{"path": "a::3"}]}]}
