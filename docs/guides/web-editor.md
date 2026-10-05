@@ -48,6 +48,54 @@ delete that removes references) is written all-or-nothing, and deleting the
 only entity of a one-object file removes the file unless other documents
 (say, `project:`) live in it.
 
+**One owner per test case.** A test case verifies at most one requirement
+(user need or mitigation); a set of cases may together verify one. Before any
+save — a form, a rename, a note, a finding applied — the editor builds the
+model the save would write and runs the same checks as `rr validate` and
+`rr report` over it: the `shared-case` and `same-code-multiple-owners`
+witnesses of the claims, the edited entity's selectors and targets
+(`bad-selector`, `bad-target`), the verification-set lock
+(`lock-owner-changed`), and attribution over the loaded evidence (a new
+`attribution-conflict`, or one source file owned twice). A save that would
+introduce any of them is refused with **409**, naming the case and its owner
+today:
+
+```text
+this would make //web:clocksync_test#clocksync::bestSample keeps the min-RTT sample
+verify both PR-13 and PR-29 (it is owned by PR-13 now); a test case verifies at
+most one requirement
+```
+
+Only problems the edit introduces count, so a conflict already in the model
+never blocks an unrelated edit (it is still a validation error). None of these
+checks can be configured off.
+
+The form's **verification set** widget (validation set, for a user need) edits
+`verified_by` / `validated_by` one target per row: *Cases* with one selector
+per line and a checklist of the target's observed cases — a case another
+entity owns is disabled and labelled with its owner — or *Whole target*, with
+the reason the target cannot be claimed per case. While you type, the draft is
+pre-checked (`POST /api/entities/{id}/precheck`): problems show above the Save
+button and disable it, each selector shows how many cases it matches, and the
+set the entity would get is summarised. An item you do not touch is written
+back exactly as it was.
+
+**Case ledger.** `#/cases` lists every test case of the loaded evidence with its
+one owner (or none), how it got it (`model`, or `tag` in hybrid mode), its
+result, the entities whose claims select it, its lock entry, and its
+quarantine — filterable by owned, unowned, quarantined and (with a lock)
+not locked. Owners are read from the attribution, never derived from tags or
+targets in the browser. **Move…** (or **Assign…**) gives a case to another
+entity, or to none, only through a model edit: the claims that select it give
+it up (a literal selector is dropped; a glob or whole-target claim is rewritten
+into literal selectors of the other cases it selects, after you confirm), the
+new owner gains a literal selector, a configured lock entry is re-locked in the
+same write, and the result must pass the checks above and give the case to the
+chosen owner. A `multi-tag` case cannot be moved: its own evidence names two
+ids, so fix the test's tag. The overview shows the invariant —
+"N test cases · 0 quarantined · each case → ≤1 requirement" — and a banner
+while any case is quarantined.
+
 Some layouts cannot be edited in place without touching their neighbours:
 flow-style sections (`requirements: [{...}, {...}]`), JSON model files, and
 entities written as a flow mapping or with merge keys (`<<: *base`) that carry
@@ -62,8 +110,11 @@ overwrite.
 
 **Trace.** Each entity page shows its traces in both directions with their
 verification status — for a risk, the whole chain from user needs through
-requirements and mitigations — its test evidence (name, target, level, result,
-failure message), and the source locations annotated with it. The trace graph
+requirements and mitigations — its **verification set** (every case it owns or
+expects, with its state: passed, failed, error, skipped, missing, not run,
+moved or quarantined, flaky and stale flags, the selector and level), the
+quarantined cases that make it INVALID, and the source locations annotated
+with it. The trace graph
 (needs → requirements → mitigations → risks, laid out to keep crossings low)
 pans and zooms, focuses on an entity's neighbourhood at a chosen depth, filters
 by kind, and exports Mermaid.
@@ -106,15 +157,24 @@ mitigation, or an update to an existing one). A finding can be:
 | Workflow | Needs an LLM | Question it answers |
 | -------- | ------------ | ------------------- |
 | Completeness check | no (an optional LLM pass adds more) | Are there validation issues or traceability gaps — needs without requirements, unverified / under-verified / stale / failing requirements, uncontrolled risks, requirements without implementation links? With an LLM: do the requirements cover each need, are they verifiable as written, do they imply hazards the analysis lacks? |
-| Test adequacy | yes | Do the tests linked to requirement *Y* — by evidence or annotation — actually assert what *Y* states? Each test is judged *proves / partially / does not prove / cannot tell*, and missing checks are listed. |
+| Test adequacy | yes | Do the cases of requirement *Y*'s verification set (and test code annotated with *Y*, labelled as not in the set) actually assert what *Y* states? Each test is judged *proves / partially / does not prove / cannot tell*, and missing checks are listed. |
 | Implementation review | yes | Does the code annotated as implementing *Y* implement it completely? |
 | Mitigation adequacy | yes | Do the requirements behind risk *W*'s mitigations actually control it (ISO 14971 §7), and is the residual estimate plausible? |
 | Hazard discovery | yes | Which hazards and hazardous situations does the risk analysis not cover yet? |
 | Assistant | yes | Describe a change in plain language; get proposed creates, updates and notes to review and apply. |
+| Assign test cases | yes | Which one entity does each unowned or quarantined case verify (or none)? With `worksheet`, the proposals are written into that attribution worksheet (`.rrplan`). |
 
 Entity pages offer the relevant workflow for that entity directly (test adequacy
 and implementation review for a requirement, mitigation adequacy for a risk).
 Agents only ever *propose*: nothing is written until you apply a finding.
+
+Agents read a requirement's tests from its verification set, never from the
+tags in the evidence: a case owned by another entity, or quarantined, is no
+test of it. They **never edit ownership**: a proposal never carries
+`verified_by` / `validated_by`, applying a finding cannot change them (409),
+and a proposed case owner is only recorded in the attribution worksheet — as
+`proposed`, `reason` and `proposed_by` of its case, never as the decided
+`owner:` — for a person to decide (see `rr migrate`).
 
 ### Enabling the LLM workflows
 
@@ -191,8 +251,12 @@ agents too (send `X-RR-Request: 1` on `POST`/`PUT`/`PATCH`/`DELETE`, and
 | Method and path | Purpose |
 | --------------- | ------- |
 | `GET /api/state` | project, configuration, counts, validation issues, git status, LLM availability |
-| `GET /api/entities?kind=` · `GET /api/entities/{id}` | lists; one entity with verdict, evidence, traces, source references, issues and gaps |
-| `POST /api/entities` · `PUT`/`DELETE /api/entities/{id}` · `POST /api/entities/{id}/rename` | create, update, delete (`?force=1` also removes references), rename |
+| `GET /api/entities?kind=` · `GET /api/entities/{id}` | lists; one entity with verdict, verification set (`members`, `set`, `quarantined`, `basis`, `derived_from`), traces, source references, issues and gaps |
+| `POST /api/entities` · `PUT`/`DELETE /api/entities/{id}` · `POST /api/entities/{id}/rename` | create, update, delete (`?force=1` also removes references), rename; a save that would give a case two owners is a 409 whose body lists `conflicts` (`code`, `message`, `case`, `entities`, `owner`) |
+| `POST /api/entities/{id}/precheck` | dry run of saving a draft (`{data}`; `_new` with `kind` for a create): `ok`, `problems`, the entity's `issues`, and the set it would get |
+| `GET /api/cases?target=&q=&state=` | the case ledger from the attribution (`state`: `owned`, `unowned`, `quarantined`, `unlocked`; `unowned=1` also works) |
+| `POST /api/cases/move` | `{case, to, expand?, dry_run?}`: give a case to another owner (or `none`) through a checked model edit |
+| `GET /api/attribution` | mode, lock, per-target counts and owners, quarantines, attribution issues, each entity's set |
 | `POST /api/entities/{id}/notes` · `PATCH`/`DELETE …/notes/{note}` | notes |
 | `GET /api/next-id?kind=` | the next id and the file a new entity would go to |
 | `GET /api/graph?focus=&depth=&kinds=&methods=` | trace graph (nodes, edges, SVG, Mermaid) |
@@ -202,4 +266,4 @@ agents too (send `X-RR-Request: 1` on `POST`/`PUT`/`PATCH`/`DELETE`, and
 | `GET /api/diff?from=&to=` | semantic model diff (`to` defaults to the working tree) |
 | `POST /api/git/commit` · `POST /api/git/tag` | commit model changes; name a baseline |
 | `GET /api/agents` · `POST /api/agents/run` · `GET /api/agents/jobs[/{job}]` | workflows and jobs |
-| `POST /api/findings/{id}/apply` · `POST /api/findings/{id}/dismiss` | act on a finding |
+| `POST /api/findings/{id}/apply` · `POST /api/findings/{id}/dismiss` | act on a finding (`action`: `note`, `create`, `update`, or `worksheet` for a proposed case owner) |
