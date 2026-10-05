@@ -112,7 +112,7 @@ def test_stage_model_cli_rewrites_the_model_and_keeps_the_owner_table(capsys, tm
     rc = cli.main(["migrate", "apply", "plan.rrplan", "--stage", "model", "--dry-run"])
     out, err = capsys.readouterr()
     assert rc == 0 and "+    verified_by: [{target: //p:t, cases: [a::1, a::2]}]" in out
-    assert "the owner table (4 case(s)) is unchanged" in err
+    assert "over the evidence given, the owner table (4 case(s)) is unchanged" in err
     assert (tmp_path / "req/requirements.yaml").read_text() == MODEL  # a dry run writes nothing
     rc = cli.main(["migrate", "apply", "plan.rrplan", "--stage", "model", "--compress"])
     out, err = capsys.readouterr()
@@ -165,3 +165,98 @@ def test_check_model_stage_catches_a_changed_owner(tmp_path):
     broad = load(write(tmp_path, "b.yaml", MODEL.replace('cases: ["m::b1"]', 'cases: ["m::*"]')))
     problems = migrate.check_model_stage(model, broad, evidence())
     assert any("owner of //p:t#m::free would change: None -> REQ-2" in p for p in problems)
+
+
+# --- regressions (B6 review) -------------------------------------------------
+
+
+def _junit(classname, name, rid=None):
+    prop = f'<properties><property name="requirement" value="{rid}"/></properties>' if rid else ""
+    return f'<testsuite name="s"><testcase classname="{classname}" name="{name}">{prop}</testcase></testsuite>'
+
+
+def test_stage_model_keeps_a_worksheet_owner_whose_case_is_in_another_lanes_evidence(capsys, tmp_path, monkeypatch):
+    """The worksheet decided //h:t#h::1 -> REQ-2; only the software evidence
+    is given. The decision is written as a literal selector of REQ-2 (it used
+    to be warned about and dropped with exit 0), so over every lane's
+    evidence REQ-2 still owns its case under attribution: model."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    monkeypatch.delenv("BUILD_WORKING_DIRECTORY", raising=False)
+    model = "user_needs: [{id: UN-1, title: n}]\nrequirements:\n  - {id: REQ-1, title: a, satisfies: [UN-1]}\n" \
+            "  - {id: REQ-2, title: b, satisfies: [UN-1]}\n"  # fmt: skip
+    write(tmp_path, "req/requirements.yaml", model)
+    write(tmp_path, "sw/testlogs/p/t/test.xml", _junit("a", "1", "REQ-1"))
+    write(tmp_path, "hitl/testlogs/h/t/test.xml", _junit("h", "1", "REQ-2"))
+    sheet = {"schema": migrate.SCHEMA, "groups": [{"target": "//h:t", "group": "h", "counts_toward": ["REQ-2"],
+             "owner": "REQ-2", "cases": [{"path": "h::1"}]}]}  # fmt: skip
+    write(tmp_path, "plan.rrplan", json.dumps(sheet))
+    rc = cli.main(
+        ["migrate", "apply", "plan.rrplan", "--stage", "model", "--model", "req", "--evidence", "sw/testlogs"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert "//h:t#h::1: decided REQ-2 on the worksheet, not in the evidence given: a literal selector of REQ-2" in err
+    assert "1 decided case(s) the evidence lacks keep the worksheet's owner" in err
+    text = (tmp_path / "req/requirements.yaml").read_text()
+    write(tmp_path, "req/requirements.yaml", "config: {attribution: model}\n" + text)
+    rc = cli.main(["attribution", "--model", "req", "--evidence", "sw/testlogs", "hitl/testlogs", "--format", "json",
+                   "--check"])  # fmt: skip
+    out, err = capsys.readouterr()
+    assert rc == 0, err
+    rows = {r["case"]: r["owner"] for r in json.loads(out)["cases"]}
+    assert rows == {"//p:t#a::1": "REQ-1", "//h:t#h::1": "REQ-2"}
+
+
+def test_stage_model_refuses_when_the_claims_would_give_an_absent_decided_case_another_owner(tmp_path):
+    """REQ-1 already claims //h:t h::*; the worksheet gives the absent h::1 to
+    REQ-2. Its literal would share the case: check_claims refuses it, and so
+    does the static check of the absent decided cases."""
+    text = MODEL.replace("  - id: REQ-1\n    title: a\n    satisfies: [UN-1]\n",
+                         "  - id: REQ-1\n    title: a\n    satisfies: [UN-1]\n"
+                         "    verified_by: [{target: //h:t, cases: ['h::*']}]\n")  # fmt: skip
+    model = load(write(tmp_path, "m.yaml", text))
+    sheet = {"groups": [{"target": "//h:t", "owner": "REQ-2", "cases": [{"path": "h::1"}]}]}
+    stage = migrate.model_stage(model, evidence(), sheet)
+    assert stage.from_worksheet == ["//h:t#h::1"]
+    assert any(r.startswith("check_claims: ") and "shared-case" in r for r in stage.refused), stage.refused
+    assert any("//h:t#h::1: the worksheet decided REQ-2 (not in the evidence given), but the new claims select it "
+               "for REQ-1, REQ-2" in r for r in stage.refused)  # fmt: skip
+    # Decided none, but REQ-1's claim selects it: refused too.
+    sheet["groups"][0]["owner"] = "none"
+    stage = migrate.model_stage(model, evidence(), sheet)
+    assert any("decided none (not in the evidence given), but the new claims select it for REQ-1" in r
+               for r in stage.refused)  # fmt: skip
+
+
+def test_compress_keeps_its_globs_off_an_absent_case_decided_for_another_entity(tmp_path):
+    model = load(write(tmp_path, "m.yaml", MODEL))
+    sheet = {"groups": [{"target": "//p:t", "owner": "REQ-2", "cases": [{"path": "a::3"}]}]}
+    stage = migrate.model_stage(model, evidence(), sheet, compress=True)
+    assert not stage.refused, stage.refused
+    assert stage.additions["REQ-1"]["//p:t"] == ["a::1", "a::2", "s::run", "s::skip"]  # no a::*: it reaches a::3
+    assert stage.additions["REQ-2"]["//p:t"] == ["m::b2", "a::3"]
+    sheet["groups"][0]["owner"] = "REQ-1"  # decided for REQ-1: the glob may cover it, no literal needed
+    stage = migrate.model_stage(model, evidence(), sheet, compress=True)
+    assert not stage.refused and stage.additions["REQ-1"]["//p:t"] == ["a::*", "s::run", "s::skip"]
+    assert stage.from_worksheet == []
+
+
+def test_model_stage_refuses_additions_that_would_change_an_owner(tmp_path, monkeypatch):
+    """The safety net behind _compress: if a selector it wrote reached a case
+    of another owner (or of nobody), check_model_stage refuses the stage."""
+    model = load(write(tmp_path, "m.yaml", MODEL))
+    real = migrate._compress
+    # REQ-1's cases on //p:t compress to "*": it also reaches m::free (owned by nobody).
+    monkeypatch.setattr(migrate, "_compress", lambda paths, *rest: ["*"] if "a::1" in paths else real(paths, *rest))
+    stage = migrate.model_stage(model, evidence(), compress=True)
+    assert any("owner of //p:t#m::free would change: None -> REQ-1" in r for r in stage.refused), stage.refused
+
+
+def test_model_stage_refuses_a_quarantine_before_writing_anything(tmp_path):
+    model = load(write(tmp_path, "m.yaml", MODEL))
+    ev = evidence()
+    ev.add(case("q::1", declared=("REQ-1", "REQ-3")))
+    stage = migrate.model_stage(model, ev)
+    assert [r.split(":")[0] for r in stage.refused] == ["multi-tag"]
+    assert stage.model is None and not stage.additions and not stage.data

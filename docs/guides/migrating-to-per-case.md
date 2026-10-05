@@ -494,10 +494,17 @@ evidence shows the decided owners, `rr migrate apply PLAN.rrplan --stage model
 owns through a tag today (with `--compress`, a `*` glob where it selects
 exactly that entity's cases, none of them skipped, and overlaps no other
 claim; a synthetic-only target gets `whole: true` with a reason). Before
-writing, it proves that the owner table is unchanged under `attribution:
-model` and that `check_claims` passes; it refuses a quarantine and any
-worksheet decision the evidence does not show. Then set `config: {attribution:
-model, sets_lock: verification.rrlock}` and run `rr sets lock --write`. In
+writing, it proves that the owner table over the evidence given is unchanged
+under `attribution: model` and that `check_claims` passes; it refuses a
+quarantine and any worksheet decision the evidence contradicts. A case the
+worksheet decided but the evidence given does not hold (another lane's test,
+say) keeps the worksheet's owner: it gets a literal selector of that entity,
+and the stage is refused unless exactly that entity's claims select it (no
+claim, for `none`); a `--compress` glob never reaches such a case of another
+owner. Cases in neither the evidence nor the worksheet are not seen: pass
+every lane's evidence, or re-run `rr attribution --check` over it afterwards.
+Then set `config: {attribution: model, sets_lock: verification.rrlock}` and
+run `rr sets lock --write`. In
 v0.4.0 a multi-id tag becomes a collection, import or compile error.
 
 Smaller v0.3.0 changes a script reading the reports or the Python API may

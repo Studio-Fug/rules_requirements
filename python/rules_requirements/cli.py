@@ -776,8 +776,14 @@ def _migrate_apply_model(args: argparse.Namespace, doc: Mapping[str, Any]) -> in
     if evidence is None:
         return 2
     stage = migrate.model_stage(model, evidence, doc, compress=args.compress)
-    for key in stage.unseen:
-        print(f"warning: {key}: decided on the worksheet, but not in the evidence given", file=sys.stderr)
+    written = set(stage.from_worksheet)
+    for key, decision in stage.unseen.items():
+        how = (
+            f"a literal selector of {decision} is written"
+            if key in written
+            else ("no claim may select it" if decision == migrate.NONE else f"a claim of {decision} selects it")
+        )
+        print(f"note: {key}: decided {decision} on the worksheet, not in the evidence given: {how}", file=sys.stderr)
     if stage.refused:
         for reason in stage.refused:
             print(f"rr migrate: {reason}", file=sys.stderr)
@@ -822,10 +828,15 @@ def _migrate_apply_model(args: argparse.Namespace, doc: Mapping[str, Any]) -> in
         for target in stage.whole.get(ent_id, []):
             print(f"  {ent_id}: {target}: whole", file=sys.stderr)
     n = sum(len(v) for t in stage.additions.values() for v in t.values()) + sum(map(len, stage.whole.values()))
+    unseen = (
+        f"; {len(stage.unseen)} decided case(s) the evidence lacks keep the worksheet's owner" if stage.unseen else ""
+    )
     print(
-        f"{n} selector(s) for {len(stage.data)} entit{'y' if len(stage.data) == 1 else 'ies'}; the owner table "
-        f"({stage.owners} case(s)) is unchanged under attribution: model and check_claims passes. Next: set "
-        "config.attribution: model (and sets_lock), then `rr sets lock --write`",
+        f"{n} selector(s) for {len(stage.data)} entit{'y' if len(stage.data) == 1 else 'ies'}; over the evidence "
+        f"given, the owner table ({stage.owners} case(s)) is unchanged under attribution: model and check_claims "
+        f"passes{unseen}. Cases in neither the evidence nor the worksheet were not seen: re-run `rr attribution "
+        "--check` over every lane's evidence. Next: set config.attribution: model (and sets_lock), then "
+        "`rr sets lock --write`",
         file=sys.stderr,
     )
     return 0

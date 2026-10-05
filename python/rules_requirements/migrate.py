@@ -625,7 +625,14 @@ class ModelStage:
     ``model`` the model with those entities, in ``attribution: model``, whose
     owner table :func:`check_model_stage` proved unchanged. ``refused`` lists
     why nothing may be written (a quarantine, a worksheet decision the
-    evidence does not show, a changed owner, a static claim error).
+    evidence contradicts, a changed owner, a static claim error).
+
+    ``unseen`` holds the worksheet's decided cases the evidence given does
+    not hold (another lane's tests, say), with their decisions. Their owner
+    comes from the worksheet: a case decided for an entity gets a literal
+    selector of it (``from_worksheet`` lists those keys), and every unseen
+    decided case must be selected, statically, by exactly its decided owner
+    (by no claim when decided ``none``), or the stage is refused.
     """
 
     additions: dict[str, dict[str, list[str]]] = field(default_factory=dict)
@@ -634,22 +641,25 @@ class ModelStage:
     model: Model | None = None
     owners: int = 0
     refused: list[str] = field(default_factory=list)
-    unseen: list[str] = field(default_factory=list)  # decided cases the evidence does not hold
+    unseen: dict[str, str] = field(default_factory=dict)  # decided case key -> decision, not in the evidence
+    from_worksheet: list[str] = field(default_factory=list)  # unseen keys given a literal selector
 
 
 def _decided_against(doc: Mapping[str, Any] | None, owner: Mapping[CaseKey, str], cases: Iterable[CaseKey],
-                     main_repo: str) -> tuple[list[str], list[str]]:  # fmt: skip
-    """Worksheet decisions the attribution disagrees with, and decided cases it does not hold."""
+                     main_repo: str) -> tuple[list[str], dict[CaseKey, str]]:  # fmt: skip
+    """Worksheet decisions the attribution disagrees with, and the decided
+    cases it does not hold (with their decisions)."""
     from rules_requirements.case_keys import normalize_target
 
     present = set(cases)
-    wrong, unseen = [], []
+    wrong: list[str] = []
+    unseen: dict[CaseKey, str] = {}
     for key, decision in decisions(doc).items():
         if decision == OPEN:
             continue
         norm = CaseKey(normalize_target(key.target, main_repo), key.path)
         if norm not in present:
-            unseen.append(str(norm))
+            unseen[norm] = decision
             continue
         got = owner.get(norm)
         if (decision == NONE and got is not None) or (decision != NONE and got != decision):
@@ -718,6 +728,11 @@ def model_stage(
     ``compress`` a ``*`` glob where that is exact), then
     :func:`check_model_stage` proves the owner table unchanged under
     ``attribution: model`` and the claims statically disjoint.
+
+    A case the worksheet decided but ``evidence`` does not hold keeps the
+    worksheet's owner: a literal selector of the decided entity (unless one
+    of its claims selects it already), and a refusal unless exactly that
+    entity's claims select it (none for ``none``). Nothing is lost silently.
     """
     from rules_requirements import case_selectors as cs
     from rules_requirements import edit
@@ -728,7 +743,8 @@ def model_stage(
     stage.owners = len(before.owner)
     for q in before.quarantined:
         stage.refused.append(f"{q.code}: {q.detail}")
-    wrong, stage.unseen = _decided_against(doc, before.owner, before.cases, model.config.main_repo)
+    wrong, unseen = _decided_against(doc, before.owner, before.cases, model.config.main_repo)
+    stage.unseen = {str(k): v for k, v in sorted(unseen.items(), key=lambda kv: _key_order(kv[0]))}
     stage.refused.extend(wrong)
     if stage.refused:
         return stage
@@ -747,10 +763,13 @@ def model_stage(
             paths = [p for p in paths if p != "[target]"]
             keys = [k for k in before.cases if k.target == target and not before.cases[k].synthetic]
             if compress:
+                # A glob must not reach a decided case of another owner the
+                # evidence lacks: count those cases too.
+                far = [k for k in unseen if k.target == target and k.path != cs.SYNTHETIC_PATH]
                 selectors = _compress(
                     paths,
-                    keys,
-                    {k for k in keys if before.owner.get(k) == ent_id},
+                    keys + far,
+                    {k for k in keys if before.owner.get(k) == ent_id} | {k for k in far if unseen[k] == ent_id},
                     {k for k in keys if before.cases[k].status == "skipped"},
                     [c for c in claims if c.target == target and c.entity != ent_id],
                     [c for c in claims if c.target == target and c.entity == ent_id],
@@ -758,6 +777,16 @@ def model_stage(
             else:
                 selectors = [cs.escape(p) for p in paths]
             stage.additions.setdefault(ent_id, {})[target] = selectors
+    # Decided on the worksheet, absent from this evidence: the worksheet's owner.
+    for key, decision in sorted(unseen.items(), key=lambda kv: _key_order(kv[0])):
+        if decision == NONE or key.path == cs.SYNTHETIC_PATH:
+            continue
+        if any(c.entity == decision and c.target == key.target and c.matches(key.path) for c in claims):
+            continue  # one of its claims selects it already
+        if any(cs.matches(g, key.path) for g in stage.additions.get(decision, {}).get(key.target, [])):
+            continue  # so does a selector just added (a compressed glob)
+        stage.additions.setdefault(decision, {}).setdefault(key.target, []).append(cs.escape(key.path))
+        stage.from_worksheet.append(str(key))
 
     new_model = model
     for ent_id in sorted(set(stage.additions) | set(stage.whole), key=natural_key):
@@ -791,7 +820,20 @@ def model_stage(
         new_model = new_model.with_entity(built)
     stage.model = new_model
     stage.refused.extend(check_model_stage(model, new_model, evidence))
+    after_claims = new_model.claims()
+    for key, decision in sorted(unseen.items(), key=lambda kv: _key_order(kv[0])):
+        who = sorted({c.entity for c in after_claims if c.target == key.target and c.matches(key.path)},
+                     key=natural_key)  # fmt: skip
+        if who != ([] if decision == NONE else [decision]):
+            stage.refused.append(
+                f"{key}: the worksheet decided {decision} (not in the evidence given), but the new claims select it "
+                f"for {', '.join(who) or 'nobody'}"
+            )
     return stage
+
+
+def _key_order(key: CaseKey) -> tuple[Any, Any]:
+    return (natural_key(key.target), natural_key(key.path))
 
 
 CLAIM_RELATION = {cfg.USER_NEED: "validated_by", cfg.REQUIREMENT: "verified_by", cfg.MITIGATION: "verified_by"}
@@ -818,11 +860,11 @@ def check_model_stage(before: Model, after: Model, evidence: Evidence) -> list[s
     old = attribute(before, evidence)
     model_mode = replace(after, config=replace(after.config, attribution="model"))
     new = attribute(model_mode, evidence)
-    for key in sorted(set(old.owner) | set(new.owner), key=lambda k: (natural_key(k.target), natural_key(k.path))):
+    # Under attribution: model a tag owns nothing (it is an unclaimed-tag
+    # issue), so an unchanged owner is one owned through a claim.
+    for key in sorted(set(old.owner) | set(new.owner), key=_key_order):
         if old.owner.get(key) != new.owner.get(key):
             problems.append(f"owner of {key} would change: {old.owner.get(key)} -> {new.owner.get(key)}")
-        elif key in new.via and new.via[key] != "model":
-            problems.append(f"{key} would still be owned through its tag, not a claim")
     problems.extend(f"{q.code}: {q.detail}" for q in new.quarantined)
     hard = ("shared-case", "same-code-multiple-owners", "bad-selector", "bad-target")
     old_errors = {(i.code, i.message) for i in validate(before) if i.severity == "error"}
