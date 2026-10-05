@@ -312,12 +312,14 @@ def plan_lock(
       the model change that caused it is reviewed in the same diff.
     * A target absent from the evidence keeps the entries that still match
       a claim of their locked owner (in hybrid mode also an entry whose owner
-      claims nothing there: it may be tag-owned), gains each literal
-      selector's case, and ``[target]`` for a whole-target claim whose
-      entity has no entry there yet.
+      claims nothing there and no other claim selects: it may be
+      tag-owned), moves an entry exactly one other entity's claims now
+      select to that entity (an owner change, in ``changed``), gains each
+      literal selector's case, and ``[target]`` for a whole-target claim
+      whose entity has no entry there yet.
     * Entries dropped from a target that ran, and stale entries of absent
-      targets, are ``removed``; they stay in ``lock`` unless
-      ``allow_removals``.
+      targets (no claim selects them), are ``removed``; they stay in
+      ``lock``, unchanged, unless ``allow_removals``.
 
     The lock only records owners attribution already decided; it never
     decides one.
@@ -340,11 +342,21 @@ def plan_lock(
             if k not in new:
                 removed.append(entry)
             continue
-        own = [c for c in claims if c.entity == entry.owner and c.target == entry.target]
-        if any(c.matches(entry.path) for c in own) or (hybrid and not own):
+        on_target = [c for c in claims if c.target == entry.target]
+        own = [c for c in on_target if c.entity == entry.owner]
+        if any(c.matches(entry.path) for c in own):
             new.setdefault(k, LockEntry(entry.target, entry.path, entry.owner))
+            continue
+        # The model moved the case: exactly one other entity's claims select
+        # it now. An owner change, listed in `changed` and allowed (the model
+        # change that caused it is reviewed in the same diff), not a removal.
+        others = list(dict.fromkeys(c.entity for c in on_target if c.entity != entry.owner and c.matches(entry.path)))
+        if len(others) == 1:
+            new.setdefault(k, LockEntry(entry.target, entry.path, others[0]))
+        elif hybrid and not own and not others:
+            new.setdefault(k, LockEntry(entry.target, entry.path, entry.owner))  # may be tag-owned
         else:
-            removed.append(entry)
+            removed.append(entry)  # stale: no claim selects it (or several do: shared-case)
     for claim in claims:
         if claim.target in ran:
             continue
@@ -357,9 +369,13 @@ def plan_lock(
             except ValueError:  # BadSelector is a ValueError
                 continue
             new.setdefault((claim.target, path), LockEntry(claim.target, path, claim.entity))
+    # A removed entry whose case another entry took (a literal selector of
+    # another entity) is an owner change, not a removal: `lock` keeps every
+    # entry `removed` lists, unchanged, unless removals are allowed.
+    removed = [e for e in removed if (e.target, e.path) not in new]
     if not allow_removals:
         for entry in removed:
-            new.setdefault((entry.target, entry.path), LockEntry(entry.target, entry.path, entry.owner))
+            new[(entry.target, entry.path)] = LockEntry(entry.target, entry.path, entry.owner)
     added = [e for k, e in new.items() if prev.entry(*k) is None]
     changed = []
     for k, e in new.items():

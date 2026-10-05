@@ -228,3 +228,59 @@ def test_plan_lock_keeps_tag_owned_entries_of_absent_targets_in_hybrid_mode(tmp_
     model = model_of(tmp_path, "hybrid")
     tagged = ev(TestCase("t", "passed", "c", declared=("REQ-3",), target="//t:tagged"))
     assert ("//t:tagged", "c::t", "REQ-3") in entries(plan_lock(model, attribute(model, tagged)).lock)
+
+
+MOVED = """
+config: {attribution: model}
+user_needs: [{id: UN-1, title: n}]
+requirements:
+  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //p:t, cases: ['c::a']}, {target: //h:e2e, cases: ['s::y']}]}
+  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //h:e2e, cases: SELECTOR}]}
+"""
+
+
+@pytest.mark.parametrize("selector", ["['s::x']", "['s::x*']"])
+@pytest.mark.parametrize("allow", [False, True])
+def test_plan_lock_an_owner_change_on_a_target_that_did_not_run_is_no_removal(tmp_path, selector, allow):
+    """The model moves s::x from REQ-1 to REQ-2 while only the software lane
+    ran (//h:e2e is absent): the entry follows the claim (allowed, listed in
+    ``changed``), it is neither removed nor dropped by --allow-removals."""
+    model, _ = read_model(write(tmp_path, "m.yaml", MOVED.replace("SELECTOR", selector)))
+    assert not model.parse_errors
+    previous = Lock(
+        (
+            LockEntry("//h:e2e", "s::x", "REQ-1"),
+            LockEntry("//h:e2e", "s::y", "REQ-1"),
+            LockEntry("//p:t", "c::a", "REQ-1"),
+        )
+    )
+    att = attribute(model, ev(TestCase("a", "passed", "c", target="//p:t")), lock=previous)
+    plan = plan_lock(model, att, previous, allow_removals=allow)
+    assert not plan.blocked and plan.removed == ()
+    assert [(old.case, old.owner, new.owner) for old, new in plan.changed] == [("//h:e2e#s::x", "REQ-1", "REQ-2")]
+    assert entries(plan.lock) == [
+        ("//h:e2e", "s::x", "REQ-2"),
+        ("//h:e2e", "s::y", "REQ-1"),
+        ("//p:t", "c::a", "REQ-1"),
+    ]
+
+
+def test_plan_lock_removed_and_lock_agree(tmp_path):
+    """Without --allow-removals every removed entry stays in the lock unchanged;
+    with it, none does; a case another entity's literal selector takes is an
+    owner change, not a removal."""
+    model = model_of(tmp_path)
+    previous = Lock(
+        (
+            LockEntry("//b:t", "c::lit", "REQ-3"),  # REQ-2's literal selector takes it
+            LockEntry("//b:t", "c::old", "REQ-2"),  # no claim selects it: stale
+            LockEntry("//a:t", "c::gone", "REQ-1"),  # its target ran without it
+        )
+    )
+    att = attribute(model, ev(TestCase("x", "passed", "c", target="//a:t")), lock=previous)
+    for allow in (False, True):
+        plan = plan_lock(model, att, previous, allow_removals=allow)
+        assert [e.case for e in plan.removed] == ["//a:t#c::gone", "//b:t#c::old"]
+        assert [(old.owner, new.owner) for old, new in plan.changed] == [("REQ-3", "REQ-2")]
+        for gone in plan.removed:
+            assert (plan.lock.entry(gone.target, gone.path) == gone) is not allow

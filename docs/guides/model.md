@@ -265,7 +265,10 @@ carry one `unpinned-sets` gap naming the entities whose sets are not pinned.
 In Python, {py:func}`rules_requirements.lock.plan_lock` computes the lock for
 an attribution (refusing while any case is quarantined, and listing removals
 and owner changes for review) and {py:func}`rules_requirements.lock.write_lock`
-writes it.
+writes it. An owner change is allowed, also for a target the evidence at hand
+did not run (the entry follows the one entity whose claims now select it);
+a removal — a case missing from a target that ran, or an entry no claim
+selects any more — is kept in the lock until removals are allowed.
 
 (config-reference)=
 ## The `config:` section
