@@ -545,3 +545,42 @@ def test_report_gates_on_invalid_and_incomplete(capsys, model_path, tmp_path):
     assert rc == 0 and "ATTRIBUTION ERROR" not in err
     rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "unverified")
     assert rc == 1 and "INCOMPLETE: REQ-3" in err
+
+
+def test_report_surfaces_every_attribution_issue_and_gates_on_errors(capsys, tmp_path):
+    """same-path-multiple-owners, unscoped-evidence, level-mismatch and an
+    ingest issue (suite-level-requirement) are gaps, never silent; one at
+    error severity (rules: or --strict) makes rr report exit 1."""
+    model_text = (
+        "user_needs: [{id: UN-1, title: n}]\n"
+        "requirements:\n"
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //a:t, cases: ['*'], level: hil}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //b:t, cases: ['*']}]}\n"
+    )
+    plain = write(tmp_path, "plain/model.yaml", model_text)
+    gated = write(tmp_path, "gated/model.yaml", "config: {rules: {same-path-multiple-owners: error}}\n" + model_text)
+    logs = tmp_path / "bazel-testlogs"
+    junit(logs, "a/t/test.xml", [("run", "passed", [], "simulation")])
+    junit(logs, "b/t/test.xml", [("run", "passed", [], "")])
+    other = tmp_path / "hitl-artifacts"
+    write(
+        other,
+        "copy.xml",
+        '<testsuite name="copied"><properties><property name="requirement" value="REQ-2"/></properties>'
+        '<testcase classname="suite" name="run"/></testsuite>',
+    )
+    evidence = ["--evidence", str(logs), str(other)]
+    out = tmp_path / "out.json"
+    rc, _, err = run(capsys, "report", "--model", plain, *evidence, "--json", str(out))
+    gaps = {g["kind"]: g for g in json.loads(out.read_text())["gaps"]}
+    assert {"same-path-multiple-owners", "unscoped-evidence", "level-mismatch", "suite-level-requirement"} <= set(gaps)
+    assert gaps["same-path-multiple-owners"]["entity"] == "REQ-1"
+    suite_level = gaps["suite-level-requirement"]
+    assert suite_level["entity"] == "suite:copied" and suite_level["message"].startswith("suite copied (or a parent")
+    assert str(tmp_path) not in out.read_text()  # no machine-specific evidence path in the report
+    assert rc == 0 and "ATTRIBUTION ERROR" not in err
+    assert "attribution: 4 warning(s) (level-mismatch x1, same-path-multiple-owners x1," in err
+    rc, _, err = run(capsys, "report", "--model", gated, *evidence)
+    assert rc == 1 and "ATTRIBUTION ERROR: [same-path-multiple-owners] case path 'suite::run' is owned by" in err
+    rc, _, err = run(capsys, "report", "--model", plain, *evidence, "--strict")
+    assert rc == 1 and "ATTRIBUTION ERROR: [unscoped-evidence] suite:copied:" in err

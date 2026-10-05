@@ -41,6 +41,7 @@ from rules_requirements.case_keys import (
     is_unscoped,
     normalize_target,
     run_dims_from_path,
+    target_of,
 )
 from rules_requirements.config import Config
 from rules_requirements.ingest import ERROR, FAILED, PASSED, SKIPPED, Evidence, TestCase
@@ -546,12 +547,16 @@ def resolve_cases(
                 )
             )
     for ingest_issue in evidence.issues:
+        # The target its cases are filed under (a suite: pseudo-target for
+        # JUnit outside a testlogs tree), and no evidence file path (it is
+        # machine-specific under bazel-out): reports stay deterministic.
+        filed = TestCase("", PASSED, target=ingest_issue.target, source=ingest_issue.source, suite=ingest_issue.scope)
         found.append(
             _issue(
                 config,
                 ingest_issue.code,
-                str(ingest_issue),
-                target=normalize_target(ingest_issue.target, config.main_repo) if ingest_issue.target else "",
+                ingest_issue.detail,
+                target=normalize_target(target_of(filed), config.main_repo),
                 declared=tuple(ingest_issue.ids),
             )
         )

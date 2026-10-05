@@ -400,13 +400,18 @@ class IngestIssue:
     scope: str  # the suite (or parent case) that named the ids
     ids: tuple[str, ...]
 
-    def __str__(self) -> str:
-        where = f"{self.source}: " if self.source else ""
+    @property
+    def detail(self) -> str:
+        """What is wrong, without a severity (attribution assigns the configured one)."""
         return (
-            f"{where}warning: [{self.code}] suite {self.scope or '(unnamed)'} (or a parent case in it) names "
+            f"suite {self.scope or '(unnamed)'} (or a parent case in it) names "
             f"{', '.join(self.ids)} above its test cases; suite-level requirements are not inherited by the "
             "cases (each test case declares its own one id)"
         )
+
+    def __str__(self) -> str:
+        where = f"{self.source}: " if self.source else ""
+        return f"{where}warning: [{self.code}] {self.detail}"
 
 
 @dataclass

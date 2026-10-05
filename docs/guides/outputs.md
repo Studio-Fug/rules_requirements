@@ -27,8 +27,8 @@ The command prints a one-line summary to standard error and exits with:
 
 | Exit | When |
 | ---- | ---- |
-| `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds. |
-| `1` | `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
+| `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds, and no attribution issue is an error. |
+| `1` | An attribution issue is an error (a hard error such as `lock-owner-changed`, a rule set to `error` under `config.rules`, or any attribution warning under `--strict`); `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
 | `2` | The model is invalid, or an `--out` extension is unknown. |
 
 `--fail-on` defaults to `none`: the report describes the state of the product,
@@ -38,6 +38,12 @@ Each quarantined test case — one whose evidence names several ids, that two
 entities claim, or whose test code two entities own — prints one
 `ATTRIBUTION ERROR: <code>: <detail>` line to standard error, and every entity
 it names reads INVALID ({ref}`evidence`).
+
+Every other attribution issue (`same-path-multiple-owners`, `unscoped-evidence`,
+`level-mismatch`, `suite-level-requirement`, the lock findings, ...) is a gap
+in the report. One at error severity also prints an
+`ATTRIBUTION ERROR: [<code>] <message>` line and makes `rr report` exit 1;
+the warnings are counted on one `attribution: N warning(s) (...)` line.
 
 ## JSON (`rules_requirements/report/v1`)
 

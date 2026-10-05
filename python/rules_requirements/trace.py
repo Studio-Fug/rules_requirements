@@ -803,17 +803,8 @@ def _issue_entity(issue: AttributionIssue) -> str:
     return issue.target
 
 
-# Attribution issues that are units of work (a gap each).
-_ISSUE_GAPS = (
-    "tag-mismatch",
-    "unclaimed-tag",
-    "duplicate-case",
-    "coarse-claim",
-    "unlocked-member",
-    "lock-owner-changed",
-    "lock-stale",
-    "lock-invalid",
-)
+# Attribution issues gathered into one gap per entity instead of one per issue.
+_AGGREGATED_ISSUES = ("misdirected-evidence", "unknown-id")
 
 
 def find_gaps(matrix: Matrix) -> list[Gap]:
@@ -871,8 +862,11 @@ def find_gaps(matrix: Matrix) -> list[Gap]:
                 )
     if att is not None:
         gaps.extend(_unattributed(att))
+        # Every other attribution issue is a unit of work: a gap each (none
+        # may be silent, e.g. same-path-multiple-owners, the only defence
+        # when one test code in two targets has no recorded source file).
         for issue in issues:
-            if issue.code in _ISSUE_GAPS:
+            if issue.code not in _AGGREGATED_ISSUES:
                 gaps.append(Gap(issue.code, _issue_entity(issue), issue.message, ROUTE_AUTONOMOUS))
         if att.lock is None:
             unpinned = [ent for ent, members in att.members.items() if any(_unpinned(member) for member in members)]

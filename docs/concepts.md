@@ -281,6 +281,7 @@ writes as a machine-readable work queue:
 | `tag-mismatch`, `unclaimed-tag` | a tag that disagrees with the claim owning its case, or (`attribution: model`) a tag on a case no claim selects | autonomous |
 | `duplicate-case`, `coarse-claim` | one case key reported twice in a run; a whole-target claim on a target with per-case results | autonomous |
 | `unlocked-member`, `lock-owner-changed`, `lock-stale`, `lock-invalid` | the lock disagrees with the attribution ({ref}`verification-lock`) | autonomous |
+| `same-path-multiple-owners`, `level-mismatch`, `unscoped-evidence`, `suite-level-requirement` | equal case paths in two targets with different owners and no common recorded source; a case level that differs from its claim's; JUnit outside a testlogs tree; a suite-level requirement property (not inherited) | autonomous |
 | `unpinned-sets` | no lock: the entities whose sets have glob, whole-target or tag-owned members | autonomous |
 | `high-risk-open` | a high-severity risk that is not MITIGATED | human-gate |
 | `unknown-id` | evidence tagged with an id the model does not define | autonomous |

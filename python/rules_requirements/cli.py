@@ -27,6 +27,7 @@ from typing import Any, Iterable, Mapping
 
 from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
+from rules_requirements.attribution import AttributionIssue
 from rules_requirements.labels import read_known_targets
 from rules_requirements.model import Model, read_model
 from rules_requirements.trace import FAILED, INCOMPLETE, INVALID, UNVERIFIED, build_matrix
@@ -248,12 +249,31 @@ def cmd_report(args: argparse.Namespace) -> int:
     # A quarantined case counts for nobody: say so loudly (one line per case).
     for q in matrix.attribution.quarantined if matrix.attribution is not None else ():
         print(f"ATTRIBUTION ERROR: {q.code}: {q.detail}", file=sys.stderr)
+    # Attribution issues are gaps; one at error severity (a hard error, a rule
+    # set to error, or any warning under --strict) also gates, one per line.
+    attribution_errors: list[AttributionIssue] = []
+    attribution_warnings: list[AttributionIssue] = []
+    for issue in matrix.attribution.issues if matrix.attribution is not None else ():
+        error = issue.severity == "error" or (args.strict and issue.severity == "warning")
+        (attribution_errors if error else attribution_warnings).append(issue)
+    for issue in attribution_errors:
+        print(f"ATTRIBUTION ERROR: [{issue.code}] {issue.message}", file=sys.stderr)
+    if attribution_warnings:
+        by_code: dict[str, int] = {}
+        for issue in attribution_warnings:
+            by_code[issue.code] = by_code.get(issue.code, 0) + 1
+        print(
+            f"attribution: {len(attribution_warnings)} warning(s) ("
+            + ", ".join(f"{code} x{n}" for code, n in sorted(by_code.items()))
+            + "), listed as gaps",
+            file=sys.stderr,
+        )
     if violations and args.pyramid_policy != "off":
         print(f"cost-pyramid {args.pyramid_policy}: " + ", ".join(violations), file=sys.stderr)
     if matrix.unknown_evidence:
         print("evidence references undefined ids: " + ", ".join(matrix.unknown_evidence), file=sys.stderr)
 
-    rc = 0
+    rc = 1 if attribution_errors else 0
     if args.fail_on in ("failed", "unverified", "gaps") and (failed or invalid):
         rc = 1
     if args.fail_on in ("unverified", "gaps") and unverified:
@@ -814,7 +834,7 @@ def build_parser() -> argparse.ArgumentParser:
         r.add_argument("--out", action="append", help="output file; format from extension (repeatable)")
         r.add_argument("--queue-out", default="", help="write the gaps as a JSON work queue")
         r.add_argument("--title", default="")
-        r.add_argument("--strict", action="store_true")
+        r.add_argument("--strict", action="store_true", help="treat model and attribution warnings as errors")
         r.add_argument("--fail-on", choices=["none", "failed", "unverified", "gaps"], default="none")
         r.add_argument("--pyramid-policy", choices=["off", "warn", "error"], default="warn")
         r.add_argument(
