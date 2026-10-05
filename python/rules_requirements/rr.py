@@ -10,6 +10,7 @@ and both are recognised by the source scanner — as is the comment form
 
 from __future__ import annotations
 
+import re
 from typing import Any, Callable, TypeVar
 
 from rules_requirements.hooks.ids import split_ids, warn_multiple
@@ -24,17 +25,24 @@ def _ids(ids: tuple[Any, ...]) -> list[str]:
         if isinstance(i, (list, tuple, set)):
             out.extend(str(x).strip() for x in i)
         else:
-            out.extend(p.strip() for p in str(i).split(","))
+            out.extend(re.split(r"[,\s]+", str(i)))
     return [i for i in out if i]
 
 
 def verifies(*ids: Any, level: str = "", artifact: dict[str, str] | None = None) -> Callable[[F], F]:
-    """Declare that the decorated test verifies the requirement ``ids[0]`` at ``level``.
+    """Declare that the decorated test verifies the ONE requirement ``ids[0]`` at ``level``.
+
+    The id is a declared tag; which requirement the case verifies is decided
+    by attribution. The nearest declaration wins: a method's decorator
+    replaces its class's, and a subclass's replaces its base class's (the
+    level and artifact keys are still inherited when the nearer declaration
+    does not set them).
 
     A test case verifies at most one requirement. Several ids — extra
-    arguments, a comma list, or stacked decorators naming different ids — are
-    deprecated: every id is still recorded, with a
-    :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`.
+    arguments, a comma or whitespace list, or stacked decorators naming
+    different ids — are deprecated: every id is still recorded, with a
+    :class:`~rules_requirements.hooks.ids.MultipleRequirementsWarning`, so
+    attribution quarantines the case and it counts for none of them.
     """
 
     def deco(obj: F) -> F:
@@ -42,8 +50,7 @@ def verifies(*ids: Any, level: str = "", artifact: dict[str, str] | None = None)
         new = _ids(ids)
         named = split_ids(new)
         # Only the object's own declaration (a stacked decorator) is the same
-        # scope: a subclass's ids are nearer than its base class's, not added
-        # to them. Inherited ids are still recorded, as in 0.1.
+        # scope: a subclass's ids replace its base class's (nearest wins).
         try:
             own = vars(obj).get("__rr__") or {}
         except TypeError:  # no __dict__
@@ -56,8 +63,8 @@ def verifies(*ids: Any, level: str = "", artifact: dict[str, str] | None = None)
         elif before and named and named[0] not in before:
             warn_multiple(f"{subject} (stacked decorators)", before + named)
         obj.__rr__ = {  # type: ignore[attr-defined]
-            "ids": list(prev.get("ids", [])) + new,
-            "own_ids": own_ids + new,  # without a base class's (for the checks above)
+            "ids": own_ids + new,  # this object's own declaration only
+            "own_ids": own_ids + new,  # kept for readers of 0.2's key
             "level": (level or prev.get("level", "")).lower(),
             "artifact": {**(prev.get("artifact") or {}), **(artifact or {})},
         }

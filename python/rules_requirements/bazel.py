@@ -155,13 +155,15 @@ def run_tests(out: str, tests: list[str], timeout: float, envs: list[str] | None
         if code != 0 and reported is not None and not any(c.is_failure for c in reported):
             # The binary failed (sanitizer, crash after writing its report,
             # non-zero exit from main) although every case it reported passed:
-            # the whole run is suspect, so the failure carries every id the
-            # report traced — those requirements must not read VERIFIED.
-            ids = [i for c in reported for i in c.requirements]
+            # the whole run is suspect. The exit-status case declares NO
+            # requirement (it is no test case, and the union of the ids the
+            # report traced would make it one case of several requirements);
+            # it is target-scope, so it taints every case claimed on the
+            # target and each requirement fails through its own cases.
             w = JUnitWriter(label, classname=label, file="")
             w._append(
                 "exit-status",
-                list(dict.fromkeys(ids)),
+                (),
                 "error",
                 f"test binary exited with {code} although its report shows no failure\n{log[-4000:]}",
                 properties=TARGET_SCOPE,  # about the run, not a case of it

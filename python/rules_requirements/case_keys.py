@@ -32,15 +32,46 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable, NamedTuple
 
-from rules_requirements.ingest import STATUS_ORDER, Evidence, TestCase
-from rules_requirements.ingest.junit import (
-    ATTEMPT,
-    SCOPE_PROPERTY,
-    SHARD_RUN,
-    SYNTHETIC_PROPERTY,
-    target_from_path,
+from rules_requirements import labels
+from rules_requirements.ingest import (
+    FILE_PROPERTY,
+    NAME_TAG,
+    STATUS_ORDER,
+    Evidence,
+    TestCase,
+    name_tags,
+    split_ids,
+    workspace_relative,
 )
+from rules_requirements.ingest.junit import ATTEMPT, SHARD_RUN, suite_names, target_from_path
 from rules_requirements.util import dedupe, natural_key
+
+__all__ = [
+    "FILE_PROPERTY",
+    "RECORD_PREFIX",
+    "SUITE_PREFIX",
+    "SYNTHETIC_PATH",
+    "UNNAMED_PATH",
+    "CaseKey",
+    "CaseRow",
+    "RunDims",
+    "case_path",
+    "declared_of",
+    "file_of",
+    "index_cases",
+    "is_synthetic",
+    "is_target_scope",
+    "is_unscoped",
+    "key_of",
+    "name_tags",
+    "nodeid_to_case_path",
+    "normalize_target",
+    "pseudo_target",
+    "run_dims_from_path",
+    "run_targets",
+    "target_of",
+    "workspace_relative",
+]
 
 SYNTHETIC_PATH = "[target]"
 """Path of the single result of a target that reported no per-case results."""
@@ -48,15 +79,9 @@ SYNTHETIC_PATH = "[target]"
 UNNAMED_PATH = "[unnamed]"
 """Path of a case whose classname and name are both empty (a key's path is never empty)."""
 
-FILE_PROPERTY = "rr.file"  # test source, relative to the workspace
-
 RECORD_PREFIX = "record:"
 SUITE_PREFIX = "suite:"
 _RECORD_SUFFIXES = (".rr.yaml", ".rr.yml", ".rr.json")
-
-# One "[rr:ID]" (or "[rr:A,B]") tag and at most one blank before it, so
-# "probe [rr:PR-1] ok" and "probe ok" are the same case.
-_NAME_TAG = re.compile(r"[ \t]?\[rr:([^\]]*)\]")
 
 
 @dataclass(frozen=True, order=True)
@@ -92,11 +117,6 @@ def pseudo_target(prefix: str, name: str) -> str:
     return prefix + (clean or "unnamed")
 
 
-def name_tags(name: str) -> list[str]:
-    """Ids declared by ``[rr:ID]`` tags in a case name, in order (``[rr:A,B]`` gives two)."""
-    return dedupe([part.strip() for tag in _NAME_TAG.findall(name) for part in re.split(r"[,\s]+", tag)])
-
-
 def case_path(classname: str, name: str) -> str:
     """The canonical path of a case: ``<classname>::<name>``, or ``<name>``.
 
@@ -107,7 +127,7 @@ def case_path(classname: str, name: str) -> str:
     A case with neither gets :data:`UNNAMED_PATH`.
     """
     cls = unicodedata.normalize("NFC", classname or "").strip()
-    leaf = _NAME_TAG.sub("", unicodedata.normalize("NFC", name or "")).strip()
+    leaf = NAME_TAG.sub("", unicodedata.normalize("NFC", name or "")).strip()
     return (f"{cls}::{leaf}" if cls else leaf) or UNNAMED_PATH
 
 
@@ -130,12 +150,23 @@ def nodeid_to_case_path(nodeid: str) -> str:
 
 def is_synthetic(case: TestCase) -> bool:
     """The target's single generated result (Bazel's fingerprint or ``rr.synthetic``)."""
-    return case.properties.get(SYNTHETIC_PROPERTY, "").lower() == "true"
+    return case.synthetic
 
 
 def is_target_scope(case: TestCase) -> bool:
     """A result about the whole target run (``rr.scope=target``), not a test case."""
-    return case.properties.get(SCOPE_PROPERTY, "").lower() == "target"
+    return case.scope == "target"
+
+
+def declared_of(case: TestCase) -> tuple[str, ...]:
+    """The ids a raw case declares: its ``declared`` tags plus any ``[rr:ID]``
+    name tags (also for a hand-built :class:`~rules_requirements.ingest.TestCase`). Tags, never owners.
+
+    Every value is split on commas and whitespace (``"PR-1, PR-2"`` is two
+    ids, whatever produced it), so a case naming two ids reads as a multi-tag.
+    """
+    ids = [rid for value in case.declared for rid in split_ids(str(value))]
+    return tuple(dedupe([*ids, *name_tags(case.name)]))
 
 
 def target_of(case: TestCase) -> str:
@@ -160,29 +191,34 @@ def is_unscoped(target: str) -> bool:
     return target.startswith(SUITE_PREFIX)
 
 
-def key_of(case: TestCase) -> CaseKey:
-    """The :class:`CaseKey` a raw ingested case is filed under."""
+def normalize_target(target: str, main_repo: str = "") -> str:
+    """``target`` in the spelling claims use (:func:`~rules_requirements.labels.normalize_label`
+    with ``config.main_repo``), so ``@@//p:n``, ``//p`` and a canonical
+    ``@repo~//p:n`` file under the same key a model names. A target that is
+    no label (pseudo-targets pass through) is kept as recorded. ``#`` (the
+    key separator) is replaced first, so the result is its own normal form
+    (``rr check-report`` reads a key as canonical when this leaves it
+    unchanged)."""
+    clean = target.replace("#", "_")
+    return labels.try_normalize(clean, main_repo) or clean
+
+
+def key_of(case: TestCase, main_repo: str | None = None) -> CaseKey:
+    """The :class:`CaseKey` a raw ingested case is filed under.
+
+    With ``main_repo`` (``config.main_repo``, ``""`` for none) the target is
+    normalized (:func:`normalize_target`), as attribution files every case;
+    without it the target is kept as the evidence recorded it.
+    """
     path = SYNTHETIC_PATH if is_synthetic(case) else case_path(case.classname, case.name)
-    return CaseKey(target_of(case), path)
-
-
-_RUNFILES = re.compile(r"^.*?\.runfiles/[^/]+/")
-_BAZEL_OUT = re.compile(r"^(?:.*/)?bazel-out/[^/]+/bin/")
-
-
-def workspace_relative(path: str) -> str:
-    """Strip a ``*.runfiles/<workspace>/`` or ``bazel-out/<cfg>/bin/`` prefix."""
-    norm = (path or "").replace("\\", "/")
-    for rx in (_RUNFILES, _BAZEL_OUT):
-        stripped = rx.sub("", norm, count=1)
-        if stripped != norm:
-            return stripped
-    return norm
+    target = target_of(case)
+    return CaseKey(target if main_repo is None else normalize_target(target, main_repo), path)
 
 
 def file_of(case: TestCase) -> str:
-    """The test source a case came from (``rr.file``), workspace-relative; "" if unknown."""
-    return workspace_relative(case.properties.get(FILE_PROPERTY, ""))
+    """The test source a case came from (``rr.file``), workspace-relative and
+    in its one spelling (:func:`workspace_relative`); "" if unknown."""
+    return workspace_relative(case.file or case.properties.get(FILE_PROPERTY, ""))
 
 
 class RunDims(NamedTuple):
@@ -241,6 +277,7 @@ class CaseRow:
     synthetic: bool = False
     target_scope: bool = False
     file: str = ""
+    line: int = 0
     flaky: bool = False  # an earlier attempt failed, the final one passed
     attempts: int = 1
     duplicate: bool = False  # the same key twice in one report, or in two shards
@@ -265,6 +302,8 @@ class CaseRow:
             out["attempts"] = self.attempts
         if self.file:
             out["file"] = self.file
+        if self.line:
+            out["line"] = self.line
         if self.message and self.status in ("failed", "error"):
             out["message"] = self.message.splitlines()[0][:300]
         out["sources"] = list(self.sources)
@@ -281,18 +320,30 @@ def run_targets(evidence: Evidence) -> set[str]:
     and that of each ingested report that holds no case at all (a
     ``test.xml`` with an empty ``<testsuite>``: pytest collected nothing).
     Such a report's target comes from its path (``bazel-testlogs/<pkg>/
-    <name>/test.xml``), else it is keyed like a case of it with no suite
-    name (``suite:`` / ``record:`` + the file stem). A target here has run."""
+    <name>/test.xml``); else it is keyed as a case of it would be: by each
+    of its ``<testsuite>`` names (``suite:<name>``), and by the file stem
+    (``suite:`` / ``record:`` + stem) only for an unnamed suite or a report
+    with none. A target here has run."""
     out = {key.target for key in index_cases(evidence)}
     with_cases = {case.source for case in evidence.cases}
     for path in evidence.files:
-        if path not in with_cases:
-            out.add(target_from_path(path) or target_of(TestCase(name="", status="passed", source=path)))
+        if path in with_cases:
+            continue
+        target = target_from_path(path)
+        if target:
+            out.add(target)
+            continue
+        suites = suite_names(path) if path.endswith(".xml") else ()
+        for suite in suites or ("",):
+            out.add(target_of(TestCase(name="", status="passed", source=path, suite=suite)))
     return out
 
 
-def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRow]:
+def index_cases(evidence: Evidence | Iterable[TestCase], *, main_repo: str | None = None) -> dict[CaseKey, CaseRow]:
     """One :class:`CaseRow` per key, sorted by key.
+
+    ``main_repo`` normalizes every target as :func:`key_of` does (so two
+    spellings of one target are one key); ``None`` keeps them as recorded.
 
     * **Attempts** (``test_attempts/attempt_N.xml`` next to ``test.xml``): the
       final report is authoritative; an earlier failure under a final pass
@@ -309,7 +360,7 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
     decided here.
     """
     cases = evidence.cases if isinstance(evidence, Evidence) else list(evidence)
-    observed = [(case, key_of(case), run_dims_from_path(case.source)) for case in cases]
+    observed = [(case, key_of(case, main_repo), run_dims_from_path(case.source)) for case in cases]
 
     def slot_of(case: TestCase, key: CaseKey, dims: RunDims) -> tuple[str, str, int, int]:
         # Everything but the attempt: one (target, root, run, shard) slot.
@@ -366,11 +417,12 @@ def index_cases(evidence: Evidence | Iterable[TestCase]) -> dict[CaseKey, CaseRo
         rows[key] = CaseRow(
             key=key,
             status=status,
-            declared=tuple(dedupe([rid for c, _ in seen for rid in c.requirements])),
+            declared=tuple(dedupe([rid for c, _ in seen for rid in declared_of(c)])),
             level=next((c.level for c, _ in seen if c.level), ""),
             synthetic=key.synthetic,
             target_scope=any(is_target_scope(c) for c, _ in seen),
             file=next((f for f in (file_of(c) for c, _ in seen) if f), ""),
+            line=next((c.line for c, _ in seen if c.line), 0),
             flaky=flaky,
             attempts=attempts,
             duplicate=duplicate,

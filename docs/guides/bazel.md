@@ -13,6 +13,7 @@ load(
     "rr_py_test",
     "rr_report",
     "rr_rust_test",
+    "rr_sets_lock_test",
     "rr_wrapped_test",
 )
 ```
@@ -30,6 +31,7 @@ the module provides these targets:
 | `@rules_requirements//rust:rr` | The Rust hook crate (`rr`). |
 | `@rules_requirements//js:verifies.cjs` | The node:test `verifies(t, id)` helper (dependency-free CommonJS). |
 | `@rules_requirements//:schema/rules_requirements.schema.json` | The model's JSON Schema. |
+| `@rules_requirements//:schema/report.v2.schema.json` | The JSON report's schema (`rules_requirements/report/v2`). |
 
 Under `bazel run`, the CLI resolves relative paths against the directory you ran
 Bazel from.
@@ -43,21 +45,26 @@ rr_model(
     name = "model",
     srcs = glob(["requirements/**/*.yaml"]),
     strict = False,
+    lock = "requirements/verification.rrlock",
 )
 ```
 
 Declares the model files and, unless `validate = False`, a `<name>_test` that
-runs `rr validate` on them.
+runs `rr validate` on them. The test writes one JUnit case per check family
+(`rr.validate::shape`, `::references`, `::coverage-rules`, `::claims`,
+`::lock`), so a model test claimed by a requirement is per-case evidence.
 
 | Attribute | Default | |
 | --------- | ------- | - |
 | `srcs` | required | Model files (`.yaml`, `.yml`, `.json`), merged. |
 | `strict` | `False` | Treat validation warnings as errors in `<name>_test`. |
 | `validate` | `True` | Create `<name>_test`. |
+| `lock` | `None` | The verification-set lock (`rr sets lock --write`). `<name>_test` checks it statically against the claims (`lock-invalid`, `lock-owner-changed`, `lock-stale`), and `rr_report` pins the sets with it. A model whose `config.sets_lock` names a lock needs it here: a Bazel action only sees its declared inputs. |
 | `visibility` | | Visibility of the model target. |
 | `**kwargs` | | Forwarded to the validation test (`tags`, `size`, ...). |
 
-The target provides `RrModelInfo(srcs)` and its files as `DefaultInfo`.
+The target provides `RrModelInfo(srcs, lock)` and its files as `DefaultInfo`
+(the lock is in its runfiles, not its files).
 
 (rr-annotations-test)=
 ### `rr_annotations_test`
@@ -202,11 +209,13 @@ pass the `rust_test` rule as `rule`.
 
 The wrapper also turns a crash into evidence: when the binary fails, a test
 that recorded traces but never reported a result (an abort mid-run) becomes an
-`error` case carrying its ids, and a binary that exits non-zero after every
-test passed gets an `exit-status` error case carrying every id the run traced.
+`error` case carrying its own declared id, and a binary that exits non-zero
+after every test passed gets an `exit-status` error case. That case declares no
+requirement: it is target-scope (`rr.scope=target`) and taints every case
+claimed on the target.
 It understands `--nocapture` output (the result on a line of its own). Call
 `rr::verifies!` on the test's own thread: traces from spawned threads or async
-runtimes cannot be attributed to a test (the wrapper warns about them).
+runtimes match no test and are dropped (the wrapper warns about them).
 
 (rr-node-test)=
 ### `rr_node_test`
@@ -314,11 +323,56 @@ as `:<name>.json` and so on.
 | `srcs` | `[]` | Sources to scan for annotations: adds implementation links and `no-implementation` gaps. |
 | `formats` | `["html", "json", "md"]` | Which outputs to build. |
 | `title` | `""` | Report title (default: the project name). |
-| `strict` | `False` | Fail on model warnings too. |
+| `strict` | `False` | Fail on model **and attribution** warnings too (`rr report --strict`): every warning-level attribution issue — `coarse-claim`, `same-path-multiple-owners`, `unscoped-evidence`, `tag-mismatch`, ... — then fails the build, with no report written. |
 | `current_build` | `{}` | Current artifact identity; evidence recorded against another is stale. |
+| `check` | `"json" in formats` | Also create `<name>_check_test`: `rr check-report` re-proves from `<name>.json` alone that no test case is owned by two entities. On by default whenever the JSON report is built; `check = False` opts out; `check = True` without `"json"` in `formats` is an error. |
+| `lane` | `""` | The lane the evidence comes from (`rr report --lane`), stamped into the report. |
+| `lane_targets` | `None` | A file listing the targets that lane runs, one label per line (`--lane-targets`): not-run members of other targets read "out of lane". Verdicts never change. |
+| `on_attribution_error` | `"fail"` | A quarantined test case (several ids, several claimants, one test code with several owners) fails the build (`rr report` exits 3); `"warn"` builds the report anyway, where the case still counts for nobody and every entity it names reads INVALID. |
 | `testonly` | `True` | The evidence comes from tests. |
 
-The build fails if the model is invalid.
+The build fails if the model is invalid, if a test case is quarantined (unless
+`on_attribution_error = "warn"`), and if an attribution issue is an error
+(`lock-owner-changed`, a rule set to `error`, or with `strict` any warning).
+An `rr_model` with a `lock` pins the sets. The target provides
+`RrReportInfo(json, lane, on_attribution_error, lock)`.
+
+### `rr_sets_lock_test`
+
+```starlark
+rr_sets_lock_test(
+    name = "lock_test",
+    model = ":model",  # rr_model(lock = "verification.rrlock")
+    evidence = [":evidence"],
+)
+```
+
+Runs `rr sets check` on the lock the model pins (`rr_model(lock)`, the one
+`rr_report` reads): fails on a case the lock expects but the evidence does
+not hold (`missing-case`), an owned case the lock does not list
+(`unlocked-member`), an owner change and a stale entry. `lock` names the lock
+only for a model that has none (model files, or an `rr_model` without
+`lock`); analysis fails when it differs from the model's. `bazel run
+:lock_test.update` rewrites that lock in the source tree from the same evidence
+(`rr sets lock --write`; append `-- --allow-removals` to drop entries the
+evidence no longer has, after checking the run was complete). For hermetic
+projects whose evidence comes from `rr_evidence`; with real `bazel-testlogs`
+run `rr sets check` / `rr sets lock` from the CLI. To start a lock, create an
+empty `lock` file and run the `.update` target.
+
+The thermostat example wires the three together the way a product should: an
+`rr_model` with `lock`, an `rr_report` with the default
+`on_attribution_error = "fail"` and `check = True`, and an
+`rr_sets_lock_test` over the same evidence, so `bazel test //...` fails on a
+shared claim (`:model_test`), a quarantined case (`:report`), a report that
+breaks the partition (`:report_check_test`) and a set that changed without
+its lock (`:sets_lock_test`):
+
+```{literalinclude} ../../examples/thermostat/BUILD.bazel
+:language: starlark
+:start-at: "EVIDENCE = ["
+:end-before: "rr_golden_test("
+```
 
 ### `rr_golden_test`
 

@@ -16,8 +16,10 @@ from rules_requirements.case_keys import (
     is_unscoped,
     key_of,
     name_tags,
+    normalize_target,
     pseudo_target,
     run_dims_from_path,
+    run_targets,
     target_of,
     workspace_relative,
 )
@@ -109,6 +111,27 @@ def test_workspace_relative_file():
     case = TestCase("t", "passed", properties={"rr.file": "/r/x.runfiles/ws/pkg/test_a.py"})
     assert file_of(case) == "pkg/test_a.py"
     assert file_of(TestCase("t", "passed")) == ""
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    ["pi/h/fx_bench.py", "./pi/h/fx_bench.py", "pi/h//fx_bench.py", "pi/h/../h/fx_bench.py", "pi\\h\\fx_bench.py",
+     "/home/ci/splanc/pi/h/fx_bench.py", "/home/ci/splanc//./pi/h/fx_bench.py"],
+)  # fmt: skip
+def test_workspace_relative_gives_one_spelling_per_source(spelling, monkeypatch):
+    """One source file, one code identity (same-code detection compares it)."""
+    monkeypatch.setenv("BUILD_WORKSPACE_DIRECTORY", "/home/ci/splanc/")
+    assert workspace_relative(spelling) == "pi/h/fx_bench.py"
+    assert file_of(TestCase("t", "passed", file=spelling)) == "pi/h/fx_bench.py"
+    assert file_of(TestCase("t", "passed", properties={"rr.file": spelling})) == "pi/h/fx_bench.py"
+
+
+def test_workspace_relative_keeps_what_it_cannot_place(monkeypatch):
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    assert workspace_relative("/home/ci/splanc/./pi/h/fx_bench.py") == "/home/ci/splanc/pi/h/fx_bench.py"
+    assert workspace_relative("//abs/x.py") == "/abs/x.py"
+    assert workspace_relative("../other/x.py") == "../other/x.py"
+    assert workspace_relative("./") == workspace_relative("") == workspace_relative("  ") == ""
 
 
 _BAZEL_GENERATED = """<?xml version="1.0" encoding="UTF-8"?>
@@ -301,3 +324,52 @@ def test_testcase_file_attribute_is_the_source_when_no_rr_file_says(tmp_path):
     assert rows["codec::round_trip"].file == "fw/codec_test.cc"
     assert rows["codec::own"].file == "fw/other.cc"
     assert rows["codec::none"].file == ""
+
+
+@pytest.mark.parametrize(
+    "report, expected",
+    [
+        ("<testsuite name='pytest' tests='0'/>", {"suite:pytest"}),
+        (
+            "<testsuites><testsuite name='config_test' tests='0'/><testsuite name='codec' tests='0'/></testsuites>",
+            {"suite:config_test", "suite:codec"},
+        ),
+        ("<testsuites><testsuite name='a' tests='0'/><testsuite tests='0'/></testsuites>", {"suite:a", "suite:run1"}),
+        ("<testsuites/>", {"suite:run1"}),
+    ],
+    ids=["named", "two-suites", "one-unnamed", "no-suite"],
+)
+def test_a_caseless_report_outside_testlogs_ran_under_its_suite_names(tmp_path, report, expected):
+    """A report with no testcase and no build target in its path is keyed
+    as its cases would be: by each testsuite name (a pytest run that
+    collected nothing is suite:pytest, as its cases are when it collects
+    some), and by the file stem only for an unnamed suite or none."""
+    path = write(tmp_path, "reports/run1.xml", report)
+    ev = ingest.collect([path])
+    assert ev.files == [path] and ev.cases == []
+    assert run_targets(ev) == expected
+    # The same report with one case: its key's target is among them.
+    named = report.replace("tests='0'/>", "tests='1'><testcase classname='m' name='t'/></testsuite>", 1)
+    if named != report:
+        with_case = ingest.collect([write(tmp_path, "reports/run1.xml", named)])
+        (key,) = index_cases(with_case)
+        assert key.target in expected
+
+
+def test_a_caseless_testlogs_report_keeps_its_path_target(tmp_path):
+    testlogs = write(tmp_path, "bazel-testlogs/app/config_test/test.xml", "<testsuite name='pytest' tests='0'/>")
+    assert run_targets(ingest.collect([testlogs])) == {"//app:config_test"}
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["//p:t", "@@//p:t", "@//p", "@ws//p:t", "@@rules_x~//p:t", "@@a~~ext~b//p:t", "suite:py#x", "//p:a#b",
+     "@//p:a#b", "record:r", "weird label", "@@//p:t#x"],
+)  # fmt: skip
+def test_normalize_target_is_its_own_normal_form(target):
+    """rr check-report reads a key's target as canonical when normalize_target
+    leaves it unchanged, so whatever it returns must be a fixed point (a '#'
+    is replaced before the label is normalized, not after)."""
+    once = normalize_target(target, "ws")
+    assert normalize_target(once, "ws") == once
+    assert "#" not in once

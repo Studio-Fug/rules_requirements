@@ -28,22 +28,44 @@ CLI's ``--ingestor module:attr`` flag.
 Traceability travels inside the evidence as test-case *properties*:
 
 ``requirement``
-    An entity id the case verifies (repeatable; comma-separated lists are
-    accepted, as is the plural ``requirements``).
+    The entity id the case declares it verifies — a *tag*, recorded in
+    ``TestCase.declared``. Ingest never decides ownership: a tag is a
+    cross-check (or, in hybrid mode, a claim for an unclaimed case) that only
+    ``rules_requirements.attribution.attribute()`` resolves. A case naming
+    more than one distinct id (a repeated property, ``requirement="A,B"``,
+    the plural ``requirements``, a list in a Rust trace line, two
+    ``[rr:ID]`` name tags) keeps every id, and is quarantined there
+    (``multi-tag``): a test case verifies at most one requirement.
 ``level``
     The verification rigor the case provides (e.g. ``hil``).
 ``artifact.<key>``
     Identity of the thing under test (firmware build id, DUT git SHA, ...)
     used to detect stale evidence.
+``rr.file``
+    The test source the case came from (``TestCase.file``).
+``rr.scope`` / ``rr.synthetic``
+    ``rr.scope=target`` marks a result about the whole target run (an exit
+    status, a load error, an unreadable report), never a test case;
+    ``rr.synthetic=true`` marks a target's single whole-run result.
+
+Only ``level`` and ``artifact.*`` set on a ``<testsuite>`` (or an enclosing
+scope) reach its cases. A suite-level ``requirement`` is not inherited: it is
+kept in ``TestCase.suite_declared`` and reported as
+``suite-level-requirement`` (``Evidence.issues``).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import glob
 import importlib
 import os
+import posixpath
+import re
+import sys
+import warnings
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Iterator
+from typing import Any, Iterable, Iterator, Mapping
 
 from rules_requirements.util import dedupe
 
@@ -56,16 +78,142 @@ STATUS_ORDER = {PASSED: 0, SKIPPED: 1, FAILED: 2, ERROR: 3}
 REQUIREMENT_PROPERTY = "requirement"
 LEVEL_PROPERTY = "level"
 ARTIFACT_PREFIX = "artifact."
+FILE_PROPERTY = "rr.file"
+"""The test source a case came from (our writers; else the ``file`` attribute)."""
+SYNTHETIC_PROPERTY = "rr.synthetic"
+"""``true``: the target's single whole-run result (no per-case output)."""
+SCOPE_PROPERTY = "rr.scope"
+"""``target``: a result about the whole target run (exit status, load error), not a test case."""
 
 
-@dataclass
+# One "[rr:ID]" (or "[rr:A,B]") name tag and at most one blank before it, so
+# "probe [rr:PR-1] ok" and "probe ok" are the same case (case_keys.case_path).
+NAME_TAG = re.compile(r"[ \t]?\[rr:([^\]]*)\]")
+_ID_SEPARATORS = re.compile(r"[,\s]+")
+
+
+def split_ids(value: str) -> list[str]:
+    """The ids in one requirement value: split on commas and whitespace, blanks dropped."""
+    return [part for part in _ID_SEPARATORS.split(value or "") if part]
+
+
+def name_tags(name: str) -> list[str]:
+    """Ids declared by ``[rr:ID]`` tags in a case name, in order (``[rr:A,B]`` gives two)."""
+    return dedupe([rid for tag in NAME_TAG.findall(name or "") for rid in split_ids(tag)])
+
+
+_RUNFILES = re.compile(r"^.*?\.runfiles/[^/]+/")
+_BAZEL_OUT = re.compile(r"^(?:.*/)?bazel-out/[^/]+/bin/")
+
+
+def workspace_relative(path: str) -> str:
+    """The one spelling of a test source path (``rr.file``), so that one source
+    file is one code identity however a producer spelled it.
+
+    Backslashes become ``/``; the path is normalized (``./x``, ``x//y`` and
+    ``a/../b`` collapse, as ``posixpath.normpath`` does); a
+    ``*.runfiles/<workspace>/`` or ``bazel-out/<cfg>/bin/`` prefix is
+    stripped, else the ``$BUILD_WORKSPACE_DIRECTORY`` prefix when that is
+    set. Any other absolute path is kept (same-code detection compares it
+    with a relative spelling by suffix). ``""`` stays ``""``.
+    """
+    norm = (path or "").replace("\\", "/")
+    if not norm.strip():
+        return ""
+    norm = _normpath(norm)
+    for rx in (_RUNFILES, _BAZEL_OUT):
+        stripped = rx.sub("", norm, count=1)
+        if stripped != norm:
+            return _normpath(stripped)
+    root = (os.environ.get("BUILD_WORKSPACE_DIRECTORY") or "").replace("\\", "/")
+    if root.strip():
+        root = _normpath(root).rstrip("/")
+        if root and norm.startswith(root + "/"):
+            return _normpath(norm[len(root) + 1 :])
+    return norm
+
+
+def _normpath(path: str) -> str:
+    norm = posixpath.normpath(path)
+    if norm.startswith("//"):  # POSIX keeps exactly two leading slashes; one path, one spelling
+        norm = "/" + norm.lstrip("/")
+    return "" if norm == "." else norm
+
+
+def _ids(value: Any) -> tuple[str, ...]:
+    """Normalize declared ids, however they were given: a string or any
+    iterable of them, each split on commas and whitespace (:func:`split_ids`),
+    blanks dropped, duplicates removed, order kept. The one place ids enter a
+    :class:`TestCase` (constructor, ``declared``/``suite_declared``
+    assignment, the ``requirements`` alias), so ``"PR-1, PR-2"`` is always
+    two ids, never one id that happens to contain a comma."""
+    if value is None:
+        return ()
+    items = [value] if isinstance(value, str) else list(value)
+    return tuple(dedupe([rid for item in items for rid in split_ids(str(item))]))
+
+
+_ID_FIELDS = frozenset(("declared", "suite_declared"))
+
+
+class _Unset(tuple):  # type: ignore[type-arg]
+    """The default of ``TestCase(declared=...)``: no ids, and not passed."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "()"
+
+
+_UNSET: Any = _Unset()
+
+
+def _replacing(declared: Any) -> bool:
+    """Whether the ``TestCase(...)`` being run was called by
+    :func:`dataclasses.replace` (or :func:`copy.replace`) with the source
+    case's own ``declared``: the one call that passes ``declared=`` without
+    the caller writing it. Frames: 0 here, 1 ``TestCase.__init__``, 2 its
+    caller (``replace(obj, ...)`` up to 3.12, ``_replace(self, ...)`` from
+    3.13)."""
+    caller = sys._getframe(2)
+    if caller.f_code.co_filename != dataclasses.__file__ or caller.f_code.co_name not in ("replace", "_replace"):
+        return False
+    source = caller.f_locals.get("obj", caller.f_locals.get("self"))
+    return isinstance(source, TestCase) and source.declared is declared
+
+
+_FOR_ID_WARNING = (
+    "Evidence.for_id is deprecated: it returns the cases that declare an id (tags), which is not the set "
+    "of cases the entity owns; use build_matrix(...).attribution.members_of(entity_id)"
+)
+
+_ALIAS_WARNING = (
+    "TestCase.requirements is deprecated: use TestCase.declared. A case's declared ids are tags, "
+    "not owners; rules_requirements.attribution decides which requirement a case verifies"
+)
+
+
+@dataclass(init=False)
 class TestCase:
+    """One raw result, as an ingestor read it.
+
+    ``declared`` holds the requirement ids the evidence *names* for this case
+    — tags, in order, without duplicates. It is plain data: nothing here
+    says which requirement the case verifies (see :mod:`rules_requirements.ingest`).
+    ``requirements`` is a deprecated read/write alias of it (and a
+    deprecated keyword of the constructor: ``dataclasses.replace(case,
+    requirements=...)`` works as in 0.2, while passing both ``declared=``
+    and ``requirements=`` explicitly is a TypeError, whatever ``declared``
+    holds (``()``, or another case's ``declared``);
+    :func:`dataclasses.asdict` names the field ``declared``).
+    """
+
     __test__ = False  # not a pytest test class
 
     name: str
     status: str  # passed | skipped | failed | error
     classname: str = ""
-    requirements: tuple[str, ...] = ()
+    declared: tuple[str, ...] = ()  # tag ids, never owners (was ``requirements``)
     level: str = ""
     artifact: dict[str, str] = field(default_factory=dict)
     message: str = ""
@@ -75,6 +223,77 @@ class TestCase:
     properties: dict[str, str] = field(default_factory=dict)  # everything else
     # Added in v0.2: after ``properties``, so positional construction keeps working.
     suite: str = ""  # name of the enclosing <testsuite>, if any
+    # Added in v0.3.
+    file: str = ""  # test source, workspace-relative (rr.file, else the file attribute)
+    line: int = 0  # line in ``file`` (the line attribute), 0 if unknown
+    suite_declared: tuple[str, ...] = ()  # ids an enclosing scope named: NOT inherited
+
+    def __init__(
+        self,
+        name: str,
+        status: str,
+        classname: str = "",
+        declared: Iterable[str] = _UNSET,
+        level: str = "",
+        artifact: Mapping[str, str] | None = None,
+        message: str = "",
+        duration: float = 0.0,
+        source: str = "",
+        target: str = "",
+        properties: Mapping[str, str] | None = None,
+        suite: str = "",
+        file: str = "",
+        line: int = 0,
+        suite_declared: Iterable[str] = (),
+        *,
+        requirements: Iterable[str] | None = None,
+    ) -> None:
+        if requirements is not None:
+            # dataclasses.replace(case, requirements=...) passes the case's
+            # own declared= as well: there the alias replaces it. Any other
+            # declared= beside the alias (even (), even another case's
+            # declared) is two sets of ids for one case; neither may win.
+            if declared is not _UNSET and not _replacing(declared):
+                raise TypeError(
+                    "TestCase: pass declared= or the deprecated requirements=, not both "
+                    f"(declared={_ids(declared)!r}, requirements={_ids(requirements)!r})"
+                )
+            warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
+            declared = requirements
+        self.name = name
+        self.status = status
+        self.classname = classname
+        self.declared = _ids(declared)
+        self.level = level
+        self.artifact = dict(artifact or {})
+        self.message = message
+        self.duration = duration
+        self.source = source
+        self.target = target
+        self.properties = dict(properties or {})
+        self.suite = suite
+        self.file = file
+        self.line = line
+        self.suite_declared = _ids(suite_declared)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # Every way of setting the ids (a hand-built case, a third-party
+        # ingestor assigning ``case.declared = [...]``) is normalized, so a
+        # case naming two ids always reads as two (multi-tag downstream).
+        if name in _ID_FIELDS:
+            value = _ids(value)
+        object.__setattr__(self, name, value)
+
+    @property
+    def requirements(self) -> tuple[str, ...]:
+        """Deprecated alias of ``declared`` (tags, not owners)."""
+        warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
+        return self.declared
+
+    @requirements.setter
+    def requirements(self, value: Iterable[str]) -> None:
+        warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
+        self.declared = _ids(value)
 
     @property
     def full_name(self) -> str:
@@ -85,21 +304,40 @@ class TestCase:
     def is_failure(self) -> bool:
         return self.status in (FAILED, ERROR)
 
+    @property
+    def scope(self) -> str:
+        """``target`` for a result about the whole target run, else ``case``."""
+        return "target" if self.properties.get(SCOPE_PROPERTY, "").lower() == "target" else "case"
+
+    @property
+    def synthetic(self) -> bool:
+        """The target's single whole-run result (Bazel's generated report, or ``rr.synthetic``)."""
+        return self.properties.get(SYNTHETIC_PROPERTY, "").lower() == "true"
+
 
 def apply_properties(case: TestCase, props: Iterable[tuple[str, str]]) -> TestCase:
-    """Fold raw ``(name, value)`` properties into the typed fields of ``case``."""
-    reqs = list(case.requirements)
+    """Fold raw ``(name, value)`` properties into the typed fields of ``case``.
+
+    Every ``requirement``/``requirements`` value is split on commas and
+    whitespace, and the distinct ids — together with the case name's
+    ``[rr:ID]`` tags — are recorded in ``TestCase.declared``, in order.
+    Nothing is decided about ownership: two ids stay two ids.
+    """
+    reqs = list(case.declared)
     for name, value in props:
         value = (value or "").strip()
         if name in (REQUIREMENT_PROPERTY, "requirements"):
-            reqs.extend(v.strip() for v in value.split(","))
+            reqs.extend(split_ids(value))
         elif name == LEVEL_PROPERTY:
             case.level = value.lower()
         elif name.startswith(ARTIFACT_PREFIX):
             case.artifact[name[len(ARTIFACT_PREFIX) :]] = value
         else:
             case.properties[name] = value
-    case.requirements = tuple(dedupe(reqs))
+    reqs.extend(name_tags(case.name))
+    case.declared = tuple(dedupe(reqs))
+    if not case.file and case.properties.get(FILE_PROPERTY):
+        case.file = workspace_relative(case.properties[FILE_PROPERTY])
     return case
 
 
@@ -187,6 +425,35 @@ def ingestor_for(path: str, only: Iterable[str] | None = None) -> Ingestor | Non
     return None
 
 
+@dataclass(frozen=True)
+class IngestIssue:
+    """Something about the evidence worth a warning (never a verdict).
+
+    ``suite-level-requirement``: a ``<testsuite>`` (or a ``<testcase>``
+    holding nested cases) names a requirement. It used to reach every case
+    below; since v0.3 it reaches none of them.
+    """
+
+    code: str
+    source: str
+    target: str
+    scope: str  # the suite (or parent case) that named the ids
+    ids: tuple[str, ...]
+
+    @property
+    def detail(self) -> str:
+        """What is wrong, without a severity (attribution assigns the configured one)."""
+        return (
+            f"suite {self.scope or '(unnamed)'} (or a parent case in it) names "
+            f"{', '.join(self.ids)} above its test cases; suite-level requirements are not inherited by the "
+            "cases (each test case declares its own one id)"
+        )
+
+    def __str__(self) -> str:
+        where = f"{self.source}: " if self.source else ""
+        return f"{where}warning: [{self.code}] {self.detail}"
+
+
 @dataclass
 class Evidence:
     """Every test case from every evidence file, plus per-target rollups."""
@@ -194,7 +461,8 @@ class Evidence:
     cases: list[TestCase] = field(default_factory=list)
     files: list[str] = field(default_factory=list)
     skipped_files: list[str] = field(default_factory=list)  # nothing understood them
-    target_status: dict[str, str] = field(default_factory=dict)
+    target_status: dict[str, str] = field(default_factory=dict)  # kept for readers; no verdict reads it
+    issues: list[IngestIssue] = field(default_factory=list)
 
     def add(self, case: TestCase) -> None:
         self.cases.append(case)
@@ -202,9 +470,26 @@ class Evidence:
             cur = self.target_status.get(case.target)
             if cur is None or STATUS_ORDER[case.status] > STATUS_ORDER[cur]:
                 self.target_status[case.target] = case.status
+        if case.suite_declared:
+            issue = IngestIssue(
+                "suite-level-requirement",
+                case.source,
+                case.target,
+                case.suite or case.classname,
+                case.suite_declared,
+            )
+            if issue not in self.issues:
+                self.issues.append(issue)
 
     def for_id(self, entity_id: str) -> list[TestCase]:
-        return [c for c in self.cases if entity_id in c.requirements]
+        """Cases whose evidence *declares* ``entity_id`` — tags, not ownership.
+
+        Deprecated: no verdict reads it. The cases an entity owns are its
+        members in :meth:`rules_requirements.attribution.Attribution.members_of`
+        (``build_matrix(...).attribution``).
+        """
+        warnings.warn(_FOR_ID_WARNING, DeprecationWarning, stacklevel=2)
+        return [c for c in self.cases if entity_id in c.declared]
 
 
 def expand(paths: Iterable[str]) -> list[str]:

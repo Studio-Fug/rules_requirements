@@ -90,6 +90,7 @@ Open notes are listed with their entity in the reports.
 | Field | Type | Notes |
 | ----- | ---- | ----- |
 | `rationale` | string | Why the need exists. |
+| `validated_by` | list of claims | Validation evidence (a usability study, an acceptance run): [claims](#claims) in the same namespace as `verified_by`. |
 
 ## Requirements
 
@@ -100,9 +101,9 @@ Open notes are listed with their entity in the reports.
 | `rationale` | string | Why the requirement exists. |
 | `category` | string | Free-form (`functional`, `safety`, `performance`, ...). |
 | `satisfies` | list of UN ids | The needs this requirement helps meet. |
-| `refines` | list of REQ ids | Parent requirements this one decomposes. Cycles are errors. |
+| `refines` | list of REQ ids | The parent requirement this one decomposes: one id, so `refines` forms a tree (`multi-parent-refines`). Cycles are errors. |
 | `method` | TM id or level | The verification rigor demanded. Default: `config.default_level`. |
-| `verified_by` | list | Build targets whose whole pass/fail is evidence: a label string, or `{target: <label>, level: <level>}`. A bare string provides `config.default_provided_level`. |
+| `verified_by` | list of claims | The test cases that verify it: see [claims](#claims). |
 | `modules` | list of strings | Implementing modules (documentation aid; drives the per-module rollup). |
 
 A requirement must trace upward — `satisfies` a need, `refines` another
@@ -136,7 +137,8 @@ uses the residual fields, falling back to the initial ones.
 | ----- | ---- | ----- |
 | `type` | enum | `inherent` (safety by design), `protective` (protective measure), `information` (information for safety) — the ISO 14971 §7.1 options. |
 | `mitigates` | list of RISK ids | **Required** (at least one). |
-| `implemented_by` | list of REQ ids | The requirements that realise the control. |
+| `implemented_by` | list of REQ ids | The requirements that realise the control. A requirement implements at most one mitigation, and one that does refines nothing (`multi-parent-implements`). |
+| `verified_by` | list of claims | Effectiveness evidence of the control (ISO 14971 §7.2): see [claims](#claims). |
 
 ## Test methods
 
@@ -146,6 +148,217 @@ uses the residual fields, falling back to the initial ones.
 | ----- | ---- | ----- |
 | `level` | level, **required** | The rigor this method provides and demands. |
 | `procedure` | string | How the method is carried out. |
+
+(claims)=
+## Claims: which test cases verify an entity
+
+**A test case verifies at most one requirement.** A set of test cases may
+together verify one requirement, but no case ever counts toward two. Claims
+are how the model says which cases belong to whom: `verified_by` on
+requirements and mitigations, `validated_by` on user needs — one namespace,
+so a need, a requirement and a mitigation can no more share a case than two
+requirements can. Risks and test methods hold no claims.
+
+Each item names one target and either the cases it claims or the whole target:
+
+```yaml
+requirements:
+  - id: PR-29
+    verified_by:
+      - target: //web:improv_provision_test
+        cases: ["improv_provision::provisionViaBle: survives Android's first-attempt GATT flake via retry"]
+      - target: //pi/hitl/tests:hitl_test
+        cases: ["pi.hitl.tests.test_improv::test_retry_*"]   # '*' is the only wildcard
+      - target: //pi/hitl/harness:e2e_netstack
+        level: hitl                                          # for cases that declare no level
+        cases: [hitl_e2e.improv_provision::readiness_retry]
+  - id: PR-25
+    verified_by:
+      - {target: //requirements:model_test, whole: true, reason: "rr validate runs as one test"}
+user_needs:
+  - {id: UN-5, validated_by: [{target: "record:usability_study", cases: ["*"]}]}
+```
+
+| Key | Meaning |
+| --- | ------- |
+| `target` | A Bazel label, or a pseudo-target: `suite:<testsuite name>` (JUnit outside a `bazel-testlogs` tree) or `record:<stem>` (records without a target). |
+| `cases` | A non-empty list of case selectors (below). `["*"]` claims every per-case result of the target, and is preferred over `whole` whenever the target reports per-case results. |
+| `whole: true` | Every result of the target — its single synthetic result when it reports no per-case results (Bazel's generated `test.xml`). Give a `reason`. |
+| `level` | The level provided by claimed cases that declare none (default `config.default_provided_level`). |
+| `reason` | Why a `whole` claim cannot be per-case. |
+
+An item has exactly one of `cases` and `whole: true`. The 0.2 forms still
+parse — a bare label, `{target}` or `{target, level}` — as a whole-target claim,
+with a `bare-target-reference` warning (an error from 0.4).
+
+A malformed item — both or neither of `cases` and `whole: true`, an empty or
+non-list `cases`, `whole: false`, a `reason` without `whole: true` — is a
+`bad-selector` error, and until it is fixed it claims the **whole** target,
+whatever cases it lists: it can only add `shared-case` conflicts, never hide
+one. The web editor shows such an item exactly as written and refuses to
+rewrite the entity until it is fixed by hand.
+
+**Case selectors** match the whole case path (`<classname>::<name>`, see
+`rr cases`), case-sensitively. `*` matches any string, including the empty
+string, `::`, `/` and blanks; `**` is the same as `*`. `\*` is a literal star
+and `\\` a literal backslash; any other backslash is a `bad-selector`. `?`, `[`
+and `]` are literals, so `test_x[*]` matches the pytest id `test_x[a]`. A
+selector is never empty, never padded with blanks, and never `[target]` (claim
+a synthetic result with `whole: true`). Like case paths it is in Unicode NFC
+(an editor that writes `é` decomposed would otherwise claim a case that never
+exists), and it never ends with an `[rr:ID]` name tag, which ingest strips
+from case names.
+
+**Labels** are compared in one spelling: `@@//p:n`, `@//p:n` and
+`@<config.main_repo>//p:n` are `//p:n`; `//p` is `//p:p`; a module
+repository's canonical `@@name+//` (Bazel 8) or `@@name~//` (Bazel 7) is
+`@name//`. Anything else (`:n`, `p:n`, `//p/...`) is a `bad-target`.
+
+**No two entities can claim one case.** `rr validate` compares the claims of
+different entities on each target: a whole claim overlaps anything, and two
+selectors overlap when some case path matches both — decided exactly (the
+grammar has `*` as its only wildcard), with a shortest such path as the
+example:
+
+```text
+requirements.yaml:411: error: [shared-case] PR-29 and PR-13 both claim cases of //web:clocksync_test ('clocksync::*' vs 'clocksync::offset*'), e.g. 'clocksync::offset' (PR-13 claims it at requirements.yaml:233). A test case verifies at most one requirement: narrow one selector.
+```
+
+`config.variants` declares targets that run the same test code under another
+configuration; claims of different entities across one group are compared the
+same way (`same-code-multiple-owners`). Both are errors no configuration can
+turn off. Overlapping selectors of *one* entity are only `redundant-selector`.
+
+(attribution-modes)=
+## Who owns a case: `hybrid` and `model`
+
+`config.attribution` says what happens to a case that no claim selects
+({doc}`../one-test-case-one-requirement` has the full decision):
+
+| Mode | A case no claim selects | A tag on a claimed case |
+| ---- | ----------------------- | ----------------------- |
+| `hybrid` (the 0.3 default) | owned by its tag, when it declares exactly one id | a cross-check (`tag-mismatch` if it disagrees) |
+| `model` (the 0.4 default) | unowned (`unclaimed-tag` if it has a tag) | a cross-check (`tag-mismatch` if it disagrees) |
+
+In both modes a case whose evidence names two ids is quarantined, and two
+entities can never claim one case. Hybrid keeps a 0.2 project's tag-based
+attribution working while it moves to claims; model mode is the end state, in
+which the model is the single, reviewable record of which case verifies what.
+`rr attribution --suggest` prints the selector to add for every tag-owned
+case, and `rr migrate apply --stage model` writes them all
+({doc}`migrating-to-per-case`).
+
+The [thermostat example](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
+is in model mode. Its configuration and one requirement's claims, a literal
+pytest case, a glob over a parametrized test's ids and two Rust tests:
+
+```yaml
+config:
+  attribution: model
+  sets_lock: verification.rrlock
+requirements:
+  - id: REQ-4
+    title: Reject setpoints outside 5-30 °C
+    verified_by:
+      - target: //:controller_test
+        cases:
+          - "tests.test_controller::test_rejects_setpoints_outside_range[*]"
+          - "tests.test_controller::test_accepts_range_limits"
+      - target: //:setpoint_test
+        cases:
+          - "tests::rejects_out_of_range"
+          - "tests::checks_the_range_after_converting"
+```
+
+Its tests keep their single-id tags (`@pytest.mark.rr("REQ-4")`,
+`rr::verifies!("REQ-4")`) as cross-checks; a test without one is owned just
+the same.
+
+(verification-lock)=
+## The verification-set lock
+
+Globs, whole-target claims and tags select whatever cases the evidence holds,
+so a deleted, renamed or filtered test would silently leave a requirement's
+verification set. The lock pins the sets: `config.sets_lock` names a
+generated file (conventionally `verification.rrlock`, next to the model) that
+maps each locked case to the one entity whose set holds it:
+
+```yaml
+# Generated by `rr sets lock --write`; review its diff like a golden file.
+schema: rules_requirements/verification-lock/v1
+cases:
+  //web:improv_provision_test:
+    "improv_provision::provisionViaBle: survives Android's first-attempt GATT flake via retry": PR-29
+  //requirements:model_test:
+    "[target]": PR-25
+```
+
+Each case maps to exactly one id: a list, a repeated case, one case under two
+spellings of its target, or a case path that is not canonical is
+`lock-invalid`, so the file cannot express two owners. The extension is not one
+`rr validate` reads as a model file.
+
+**The lock never creates ownership.** Attribution decides every owner from the
+claims (and, in hybrid mode, single tags); a lock entry only adds an
+*expected* member to its entity's set. A locked case the target ran without
+reads `missing`, one whose target did not run `not-run`, and one that now has
+another owner or none `moved` (with `lock-owner-changed`) — each makes the set
+INCOMPLETE until the lock is regenerated and its diff reviewed. An owned case
+the lock does not list is an `unlocked-member` gap. Without a lock, reports
+carry one `unpinned-sets` gap naming the entities whose sets are not pinned.
+
+The workflow: run the tests, then lock, then review the diff with the change
+that caused it.
+
+```console
+$ bazel test //...
+$ rr sets lock --model requirements/ --evidence bazel-testlogs --write
+$ git diff requirements/verification.rrlock
+```
+
+In a hermetic Bazel project the same is `bazel run //:sets_lock_test.update`
+(`rr_sets_lock_test`, as in the thermostat example), and `bazel test //...`
+then checks the lock against the evidence.
+
+From the command line:
+
+```console
+$ rr sets lock  --model requirements/ --evidence bazel-testlogs            # print the diff
+$ rr sets lock  --model requirements/ --evidence bazel-testlogs --write    # write it
+$ rr sets check --model requirements/ --evidence bazel-testlogs            # the CI gate
+$ rr sets show PR-13 --model requirements/ --evidence bazel-testlogs       # one set
+```
+
+`rr sets lock` refuses while a case is quarantined (exit 3) and keeps every
+entry the evidence no longer holds unless `--allow-removals` is given (it
+lists them), so a crashed or filtered run never shrinks a set silently; owner
+changes are listed and allowed. A target absent from the evidence (the lane
+that did not run) keeps an entry even with `--allow-removals` while a claim
+of its owner selects it, and, in hybrid mode, while its owner claims nothing
+on that target and no other claim selects it (a tag may own it there). That
+last rule does not hold for a `suite:`/`record:` pseudo-target, which names
+no build target, so its absence cannot be told from a move:
+`--allow-removals` drops such an entry, and one whose case now runs under
+another target for the same owner (JUnit moved into a testlogs tree) is
+listed as a removal and reads `lock-stale` until it is dropped. `rr sets check` exits 1, restricted to the
+targets present in the evidence, on a missing case, an unlocked member, an
+owner change or a stale entry. `--sets-lock PATH` reads (and writes) another
+lock than `config.sets_lock`. In Bazel, `rr_model(lock = ...)` checks the lock
+statically and pins the reports' sets with it, and `rr_sets_lock_test` runs
+`rr sets check` over `rr_evidence` ({doc}`bazel`).
+
+In Python, {py:func}`rules_requirements.lock.plan_lock` computes the lock for
+an attribution (refusing while any case is quarantined, and listing removals
+and owner changes for review) and {py:func}`rules_requirements.lock.write_lock`
+writes it. An owner change is allowed, also for a target the evidence at hand
+did not run (the entry follows the one entity whose claims now select it);
+a removal — a case missing from a target that ran, or an entry no claim
+selects any more — is kept in the lock until removals are allowed.
+{py:func}`rules_requirements.trace.build_matrix` reads the configured lock
+unless it is passed one; `lock=rules_requirements.lock.NO_LOCK` reads none
+(the sets are not pinned). `NO_LOCK` is recognised by its `none` flag
+(`rules_requirements.lock.is_no_lock`), so a copy or a pickled round trip of
+it still means "no lock".
 
 (config-reference)=
 ## The `config:` section
@@ -169,6 +382,12 @@ model document). Omitted keys keep their defaults.
 | `high_severities` | `[high, critical]` | Severities hoisted into the "not mitigated" banner. |
 | `rules` | see [rules](#rules) | Severity (`error`, `warning`, `off`) of each coverage rule. |
 | `annotation_patterns` | `[]` | Extra regular expressions for source annotations; capture group 1 holds the id list ({doc}`annotations`). |
+| `attribution` | `hybrid` | Who owns a test case no [claim](#claims) covers: `hybrid` lets a single-id tag own it; `model` leaves it unowned (tags only cross-check claims). Neither mode can give a case two owners. |
+| `main_repo` | `""` | This repository's apparent name in other modules: `@<main_repo>//x:y` is read as `//x:y`. |
+| `sets_lock` | `""` (none) | The verification-set lock (`verification.rrlock`), relative to the file holding `config:`. `rr validate` checks it against the claims. |
+| `flaky` | `under-verify` | A pass that needed a retry: `accept`, `flag`, `under-verify` or `fail`. |
+| `set_consistency` | `warn` | Members of one set stamped with different builds: `off`, `warn` or `enforce`. |
+| `variants` | `[]` | Groups (lists of two or more labels) of targets that run the same test code. |
 
 Example — a project that keeps its `PR-` ids, uses its own ladder and starts
 with coverage rules as warnings:
@@ -217,18 +436,30 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 
 | Code | Raised when |
 | ---- | ----------- |
-| `shape` | A document or entity is malformed: not a mapping, a missing `id`/`title`, a section that is not a list, a duplicate id, a malformed note or `verified_by` item, an invalid `config:` value, an unreadable file. |
+| `shape` | A document or entity is malformed: not a mapping, a missing `id`/`title`, a section that is not a list, a duplicate id, a malformed note, a claim item without a `target`, an invalid `config:` value, an unreadable file. |
 | `bad-id` | An id does not match its kind's pattern. |
+| `duplicate-id` | One id names entities in two sections (a model built in Python; the loader reports a duplicate id as `shape`): two entities would share one verification set. |
 | `bad-status` | `status` is not one of the allowed values. |
 | `dangling-reference` | A reference names an id that does not exist. |
 | `bad-reference` | A reference names an entity of the wrong kind, or a requirement refines itself. |
 | `bad-method` | A requirement's `method` is neither a test method id nor a level. |
-| `bad-level` | A `verified_by` level or a test method's `level` is not a defined level. |
+| `bad-level` | A claim's `level` or a test method's `level` is not a defined level. |
 | `missing-level` | A test method has no `level`. |
 | `bad-enum` | A risk's severity/likelihood (initial or residual) is off-scale, or a mitigation's `type` is unknown. |
 | `inconsistent-trace` | A risk's `mitigated_by` disagrees with the mitigations' `mitigates`. |
 | `refines-cycle` | Requirements refine each other in a cycle. |
 | `mitigation-no-risk` | A mitigation mitigates nothing. |
+| `shared-case` | Claims of two entities can select one test case (the message names a witness). |
+| `same-code-multiple-owners` | Claims of two entities on targets of one `config.variants` group can select one case. |
+| `bad-selector` | A claim item with both or neither of `cases` / `whole: true`, an empty `cases`, or a selector that is empty, padded, not in Unicode NFC, `[target]`, badly escaped, or ends its case name with an `[rr:ID]` name tag (ingest strips those, so it could never match). |
+| `bad-target` | A claim's or `variants` entry's target is not a label or pseudo-target. |
+| `unknown-target` | With `rr validate --known-targets FILE` (`bazel query 'tests(//...)'` output): a claim, a `config.variants` entry or a lock target names a label not in the file (pseudo-targets are exempt). |
+| `lock-invalid` | The configured `sets_lock` is missing or malformed, maps a case to a list, has a case path that is not canonical (NFC, no surrounding blanks), or names an owner that is not a user need, requirement or mitigation. |
+| `lock-owner-changed` | `attribution: model`: a lock entry is selected by another entity's claim. |
+
+These cannot be configured: naming one under `config.rules` is itself an
+error, and so is naming a report-time quarantine (`multi-tag`,
+`attribution-conflict`).
 
 ### Configurable coverage rules
 
@@ -239,7 +470,20 @@ entity, path, line}`; `--strict` promotes warnings to errors.
 | `risk-unmitigated` | error | No mitigation controls a risk. |
 | `mitigation-unimplemented` | error | No requirement implements a mitigation. |
 | `risk-unacceptable` | warning | The residual risk score exceeds `acceptable_risk_score`. |
-| `unknown-field` | error | A document, entity, note or `verified_by` item has a key the model does not know — usually a typo (`satisfes:`) that would silently drop a trace. |
+| `unknown-field` | error | A document, entity, note or claim item has a key the model does not know — usually a typo (`satisfes:`) that would silently drop a trace. |
+| `bare-target-reference` | warning | A claim in a 0.2 form (bare label, `{target}`, `{target, level}`). |
+| `whole-target-reference` | warning | A `whole: true` claim without a `reason`. |
+| `glob-selector` | off | A selector with a `*` (turn on to require literal case lists). |
+| `redundant-selector` | warning | Two selectors of one entity on one target overlap. |
+| `multi-parent-refines` | error | A requirement refines two or more parents. Refines must form a tree, so each test case's evidence rolls up one chain of requirements ({ref}`derived-verdicts`); `rr report` exits 2 and the web editor refuses the save. |
+| `multi-parent-implements` | error | A requirement that implements a mitigation has another parent: a second mitigation, or a requirement it refines. A mitigation's VERIFIED is derived from its implementing requirements, so each case would roll up two chains ({ref}`derived-verdicts`); `rr report` exits 2 and the web editor refuses the save. |
+| `parent-with-claims` | warning | A requirement refined by others also claims cases of its own. |
+| `lock-stale` | error | `attribution: model`: no claim of a lock entry's owner selects it. Either mode: an entry of a `suite:`/`record:` pseudo-target the evidence does not hold, whose owner now owns its case path under a target that ran (re-lock with `--allow-removals`). |
+
+The 0.3 rules `coarse-claim`, `tag-mismatch`, `unclaimed-tag`,
+`suite-level-requirement`, `duplicate-case`, `level-mismatch`,
+`same-path-multiple-owners` and `multi-verifies-annotation` are configured
+here too; they are raised when evidence is attributed or annotations are scanned.
 
 Projects that deliberately carry extra keys (a `jira:` link, a note's
 `priority:`) set the rule to `warning` or `off`; the tools keep such keys
@@ -279,3 +523,10 @@ in VS Code:
 The schema describes the default vocabulary: if you change `severities`,
 `likelihoods` or `levels`, it still accepts any string there, and
 `rr validate` checks the values against your configuration.
+
+For claims it accepts what the loader accepts: target labels follow the same
+rules as `bad-target` (`//p:` and `@r//p/...` are rejected, `@r` and `//p` are
+labels), and the 0.2 claim forms — a bare label, `{target}`, `{target,
+level}` — are accepted but marked `deprecated`, as `bare-target-reference`
+warns. `schema/verification_lock.schema.json` describes the
+verification-set lock the same way.

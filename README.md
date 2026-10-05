@@ -21,7 +21,8 @@ every item, whether it is *verified the way it needs to be*.
  user needs ──satisfied by──▶ requirements ◀──implemented by── mitigations ──control──▶ risks
     (UN)                         (REQ)                            (MIT)                (RISK)
                                    ▲
-                    verified by tests (JUnit), at a demanded rigor (test method / level)
+           verified by a set of test cases (JUnit), at a demanded rigor (test method / level);
+           a test case verifies at most one requirement
 ```
 
 The vocabulary follows the design-control and risk-management structure of
@@ -51,10 +52,19 @@ reference.
   - Rust — `rr::verifies!("REQ-1");` (with a libtest → JUnit wrapper)
   - node:test — `verifies(t, "REQ-1")` with `rr_node_test`, one JUnit case per test
   - anything else — `JUnitWriter` (and `CheckPlan`) for hand-rolled (e.g. hardware-in-the-loop) harnesses
-- **Migration to one test case, one requirement** — `rr cases` lists every
-  test case by its stable key, `rr migrate plan` writes the attribution
-  worksheet, and `rr migrate apply --stage tags` rewrites Python test tags to
-  the decided owners (see [CHANGELOG.md](CHANGELOG.md) for what is new).
+- **One test case, one requirement — enforced.** `verified_by` claims test
+  cases by selector (`{target: //web:clocksync_test, cases: ["clocksync::*"]}`);
+  two requirements claiming one case is a model error with an example case; a
+  case whose evidence names two ids is quarantined (it counts for nobody, and
+  every requirement it names reads **INVALID**); a generated lock
+  (`verification.rrlock`) pins each requirement's set of cases, so a deleted
+  test reads **INCOMPLETE**; and `rr check-report` re-proves from a published
+  JSON report alone that no case has two owners.
+- **Migration from many-to-many** — `rr cases` lists every test case by its
+  stable key, `rr migrate plan` writes the attribution worksheet,
+  `rr migrate apply --stage tags` rewrites Python test tags to the decided
+  owners and `--stage model` writes the claims (see
+  [CHANGELOG.md](CHANGELOG.md) for what is new).
 - **Pluggable evidence ingestion.** JUnit is the standard; Rust libtest output and
   signed-off inspection records are built in, and new formats are one small
   `Ingestor` class (or a `rules_requirements.ingestors` entry point) away.
@@ -84,7 +94,7 @@ reference.
 
 ```starlark
 # MODULE.bazel
-bazel_dep(name = "rules_requirements", version = "0.2.1")
+bazel_dep(name = "rules_requirements", version = "0.3.0")
 git_override(
     module_name = "rules_requirements",
     remote = "https://github.com/Studio-Fug/rules_requirements.git",
@@ -100,6 +110,12 @@ user_needs:
 requirements:
   - id: REQ-1
     title: Turn the heater on below setpoint - hysteresis
+    satisfies: [UN-1]
+    verified_by:   # the cases that verify it (0.3); the test's tag cross-checks
+      - target: //:controller_test
+        cases: ["test_controller::test_heats_below_setpoint"]
+  - id: REQ-2
+    title: Cut the heater off above the over-temperature limit
     satisfies: [UN-1]
 risks:
   - id: RISK-1
@@ -177,11 +193,13 @@ include only model files, and the server is local-only by default (see the
 
 | Status           | Applies to  | Meaning                                                     |
 | ---------------- | ----------- | ----------------------------------------------------------- |
-| `VERIFIED`       | REQ, MIT    | passing evidence at or above the demanded rigor             |
-| `UNDER-VERIFIED` | REQ         | passing evidence, but below the demand — or only stale      |
+| `VERIFIED`       | REQ, MIT    | its whole verification set passed, at or above the demanded rigor |
+| `UNDER-VERIFIED` | REQ         | the set passed, but below the demand, stale, or only on a retry |
+| `INCOMPLETE`     | REQ         | part of the set is missing, did not run or was skipped      |
+| `INVALID`        | REQ, UN, MIT | a quarantined test case names it: a case verifies at most one requirement |
 | `PARTIAL`        | REQ, UN, MIT, RISK | some of what it rolls up is verified                 |
 | `FAILED`         | all         | a test for it (or for something it rolls up) failed         |
-| `UNVERIFIED`     | REQ, MIT    | no evidence                                                 |
+| `UNVERIFIED`     | REQ, MIT    | no evidence, or none of it ran                              |
 | `VALIDATED` / `UNVALIDATED` | UN | every satisfying requirement verified / none        |
 | `MITIGATED` / `OPEN` | RISK   | every mitigation verified / none                            |
 
@@ -204,7 +222,7 @@ include only model files, and the server is local-only by default (see the
 pip install -e ".[test]" && coverage run -m pytest && coverage report   # unit tests + coverage
 bazel test //...                              # everything, including the hook integration goldens
 pre-commit run --all-files                    # lints (ruff, mypy, buildifier, codespell, SPDX headers)
-pip install -r docs/requirements.txt && python -m sphinx -W -n -b html docs docs/_build/html  # docs
+pip install -r docs/requirements.txt && python tools/docs_build.py -W -n --keep-going -b html docs docs/_build/html  # docs
 ```
 
 ## License

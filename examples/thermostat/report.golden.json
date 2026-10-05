@@ -1,5 +1,5 @@
 {
-  "schema": "rules_requirements/report/v1",
+  "schema": "rules_requirements/report/v2",
   "title": "Thermostat",
   "project": {
     "description": "A room thermostat: a Python controller, a C++ over-temperature interlock and a Rust setpoint parser, developed against user needs, requirements and a risk analysis, and traced to tests.",
@@ -15,13 +15,321 @@
     "requirements_partial": 0,
     "requirements_failed": 0,
     "requirements_unverified": 0,
+    "requirements_incomplete": 0,
+    "requirements_invalid": 0,
     "risks": 2,
     "risks_mitigated": 2,
     "mitigations": 2,
     "mitigations_verified": 2,
-    "test_cases": 17,
+    "test_cases": 18,
+    "test_cases_owned": 18,
+    "test_cases_unowned": 0,
+    "test_cases_quarantined": 0,
     "gaps": 0
   },
+  "attribution": {
+    "mode": "model",
+    "main_repo": "",
+    "variants": [],
+    "lock": "requirements/verification.rrlock",
+    "lane": null,
+    "targets": {
+      "//:controller_test": {
+        "cases": 9,
+        "owned": 9,
+        "quarantined": 0,
+        "owners": [
+          "REQ-1",
+          "REQ-2",
+          "REQ-4",
+          "REQ-6"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//:display_test": {
+        "cases": 1,
+        "owned": 1,
+        "quarantined": 0,
+        "owners": [
+          "REQ-7"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//:interlock_test": {
+        "cases": 3,
+        "owned": 3,
+        "quarantined": 0,
+        "owners": [
+          "REQ-5"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//:setpoint_test": {
+        "cases": 4,
+        "owned": 4,
+        "quarantined": 0,
+        "owners": [
+          "REQ-3",
+          "REQ-4"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "record:panel_inspection": {
+        "cases": 1,
+        "owned": 1,
+        "quarantined": 0,
+        "owners": [
+          "REQ-7"
+        ],
+        "synthetic": false,
+        "ran": true
+      }
+    },
+    "quarantined": [],
+    "issues": [],
+    "granularity": {
+      "owned_by_literal": 9,
+      "owned_by_pattern": 9,
+      "owned_by_whole": 0,
+      "owned_by_tag": 0,
+      "coarse_claims": 0
+    }
+  },
+  "cases": [
+    {
+      "case": "//:controller_test#tests.test_controller::test_accepts_range_limits",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_accepts_range_limits",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_heats_below_band",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_heats_below_band",
+      "owner": "REQ-1",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-1"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
+      "owner": "REQ-6",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-6"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
+      "owner": "REQ-6",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-6"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
+      "owner": "REQ-6",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-6"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:controller_test#tests.test_controller::test_stops_above_band_and_holds_inside_it",
+      "target": "//:controller_test",
+      "path": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
+      "owner": "REQ-2",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-2"
+      ],
+      "file": "tests/test_controller.py"
+    },
+    {
+      "case": "//:display_test#display_test.DisplayTest::test_setpoint_shows_unit",
+      "target": "//:display_test",
+      "path": "display_test.DisplayTest::test_setpoint_shows_unit",
+      "owner": "REQ-7",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-7"
+      ],
+      "file": "tests/display_test.py"
+    },
+    {
+      "case": "//:interlock_test#Interlock::NanReadingTrips",
+      "target": "//:interlock_test",
+      "path": "Interlock::NanReadingTrips",
+      "owner": "REQ-5",
+      "via": "model",
+      "status": "passed",
+      "level": "sil",
+      "declared": [
+        "REQ-5"
+      ],
+      "file": "interlock/interlock_test.cc"
+    },
+    {
+      "case": "//:interlock_test#Interlock::StaysTrippedUntilBelowReset",
+      "target": "//:interlock_test",
+      "path": "Interlock::StaysTrippedUntilBelowReset",
+      "owner": "REQ-5",
+      "via": "model",
+      "status": "passed",
+      "level": "sil",
+      "declared": [
+        "REQ-5"
+      ],
+      "file": "interlock/interlock_test.cc"
+    },
+    {
+      "case": "//:interlock_test#Interlock::TripsAtLimit",
+      "target": "//:interlock_test",
+      "path": "Interlock::TripsAtLimit",
+      "owner": "REQ-5",
+      "via": "model",
+      "status": "passed",
+      "level": "sil",
+      "declared": [
+        "REQ-5"
+      ],
+      "file": "interlock/interlock_test.cc"
+    },
+    {
+      "case": "//:setpoint_test#tests::checks_the_range_after_converting",
+      "target": "//:setpoint_test",
+      "path": "tests::checks_the_range_after_converting",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ]
+    },
+    {
+      "case": "//:setpoint_test#tests::parses_celsius_and_fahrenheit",
+      "target": "//:setpoint_test",
+      "path": "tests::parses_celsius_and_fahrenheit",
+      "owner": "REQ-3",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-3"
+      ]
+    },
+    {
+      "case": "//:setpoint_test#tests::rejects_out_of_range",
+      "target": "//:setpoint_test",
+      "path": "tests::rejects_out_of_range",
+      "owner": "REQ-4",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-4"
+      ]
+    },
+    {
+      "case": "//:setpoint_test#tests::requires_a_unit",
+      "target": "//:setpoint_test",
+      "path": "tests::requires_a_unit",
+      "owner": "REQ-3",
+      "via": "model",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-3"
+      ]
+    },
+    {
+      "case": "record:panel_inspection#inspection.TM-2::panel-shows-setpoint-unit",
+      "target": "record:panel_inspection",
+      "path": "inspection.TM-2::panel-shows-setpoint-unit",
+      "owner": "REQ-7",
+      "via": "model",
+      "status": "passed",
+      "level": "inspection",
+      "declared": [
+        "REQ-7"
+      ]
+    }
+  ],
   "levels": [
     {
       "name": "analysis",
@@ -54,6 +362,24 @@
       "title": "Keep the room at a comfortable temperature",
       "status": "VALIDATED",
       "description": "Once a target temperature is set, the room should settle near it without the heater cycling rapidly.",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-1",
+        "REQ-2"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "requirements": [
         "REQ-1",
         "REQ-2"
@@ -64,6 +390,25 @@
       "title": "Set the target temperature in Celsius or Fahrenheit",
       "status": "VALIDATED",
       "description": "Occupants enter a target like \"21.5C\" or \"70F\" on the wall panel and can read back what they set.",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-3",
+        "REQ-4",
+        "REQ-7"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "requirements": [
         "REQ-3",
         "REQ-4",
@@ -77,6 +422,30 @@
       "title": "Heat when the room is below the setpoint band",
       "status": "VERIFIED",
       "description": "The heater shall turn on when the measured temperature is below setpoint - 0.5 \u00b0C.",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:controller_test#tests.test_controller::test_heats_below_band",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_heats_below_band",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.test_controller::test_heats_below_band",
@@ -125,6 +494,30 @@
       "title": "Stop heating above the band; hold state inside it",
       "status": "VERIFIED",
       "description": "The heater shall turn off when the measured temperature is above setpoint + 0.5 \u00b0C, and keep its previous state inside the band (hysteresis), so it does not cycle rapidly.",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:controller_test#tests.test_controller::test_stops_above_band_and_holds_inside_it",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.test_controller::test_stops_above_band_and_holds_inside_it",
@@ -173,6 +566,39 @@
       "title": "Parse setpoints in \u00b0C and \u00b0F",
       "status": "VERIFIED",
       "description": "The panel shall accept \"<number>C\" and \"<number>F\" (case-insensitive, optional whitespace) and convert to \u00b0C.",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 2,
+        "passed": 2,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:setpoint_test#tests::parses_celsius_and_fahrenheit",
+          "target": "//:setpoint_test",
+          "selector": "tests::parses_celsius_and_fahrenheit",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:setpoint_test#tests::requires_a_unit",
+          "target": "//:setpoint_test",
+          "selector": "tests::requires_a_unit",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests::parses_celsius_and_fahrenheit",
@@ -224,8 +650,7 @@
         },
         {
           "ids": [
-            "REQ-3",
-            "REQ-4"
+            "REQ-3"
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
@@ -240,6 +665,75 @@
       "status": "VERIFIED",
       "description": "The panel shall reject any setpoint that converts to below 5 \u00b0C or above 30 \u00b0C.",
       "category": "safety",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 6,
+        "passed": 6,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:controller_test#tests.test_controller::test_accepts_range_limits",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_accepts_range_limits",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[4.9]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[30.1]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[80.0]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_rejects_setpoints_outside_range[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:setpoint_test#tests::checks_the_range_after_converting",
+          "target": "//:setpoint_test",
+          "selector": "tests::checks_the_range_after_converting",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:setpoint_test#tests::rejects_out_of_range",
+          "target": "//:setpoint_test",
+          "selector": "tests::rejects_out_of_range",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.test_controller::test_accepts_range_limits",
@@ -266,13 +760,13 @@
           "target": "//:controller_test"
         },
         {
-          "name": "tests::rejects_out_of_range",
+          "name": "tests::checks_the_range_after_converting",
           "status": "passed",
           "level": "simulation",
           "target": "//:setpoint_test"
         },
         {
-          "name": "tests::requires_a_unit",
+          "name": "tests::rejects_out_of_range",
           "status": "passed",
           "level": "simulation",
           "target": "//:setpoint_test"
@@ -317,13 +811,12 @@
       "verified_in": [
         {
           "ids": [
-            "REQ-3",
             "REQ-4"
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
-          "line": 54,
-          "symbol": "fn requires_a_unit"
+          "line": 62,
+          "symbol": "fn rejects_out_of_range"
         },
         {
           "ids": [
@@ -331,8 +824,8 @@
           ],
           "relation": "verifies",
           "path": "setpoint/src/lib.rs",
-          "line": 62,
-          "symbol": "fn rejects_out_of_range"
+          "line": 72,
+          "symbol": "fn checks_the_range_after_converting"
         },
         {
           "ids": [
@@ -360,6 +853,48 @@
       "status": "VERIFIED",
       "description": "The interlock shall force the heater off at or above 35 \u00b0C regardless of the controller, and keep it off until the temperature falls below 30 \u00b0C.",
       "category": "safety",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 3,
+        "passed": 3,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:interlock_test#Interlock::NanReadingTrips",
+          "target": "//:interlock_test",
+          "selector": "Interlock::*",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "sil"
+        },
+        {
+          "case": "//:interlock_test#Interlock::StaysTrippedUntilBelowReset",
+          "target": "//:interlock_test",
+          "selector": "Interlock::*",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "sil"
+        },
+        {
+          "case": "//:interlock_test#Interlock::TripsAtLimit",
+          "target": "//:interlock_test",
+          "selector": "Interlock::*",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "sil"
+        }
+      ],
       "evidence": [
         {
           "name": "Interlock::NanReadingTrips",
@@ -439,6 +974,48 @@
       "status": "VERIFIED",
       "description": "The controller shall turn the heater off when the reading is not a number or outside the sensor's -40..85 \u00b0C range.",
       "category": "safety",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 3,
+        "passed": 3,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[85.1]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[nan]",
+          "target": "//:controller_test",
+          "selector": "tests.test_controller::test_invalid_reading_turns_heater_off[*]",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.test_controller::test_invalid_reading_turns_heater_off[-41.0]",
@@ -498,17 +1075,51 @@
       "title": "Show the setpoint with its unit",
       "status": "VERIFIED",
       "description": "The panel shall display the active setpoint with its unit, e.g. \"21.5 \u00b0C\".",
-      "evidence": [
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 2,
+        "passed": 2,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
         {
-          "name": "inspection.TM-2::panel-shows-setpoint-unit",
-          "status": "passed",
-          "level": "inspection"
+          "case": "//:display_test#display_test.DisplayTest::test_setpoint_shows_unit",
+          "target": "//:display_test",
+          "selector": "display_test.DisplayTest::test_setpoint_shows_unit",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
         },
+        {
+          "case": "record:panel_inspection#inspection.TM-2::panel-shows-setpoint-unit",
+          "target": "record:panel_inspection",
+          "selector": "inspection.TM-2::panel-shows-setpoint-unit",
+          "via": "model",
+          "state": "passed",
+          "owned": true,
+          "level": "inspection"
+        }
+      ],
+      "evidence": [
         {
           "name": "display_test.DisplayTest::test_setpoint_shows_unit",
           "status": "passed",
           "level": "simulation",
           "target": "//:display_test"
+        },
+        {
+          "name": "inspection.TM-2::panel-shows-setpoint-unit",
+          "status": "passed",
+          "level": "inspection",
+          "target": "record:panel_inspection"
         }
       ],
       "demanded_level": "inspection",
@@ -553,6 +1164,24 @@
       "title": "Independent over-temperature protection",
       "status": "VERIFIED",
       "description": "A hardware-near interlock and a sensor plausibility check, each able to de-energise the heater on its own.",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-5",
+        "REQ-6"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "type": "protective",
       "mitigates": [
         "RISK-1"
@@ -569,6 +1198,24 @@
       "title": "Validate setpoints at entry",
       "status": "VERIFIED",
       "description": "Require an explicit unit and a bounded range for every setpoint.",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-3",
+        "REQ-4"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "type": "inherent",
       "mitigates": [
         "RISK-2"
@@ -586,6 +1233,10 @@
       "id": "RISK-1",
       "title": "Room overheats",
       "status": "MITIGATED",
+      "basis": "derived",
+      "derived_from": [
+        "MIT-1"
+      ],
       "hazard": "Heater energised continuously",
       "hazardous_situation": "A control fault or a sensor reading stuck low keeps the heater on while the room is occupied.",
       "harm": "Heat stress; burns from surfaces near the heater",
@@ -604,6 +1255,10 @@
       "id": "RISK-2",
       "title": "Implausible setpoint accepted",
       "status": "MITIGATED",
+      "basis": "derived",
+      "derived_from": [
+        "MIT-2"
+      ],
       "hazard": "Setpoint far above comfort range",
       "hazardous_situation": "\"80\" meant as \u00b0F is taken as \u00b0C, or a typo like \"250C\", and the controller drives the room towards it.",
       "harm": "Heat stress",
@@ -623,6 +1278,10 @@
       "id": "TM-1",
       "title": "Interlock software-in-the-loop test",
       "status": "VERIFIED",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-5"
+      ],
       "level": "sil",
       "used_by": [
         "REQ-5"
@@ -632,6 +1291,10 @@
       "id": "TM-2",
       "title": "Visual inspection of the panel",
       "status": "VERIFIED",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-7"
+      ],
       "level": "inspection",
       "used_by": [
         "REQ-7"

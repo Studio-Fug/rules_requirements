@@ -121,10 +121,15 @@ def _generate() -> None:
     nodes, edges = graph.build(model, statuses)
     _write(os.path.join(out, "thermostat-graph.svg"), graph.to_svg(nodes, edges, link_prefix="#"))
 
-    # Serve the schemas (model, attribution worksheet) at their $id.
+    # Serve the schemas (model, verification lock, attribution worksheet, report) at their $id.
     schema_dir = os.path.join(out, "extra", "schema")
     os.makedirs(schema_dir, exist_ok=True)
-    for name in ("rules_requirements.schema.json", "worksheet.schema.json"):
+    for name in (
+        "rules_requirements.schema.json",
+        "verification_lock.schema.json",
+        "worksheet.schema.json",
+        "report.v2.schema.json",
+    ):
         shutil.copy(os.path.join(ROOT, "schema", name), schema_dir)
 
 

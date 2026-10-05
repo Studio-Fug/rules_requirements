@@ -4,18 +4,30 @@
 Exported as Graphviz DOT, Mermaid, JSON, or a self-contained SVG with a
 layered layout (needs -> requirements -> mitigations -> risks) whose node order
 is refined by the barycenter heuristic to keep edge crossings down.
+
+With :func:`cases` (``rr graph --cases``) every owned test case is a node too,
+with exactly one in-edge (``verifies``): from the one entity
+:func:`~rules_requirements.attribution.attribute` gave it to. A test case
+verifies at most one requirement, so no case node can have two.
 """
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
+import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import TYPE_CHECKING, Collection, Mapping
 
 from rules_requirements import config as cfg
 from rules_requirements.model import Model
 from rules_requirements.util import natural_key
+
+if TYPE_CHECKING:
+    from rules_requirements.attribution import Attribution
+
+CASE = "case"  # the kind of a test case node
 
 
 @dataclass(frozen=True)
@@ -33,7 +45,7 @@ class Edge:
     relation: str
 
 
-# Column of each kind in the layered drawing.
+# Column of each kind in the layered drawing (test cases, when shown, get one more).
 COLUMNS = (cfg.USER_NEED, cfg.REQUIREMENT, cfg.MITIGATION, cfg.RISK)
 
 STATUS_COLORS = {
@@ -42,10 +54,17 @@ STATUS_COLORS = {
     "MITIGATED": "#2e9d57",
     "UNDER-VERIFIED": "#e08a1e",
     "PARTIAL": "#c9a400",
+    "INCOMPLETE": "#c9a400",
     "FAILED": "#d64545",
+    "INVALID": "#d64545",
     "UNVERIFIED": "#8a8f98",
     "UNVALIDATED": "#8a8f98",
     "OPEN": "#8a8f98",
+    # test case results
+    "passed": "#2e9d57",
+    "failed": "#d64545",
+    "error": "#d64545",
+    "skipped": "#8a8f98",
 }
 
 
@@ -77,6 +96,25 @@ def build(
     return nodes, edges
 
 
+def cases(attribution: Attribution, entities: Collection[str] = ()) -> tuple[list[Node], list[Edge]]:
+    """A node per owned test case (status: its result) and its one in-edge,
+    ``<owner> verifies <case>``, read from the attribution alone. With
+    ``entities``, only the cases of those entities (the ones drawn)."""
+    nodes: list[Node] = []
+    edges: list[Edge] = []
+    for key, owner in attribution.owner.items():
+        if entities and owner not in entities:
+            continue
+        nodes.append(Node(str(key), CASE, key.path, attribution.cases[key].status))
+        edges.append(Edge(owner, str(key), "verifies"))
+    order = sorted(range(len(nodes)), key=lambda i: (natural_key(edges[i].source), natural_key(nodes[i].id)))
+    return [nodes[i] for i in order], [edges[i] for i in order]
+
+
+def _columns(nodes: list[Node]) -> tuple[str, ...]:
+    return COLUMNS + ((CASE,) if any(n.kind == CASE for n in nodes) else ())
+
+
 def to_json(nodes: list[Node], edges: list[Edge]) -> str:
     return json.dumps(
         {
@@ -98,6 +136,7 @@ def to_dot(nodes: list[Node], edges: list[Edge]) -> str:
         cfg.MITIGATION: "hexagon",
         cfg.RISK: "diamond",
         cfg.TEST_METHOD: "note",
+        CASE: "plaintext",
     }
     out = ["digraph trace {", "  rankdir=LR;", "  node [fontname=Helvetica, fontsize=10];"]
     for n in nodes:
@@ -113,7 +152,10 @@ def to_dot(nodes: list[Node], edges: list[Edge]) -> str:
 
 def to_mermaid(nodes: list[Node], edges: list[Edge]) -> str:
     def mid(i: str) -> str:
-        return i.replace("-", "_")
+        if re.fullmatch(r"[A-Za-z0-9_.-]+", i):
+            return i.replace("-", "_")
+        # a test case key (//pkg:t#suite::name): not a Mermaid id
+        return "case_" + hashlib.sha1(i.encode("utf-8")).hexdigest()[:12]  # noqa: S324 — an id, not security
 
     brackets = {
         cfg.USER_NEED: ("([", "])"),
@@ -121,12 +163,14 @@ def to_mermaid(nodes: list[Node], edges: list[Edge]) -> str:
         cfg.MITIGATION: ("{{", "}}"),
         cfg.RISK: ("{", "}"),
         cfg.TEST_METHOD: ("[/", "/]"),
+        CASE: (">", "]"),
     }
     out = ["flowchart LR"]
     for n in nodes:
         a, b = brackets[n.kind]
         title = n.title.replace('"', "'")[:40]
-        out.append(f'  {mid(n.id)}{a}"{n.id}: {title}"{b}')
+        label = title if n.kind == CASE else f"{n.id}: {title}"
+        out.append(f'  {mid(n.id)}{a}"{label}"{b}')
     for e in edges:
         arrow = "-.->" if e.relation in ("refines", "method") else "-->"
         out.append(f"  {mid(e.source)} {arrow}|{e.relation}| {mid(e.target)}")
@@ -142,7 +186,8 @@ NODE_W, NODE_H, COL_GAP, ROW_GAP, PAD = 190, 38, 90, 12, 16
 
 def layout(nodes: list[Node], edges: list[Edge], sweeps: int = 4) -> dict[str, tuple[float, float]]:
     """Top-left (x, y) per node id: one column per kind, barycenter ordering."""
-    cols: dict[str, list[str]] = {k: [] for k in COLUMNS}
+    columns = _columns(nodes)
+    cols: dict[str, list[str]] = {k: [] for k in columns}
     for n in nodes:
         if n.kind in cols:
             cols[n.kind].append(n.id)
@@ -159,7 +204,7 @@ def layout(nodes: list[Node], edges: list[Edge], sweeps: int = 4) -> dict[str, t
 
         return sorted(col, key=bary)
 
-    order = [cols[k] for k in COLUMNS]
+    order = [cols[k] for k in columns]
     for sweep in range(sweeps):
         rng = range(1, len(order)) if sweep % 2 == 0 else range(len(order) - 2, -1, -1)
         for ci in rng:
@@ -180,7 +225,8 @@ def to_svg(nodes: list[Node], edges: list[Edge], link_prefix: str = "#") -> str:
     shown = [n for n in nodes if n.id in pos]
     if not shown:
         return '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>'
-    width = PAD * 2 + len(COLUMNS) * NODE_W + (len(COLUMNS) - 1) * COL_GAP
+    columns = _columns(nodes)
+    width = PAD * 2 + len(columns) * NODE_W + (len(columns) - 1) * COL_GAP
     height = int(max(y for _, y in pos.values()) + NODE_H + PAD)
     esc = html.escape
     parts = [
@@ -194,8 +240,9 @@ def to_svg(nodes: list[Node], edges: list[Edge], link_prefix: str = "#") -> str:
         cfg.REQUIREMENT: "Requirements",
         cfg.MITIGATION: "Mitigations",
         cfg.RISK: "Risks",
+        CASE: "Test cases",
     }
-    for ci, kind in enumerate(COLUMNS):
+    for ci, kind in enumerate(columns):
         hx = PAD + ci * (NODE_W + COL_GAP)
         parts.append(f'<text x="{hx}" y="{PAD + 10}" font-weight="600" fill="currentColor">{headings[kind]}</text>')
     for e in edges:
@@ -222,6 +269,17 @@ def to_svg(nodes: list[Node], edges: list[Edge], link_prefix: str = "#") -> str:
         x, y = pos[n.id]
         color = STATUS_COLORS.get(n.status, "#8a8f98")
         title = n.title if len(n.title) <= 26 else n.title[:25] + "…"
+        if n.kind == CASE:  # a test case: its path and target, no entity page to link to
+            target = n.id[: -len(n.title) - 1] if n.id.endswith("#" + n.title) else n.id
+            short = target if len(target) <= 28 else "…" + target[-27:]
+            parts.append(
+                f'<g class="rr-node rr-case" data-id="{esc(n.id)}">'
+                f"<title>{esc(n.id)} ({esc(n.status or 'no result')})</title>"
+                f'<rect x="{x}" y="{y}" width="{NODE_W}" height="{NODE_H}" rx="3" fill="{color}" fill-opacity="0.08" stroke="{color}" stroke-width="1" stroke-dasharray="3 2"/>'
+                f'<text x="{x + 8}" y="{y + 15}" fill="currentColor">{esc(title)}</text>'
+                f'<text x="{x + 8}" y="{y + 30}" fill="currentColor" fill-opacity="0.6" font-size="10">{esc(short)}</text></g>'
+            )
+            continue
         parts.append(
             f'<a href="{esc(link_prefix)}{esc(n.id)}"><g class="rr-node" data-id="{esc(n.id)}">'
             f"<title>{esc(n.id)}: {esc(n.title)} ({esc(n.status or 'no status')})</title>"

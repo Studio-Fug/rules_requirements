@@ -43,7 +43,7 @@ def main() -> int:
     check(set(cases) == {"bench.boot::banner", "bench.run::completed"}, f"cases {sorted(cases)}")
     banner, completed = cases["bench.boot::banner"], cases["bench.run::completed"]
     check(banner.status == completed.status == "passed", "a case did not pass")
-    check(banner.requirements == ("REQ-1",) and completed.requirements == (), "requirements")
+    check(banner.declared == ("REQ-1",) and completed.declared == (), "declared")
     check(banner.level == completed.level == "simulation", f"level {banner.level!r}")
     for case in (banner, completed):
         got = case.properties.get("rr.file")

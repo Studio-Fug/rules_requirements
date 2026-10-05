@@ -56,7 +56,7 @@ def test_run_tests(tmp_path, monkeypatch, capsys):
         "@ext+//x:silent_pass": "passed",
         "//pkg:hang": "failed",
     }
-    assert ev.for_id("REQ-1")[0].target == "//pkg:writes"
+    assert next(c for c in ev.cases if "REQ-1" in c.declared).target == "//pkg:writes"
     assert "TIMEOUT" in (out / "pkg" / "hang" / "test.log").read_text()
     assert "FAILED (exit 3)" in capsys.readouterr().err
 
@@ -179,7 +179,10 @@ def test_nonzero_exit_with_all_pass_report_is_an_error(tmp_path, monkeypatch):
     ev = ingest.collect([str(out)])
     assert ev.target_status == {"//pkg:leaky": "error", "//pkg:envcheck": "passed"}
     (exit_case,) = [c for c in ev.cases if c.name == "exit-status"]
-    assert "exited with 23" in exit_case.message and exit_case.requirements == ("REQ-2",)
+    # P9: the exit taint declares no requirement (not the union of the ids the
+    # report traced); it is target-scope and taints the target's cases.
+    assert "exited with 23" in exit_case.message and exit_case.requirements == ()
+    assert exit_case.properties.get("rr.scope") == "target"
 
 
 def test_no_junit_result_is_the_targets_single_case(tmp_path, monkeypatch):
@@ -224,5 +227,6 @@ def test_exit_status_case_is_target_scope(tmp_path, monkeypatch):
     bazel.main(["run-tests", "--out", str(out), "--test", "//pkg:leaky=bin/leaky=_main"])
     rows = {k.path: r for k, r in index_cases(ingest.collect([str(out)])).items()}
     assert rows["//pkg:leaky::exit-status"].target_scope
-    assert rows["//pkg:leaky::exit-status"].declared == ("REQ-2",)  # 0.2 verdicts unchanged
+    assert rows["//pkg:leaky::exit-status"].declared == ()  # no ids: target-scope taint (P9)
+    assert rows["ok"].declared == ("REQ-2",)
     assert not rows["ok"].target_scope

@@ -24,7 +24,9 @@ const STATUS_CLASS = {
   MITIGATED: "ok",
   "UNDER-VERIFIED": "amber",
   PARTIAL: "warn",
+  INCOMPLETE: "warn",
   FAILED: "fail",
+  INVALID: "fail",
   STALE: "stale",
   UNVERIFIED: "none",
   UNVALIDATED: "none",
@@ -37,9 +39,9 @@ export function statusClass(status) {
 
 // The statuses each kind can take, best first (for distribution bars).
 export const STATUS_ORDER = {
-  user_need: ["VALIDATED", "PARTIAL", "FAILED", "UNVALIDATED"],
-  requirement: ["VERIFIED", "UNDER-VERIFIED", "PARTIAL", "FAILED", "UNVERIFIED"],
-  mitigation: ["VERIFIED", "PARTIAL", "FAILED", "UNVERIFIED"],
+  user_need: ["VALIDATED", "PARTIAL", "INCOMPLETE", "FAILED", "INVALID", "UNVALIDATED"],
+  requirement: ["VERIFIED", "UNDER-VERIFIED", "PARTIAL", "INCOMPLETE", "FAILED", "INVALID", "UNVERIFIED"],
+  mitigation: ["VERIFIED", "UNDER-VERIFIED", "PARTIAL", "INCOMPLETE", "FAILED", "INVALID", "UNVERIFIED"],
   risk: ["MITIGATED", "PARTIAL", "FAILED", "OPEN"],
   test_method: ["VERIFIED", "PARTIAL", "FAILED", "UNVERIFIED"],
 };

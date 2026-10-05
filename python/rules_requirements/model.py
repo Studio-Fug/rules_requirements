@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Iterable, Iterator, Mapping
 
+from rules_requirements import case_selectors, labels
 from rules_requirements import config as cfg
 from rules_requirements._vendor import yaml
 from rules_requirements.config import Config
@@ -72,12 +74,98 @@ NOTE_STATUSES = ("open", "resolved")
 
 @dataclass(frozen=True)
 class VerifiedBy:
-    """A whole-target verification artifact (e.g. a Bazel test label) and the
-    rigor level it provides. Authored as a bare string or ``{target, level}``."""
+    """One item of ``verified_by`` (requirements, mitigations) or
+    ``validated_by`` (user needs): the cases of one target an entity claims.
 
-    target: str
-    level: str = ""  # "" -> config.default_provided_level
+    Authored as ``{target, cases: [selector, ...]}`` (selectors:
+    :mod:`~rules_requirements.case_selectors`) or ``{target, whole: true,
+    reason}`` for a target that reports no per-case results. The legacy forms
+    — a bare label, ``{target}`` or ``{target, level}`` — read as a whole
+    claim with ``legacy`` set (rule ``bare-target-reference``).
+
+    A claim only *claims*: which entity owns a case is decided by attribution
+    alone, and claims of two entities that can select one case are a
+    ``shared-case`` error.
+    """
+
+    target: str  # normalized (labels.normalize_label); as written if it is not a label
+    cases: tuple[str, ...] = ()  # selectors; () iff whole (unless ``problem``)
+    whole: bool = False
+    level: str = ""  # "" -> config.default_provided_level; applies to cases declaring none
+    reason: str = ""  # why a whole-target claim cannot be per-case
+    legacy: bool = False  # authored as a bare label, {target} or {target, level}
     extra: tuple[tuple[str, Any], ...] = ()  # unknown keys, kept for round-trips
+    # The target as written, kept so that rewriting an item never respells it.
+    spelling: str = ""
+    # A shape problem (``bad-selector``): both or neither of cases/whole, a
+    # non-list ``cases``, ``whole`` not true. Such an item claims the whole
+    # target, so it can only add conflicts, never hide one.
+    problem: str = ""
+    location: Location = field(default_factory=Location, compare=False)
+    # The item exactly as authored (plain data), kept when ``problem`` is set:
+    # the fields above cannot hold what was wrong with it, and an editor that
+    # rewrites the entity must neither lose nor "repair" it.
+    authored: Any = field(default=None, compare=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if isinstance(self.cases, str):
+            # VerifiedBy("//p:hw", "hil") is the 0.2 field order (target, level):
+            # it would claim the selectors "h", "i" and "l" without a word.
+            raise TypeError(
+                f"VerifiedBy({self.target!r}, {self.cases!r}): cases is a tuple of selectors, not a string; "
+                "pass the fields after target by keyword (level=..., cases=(...,))"
+            )
+
+    @property
+    def label(self) -> str:
+        """The target as written."""
+        return self.spelling or self.target
+
+    @property
+    def selectors(self) -> tuple[str | None, ...]:
+        """The item's selectors; ``(None,)`` for a whole-target claim."""
+        if self.whole or self.problem or not self.cases:
+            return (None,)
+        return self.cases
+
+
+@dataclass(frozen=True)
+class Claim:
+    """One selector of one entity: the unit the ``shared-case`` check and
+    attribution work on. ``pattern`` is ``None`` for a whole-target claim."""
+
+    entity: str
+    kind: str
+    target: str  # normalized
+    pattern: str | None
+    literal: bool  # a selector without an unescaped '*' (False for whole and bad selectors)
+    level: str
+    index: int  # the item's position in the entity's verified_by / validated_by
+    location: Location = field(default_factory=Location, compare=False)
+    legacy: bool = False
+    relation: str = "verified_by"
+
+    @property
+    def whole(self) -> bool:
+        return self.pattern is None
+
+    def describe(self) -> str:
+        """The selector as a message shows it."""
+        if self.pattern is None:
+            return "the legacy whole-target reference" if self.legacy else "the whole target"
+        return repr(self.pattern)
+
+    def matches(self, path: str) -> bool:
+        """Whether this claim selects case ``path`` of its target (a whole
+        claim selects every path; a selector never selects ``[target]``)."""
+        if self.pattern is None:
+            return True
+        if path == case_selectors.SYNTHETIC_PATH:
+            return False
+        try:
+            return case_selectors.matches(self.pattern, path)
+        except case_selectors.BadSelector:
+            return False
 
 
 @dataclass(frozen=True)
@@ -101,6 +189,9 @@ class Entity:
 @dataclass(frozen=True)
 class UserNeed(Entity):
     rationale: str = ""
+    # Validation evidence (usability studies, acceptance runs): the same claim
+    # namespace as requirements' verified_by.
+    validated_by: tuple[VerifiedBy, ...] = ()
     kind = cfg.USER_NEED
 
 
@@ -154,6 +245,9 @@ class Mitigation(Entity):
     type: str = ""
     mitigates: tuple[str, ...] = ()  # RISK ids
     implemented_by: tuple[str, ...] = ()  # REQ ids
+    # Effectiveness evidence of the control (ISO 14971 §7.2), in the same
+    # claim namespace as requirements' verified_by.
+    verified_by: tuple[VerifiedBy, ...] = ()
     kind = cfg.MITIGATION
 
     def references(self) -> Iterator[tuple[str, str]]:
@@ -183,7 +277,7 @@ ENTITY_CLASSES: dict[str, type[Entity]] = {
 # trace otherwise.
 _COMMON_FIELDS = ("id", "title", "description", "status", "owner", "tags", "notes")
 FIELDS = {
-    cfg.USER_NEED: _COMMON_FIELDS + ("rationale",),
+    cfg.USER_NEED: _COMMON_FIELDS + ("rationale", "validated_by"),
     cfg.REQUIREMENT: _COMMON_FIELDS
     + ("rationale", "category", "satisfies", "refines", "method", "verified_by", "modules"),
     cfg.RISK: _COMMON_FIELDS
@@ -198,9 +292,25 @@ FIELDS = {
         "residual",
         "mitigated_by",
     ),
-    cfg.MITIGATION: _COMMON_FIELDS + ("type", "mitigates", "implemented_by"),
+    cfg.MITIGATION: _COMMON_FIELDS + ("type", "mitigates", "implemented_by", "verified_by"),
     cfg.TEST_METHOD: _COMMON_FIELDS + ("level", "procedure"),
 }
+
+# The field holding each verifiable kind's claims. Risks and test methods
+# hold none (the keys are unknown fields there).
+CLAIM_FIELDS = {
+    cfg.USER_NEED: "validated_by",
+    cfg.REQUIREMENT: "verified_by",
+    cfg.MITIGATION: "verified_by",
+}
+VERIFIABLE_KINDS = tuple(CLAIM_FIELDS)
+
+
+def claim_items(ent: Entity) -> tuple[VerifiedBy, ...]:
+    """The ``verified_by`` / ``validated_by`` items of ``ent`` (() for kinds
+    that cannot claim cases)."""
+    name = CLAIM_FIELDS.get(ent.kind)
+    return getattr(ent, name) if name else ()  # type: ignore[no-any-return]
 
 
 @dataclass(frozen=True)
@@ -216,6 +326,11 @@ class Model:
     parse_errors: tuple[str, ...] = ()
     # Unknown keys, reported by validation under the ``unknown-field`` rule.
     unknown_fields: tuple[str, ...] = ()
+    # The file holding the ``config:`` section ("" if none), as locations show
+    # it (relative to ``root`` when the model was read with one): the
+    # ``sets_lock`` path is relative to it.
+    config_file: str = field(default="", compare=False)
+    root: str = field(default="", compare=False)
 
     # --- lookup ---------------------------------------------------------------
 
@@ -274,6 +389,59 @@ class Model:
             return tm.level or self.config.default_level
         return method.lower()
 
+    def is_verifiable(self, entity_id: str) -> bool:
+        """Whether ``entity_id`` is a user need, requirement or mitigation —
+        an entity that can own test cases."""
+        ent = self.get(entity_id)
+        return ent is not None and ent.kind in CLAIM_FIELDS
+
+    def claims(self) -> list[Claim]:
+        """Every claim of every entity, in a stable order: user needs,
+        requirements, mitigations (by id), then item and selector order."""
+        out: list[Claim] = []
+        for kind in VERIFIABLE_KINDS:
+            relation = CLAIM_FIELDS[kind]
+            for ent in _sorted(self.section(kind).values()):
+                for index, vb in enumerate(claim_items(ent)):
+                    for pattern in vb.selectors:
+                        literal = False
+                        if pattern is not None:
+                            try:
+                                literal = case_selectors.is_literal(pattern)
+                            except case_selectors.BadSelector:
+                                literal = False
+                        out.append(
+                            Claim(
+                                entity=ent.id,
+                                kind=kind,
+                                target=vb.target,
+                                pattern=pattern,
+                                literal=literal,
+                                level=vb.level,
+                                index=index,
+                                location=vb.location if vb.location.path else ent.location,
+                                legacy=vb.legacy,
+                                relation=relation,
+                            )
+                        )
+        return out
+
+    def lock_path(self, shown: bool = False) -> str:
+        """Where ``config.sets_lock`` points ("" without one): a path to open,
+        or with ``shown`` the path as locations show it."""
+        lock = self.config.sets_lock
+        if not lock:
+            return ""
+        if not os.path.isabs(lock):
+            lock = os.path.normpath(os.path.join(os.path.dirname(self.config_file), lock))
+        elif shown and self.root and lock.startswith(self.root.rstrip(os.sep) + os.sep):
+            # An absolute lock below the root (`--sets-lock` makes it absolute)
+            # shows relative to it, as model locations do: stable across machines.
+            return os.path.relpath(lock, self.root)
+        if shown or os.path.isabs(lock):
+            return lock
+        return os.path.join(self.root, lock)
+
     def modules(self) -> list[str]:
         mods: set[str] = set()
         for req in self.requirements.values():
@@ -281,7 +449,15 @@ class Model:
         return sorted(mods)
 
     def with_entity(self, entity: Entity) -> Model:
-        """A copy of the model with ``entity`` added or replaced."""
+        """A copy of the model with ``entity`` added or replaced (in its own
+        section). Raises ValueError when its id names an entity of another
+        kind: one id names exactly one entity."""
+        other = self.get(entity.id)
+        if other is not None and other.kind != entity.kind:
+            raise ValueError(
+                f"{entity.id} is already a {other.kind.replace('_', ' ')}; it cannot also be a "
+                f"{entity.kind.replace('_', ' ')} (remove it first: without_entity)"
+            )
         section = dict(self.section(entity.kind))
         section[entity.id] = entity
         return replace(self, **{cfg.SECTIONS[entity.kind]: section})  # type: ignore[arg-type]
@@ -304,9 +480,11 @@ def _sorted(items: Iterable[Any]) -> list[Any]:
 
 
 class _LineDict(dict):  # type: ignore[type-arg]
-    """A mapping that remembers the 1-based line it started on."""
+    """A mapping that remembers the 1-based line it started on, and the line
+    of each key written in it (``key_lines``; merged-in keys are absent)."""
 
     line = 0
+    key_lines: Mapping[Any, int] = MappingProxyType({})
 
 
 class _LineLoader(yaml.SafeLoader):  # type: ignore[misc]
@@ -357,8 +535,10 @@ def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict
         key = loader.construct_object(knode, deep=True)
         try:
             first = seen.get(key)
-        except TypeError:  # unhashable key: not a model field anyway
-            continue
+        except TypeError:  # a complex key (`? [a, b]`) cannot be a dict key
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping", node.start_mark, "found unhashable key", knode.start_mark
+            ) from None
         if first is not None:
             raise yaml.constructor.ConstructorError(
                 "while constructing a mapping", first, f"found duplicate key {key!r}", knode.start_mark
@@ -367,6 +547,7 @@ def _construct_mapping(loader: _LineLoader, node: yaml.MappingNode) -> _LineDict
     loader.flatten_mapping(node)
     out = _LineDict(loader.construct_pairs(node, deep=True))
     out.line = node.start_mark.line + 1
+    out.key_lines = {key: mark.line + 1 for key, mark in seen.items()}
     return out
 
 
@@ -466,25 +647,114 @@ def _parse_notes(raw: Any, where: str, errors: list[str], unknown: list[str] | N
     return tuple(notes)
 
 
+_ITEM_KEYS = ("target", "cases", "whole", "level", "reason")
+
+
 def _parse_verified_by(
-    raw: Any, where: str, errors: list[str], unknown: list[str] | None = None
+    raw: Any,
+    where: str,
+    errors: list[str],
+    unknown: list[str] | None = None,
+    main_repo: str = "",
+    relation: str = "verified_by",
+    location: Location | None = None,
 ) -> tuple[VerifiedBy, ...]:
+    """The items of a ``verified_by`` / ``validated_by`` list.
+
+    Shape problems of one item (``bad-selector``) and labels that do not
+    normalize (``bad-target``) are left to validation, which reports them with
+    their own codes; only an item that names no target at all is a parse
+    error.
+    """
     if raw is None:
         return ()
+    base = location or Location()
     items = raw if isinstance(raw, list) else [raw]
     out = []
     for i, item in enumerate(items):
-        if isinstance(item, str):
-            out.append(VerifiedBy(target=item))
-        elif isinstance(item, Mapping) and item.get("target"):
-            extra = tuple((str(k), v) for k, v in item.items() if k not in ("target", "level"))
+        if isinstance(item, str) and item.strip():
+            out.append(_item(item, main_repo, location=base))
+        elif isinstance(item, Mapping) and isinstance(item.get("target"), str) and item["target"].strip():
+            extra = tuple((str(k), v) for k, v in item.items() if k not in _ITEM_KEYS)
             for key, _ in extra:
                 if unknown is not None:
-                    unknown.append(f"{where}: verified_by[{i}]: unknown field {key!r}")
-            out.append(VerifiedBy(target=str(item["target"]), level=str(item.get("level", "")), extra=extra))
+                    unknown.append(f"{where}: {relation}[{i}]: unknown field {key!r}")
+            loc = Location(base.path, getattr(item, "line", 0) or base.line)
+            out.append(_item(item["target"], main_repo, item=item, extra=extra, location=loc))
         else:
-            errors.append(f"{where}: verified_by items must be a label or {{target, level}}")
+            errors.append(
+                f"{where}: {relation} items must be a label or a mapping with a 'target' "
+                "and either 'cases' (a list of case selectors) or 'whole: true'"
+            )
     return tuple(out)
+
+
+def _item(
+    target: str,
+    main_repo: str,
+    item: Mapping[str, Any] | None = None,
+    extra: tuple[tuple[str, Any], ...] = (),
+    location: Location | None = None,
+) -> VerifiedBy:
+    spelling = target.strip()
+    norm = labels.try_normalize(spelling, main_repo) or spelling
+    if item is None:
+        return VerifiedBy(target=norm, whole=True, legacy=True, spelling=spelling, location=location or Location())
+    level = str(item.get("level", "") or "").strip()
+    reason = str(item.get("reason", "") or "").strip()
+    has_cases, has_whole = "cases" in item, "whole" in item
+    legacy = False
+    cases: tuple[str, ...] = ()
+    whole = False
+    problem = ""
+    if has_whole:
+        whole = item["whole"] is True
+        if not whole:
+            problem = "whole must be true (or leave it out and list cases)"
+    if has_cases:
+        raw_cases = item["cases"]
+        if not isinstance(raw_cases, list) or not all(isinstance(c, str) for c in raw_cases):
+            problem = problem or "cases must be a list of case selectors (strings)"
+        elif not raw_cases:
+            problem = problem or "cases is empty (use ['*'] for every case of the target)"
+        else:
+            cases = tuple(raw_cases)
+        if has_whole:
+            problem = "an item has either cases or whole: true, not both"
+    if not has_cases and not has_whole:
+        if "reason" in item:
+            problem = "a reason belongs to a whole: true claim (add whole: true, or list cases)"
+        else:
+            legacy = True
+    authored: Any = None
+    if problem:  # keep what was written (rewrites stay faithful); it claims the whole target
+        raw_cases = item.get("cases")
+        if isinstance(raw_cases, list) and all(isinstance(c, str) for c in raw_cases):
+            cases = tuple(raw_cases)
+        whole = item.get("whole") is True
+        authored = _plain(item)
+    return VerifiedBy(
+        target=norm,
+        cases=cases,
+        whole=whole or legacy,
+        level=level,
+        reason=reason,
+        legacy=legacy,
+        extra=extra,
+        spelling=spelling,
+        problem=problem,
+        location=location or Location(),
+        authored=authored,
+    )
+
+
+def _plain(value: Any) -> Any:
+    """``value`` as plain dicts and lists (no loader subclasses), deep-copied."""
+    if isinstance(value, Mapping):
+        return {k: _plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    return value
 
 
 def parse_entity(
@@ -494,11 +764,13 @@ def parse_entity(
     errors: list[str],
     unknown: list[str],
     nested: list[str] | None = None,
+    main_repo: str = "",
 ) -> Entity | None:
     """Build one entity from its YAML mapping. Shape errors go to ``errors``,
     unknown keys to ``unknown`` (reported under the ``unknown-field`` rule);
-    unknown keys inside notes and ``verified_by`` items go to ``nested`` if
-    given, else to ``unknown`` (they are kept on the item either way)."""
+    unknown keys inside notes and ``verified_by`` / ``validated_by`` items go
+    to ``nested`` if given, else to ``unknown`` (they are kept on the item
+    either way). Claim targets are normalized with ``main_repo``."""
     nested = unknown if nested is None else nested
     where = f"{location}"
     if not isinstance(raw, Mapping):
@@ -529,8 +801,11 @@ def parse_entity(
     def text(key: str) -> str:
         return str(raw.get(key, "") or "").strip()
 
+    def claims(name: str) -> tuple[VerifiedBy, ...]:
+        return _parse_verified_by(raw.get(name), where, errors, nested, main_repo, name, location)
+
     if kind == cfg.USER_NEED:
-        return UserNeed(**common, rationale=text("rationale"))
+        return UserNeed(**common, rationale=text("rationale"), validated_by=claims("validated_by"))
     if kind == cfg.REQUIREMENT:
         return Requirement(
             **common,
@@ -539,7 +814,7 @@ def parse_entity(
             satisfies=_as_tuple(raw.get("satisfies")),
             refines=_as_tuple(raw.get("refines")),
             method=text("method"),
-            verified_by=_parse_verified_by(raw.get("verified_by"), where, errors, nested),
+            verified_by=claims("verified_by"),
             modules=_as_tuple(raw.get("modules")),
         )
     if kind == cfg.RISK:
@@ -561,6 +836,7 @@ def parse_entity(
             type=text("type").lower(),
             mitigates=_as_tuple(raw.get("mitigates")),
             implemented_by=_as_tuple(raw.get("implemented_by")),
+            verified_by=claims("verified_by"),
         )
     return TestMethod(**common, level=text("level").lower(), procedure=text("procedure"))
 
@@ -582,11 +858,14 @@ def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
     docs = list(docs)
 
     raw_config = None
+    config_file = ""
     project: dict[str, Any] = {}
     for path, doc in docs:
         if isinstance(doc, Mapping) and "config" in doc:
             if raw_config is not None:
                 errors.append(f"{path}: 'config' is defined more than once")
+            else:
+                config_file = path
             raw_config = doc["config"]
         if isinstance(doc, Mapping):
             for key in ("project", "meta"):
@@ -599,7 +878,7 @@ def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
 
     def add(kind: str, raw: Any, path: str) -> None:
         loc = Location(path, getattr(raw, "line", 0))
-        ent = parse_entity(kind, raw, loc, errors, unknown)
+        ent = parse_entity(kind, raw, loc, errors, unknown, main_repo=config.main_repo)
         if ent is None:
             return
         if ent.id in seen:
@@ -645,6 +924,7 @@ def parse_documents(docs: Iterable[tuple[str, Any]]) -> tuple[Model, list[str]]:
         test_methods=sections[cfg.TEST_METHOD],  # type: ignore[arg-type]
         parse_errors=tuple(errors),
         unknown_fields=tuple(unknown),
+        config_file=config_file,
     ), []
 
 
@@ -666,6 +946,8 @@ def read_model(paths: str | Iterable[str], root: str = "") -> tuple[Model, list[
         except (OSError, yaml.YAMLError) as exc:
             load_errors.append(f"{shown}: cannot load: {exc}")
     model, warnings = parse_documents(docs)
+    if root:
+        model = replace(model, root=root)
     if load_errors:
         model = replace(model, parse_errors=tuple(load_errors) + model.parse_errors)
     return model, warnings

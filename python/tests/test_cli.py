@@ -189,8 +189,30 @@ def test_ingest_with_extra_ingestor_spec(capsys, tmp_path, monkeypatch):
     try:
         rc, out, _ = run(capsys, "ingest", f, "--ingestor", "noop_ing:N")
         assert rc == 0 and json.loads(out)["cases"][0]["name"] == "n"
+        # A third-party ingestor still filling the deprecated `requirements`
+        # fills `declared`: tags, which only attribution resolves (P14).
+        assert json.loads(out)["cases"][0]["declared"] == ["REQ-1"]
     finally:
         ingest._REGISTRY.pop("noop", None)
+
+
+def test_ingest_prints_declared_scope_synthetic_attempt_and_file(capsys, tmp_path):
+    write(
+        tmp_path,
+        "bazel-testlogs/pkg/t/test_attempts/attempt_1.xml",
+        '<testsuite name="s"><properties><property name="requirement" value="REQ-9"/></properties>'
+        '<testcase classname="m" name="a" file="pkg/t_test.py" line="4">'
+        '<properties><property name="requirement" value="REQ-1, REQ-2"/></properties></testcase>'
+        '<testcase name="exit-status"><properties><property name="rr.scope" value="target"/></properties>'
+        "<error/></testcase></testsuite>",
+    )
+    rc, out, err = run(capsys, "ingest", str(tmp_path / "bazel-testlogs"))
+    a, exit_status = json.loads(out)["cases"]
+    assert rc == 0
+    assert a["declared"] == a["requirements"] == ["REQ-1", "REQ-2"]
+    assert (a["scope"], a["synthetic"], a["attempt"], a["file"], a["line"]) == ("case", False, 1, "pkg/t_test.py", 4)
+    assert exit_status["scope"] == "target" and exit_status["declared"] == []
+    assert err.count("[suite-level-requirement]") == 1 and "REQ-9" in err
 
 
 def test_fail_on_counts_failures_on_needs_and_mitigations(capsys, model_path, tmp_path):
@@ -303,11 +325,12 @@ def test_cases_lists_keys(capsys, tmp_path):
     loose = junit(tmp_path, "loose/report.xml", [("b", "failed", [], "")])
     rc, out, err = run(capsys, "cases", "--evidence", str(tmp_path / "bazel-testlogs"), loose)
     assert rc == 0
-    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
+    # The [rr:REQ-9] name tag is a declared id too (v0.3): two ids, a multi-tag case.
+    assert out.splitlines() == ["//pkg:t#m::a\tpassed\tREQ-1,REQ-9\t-\t-", "suite:s#suite::b\tfailed\t-\t-\t-"]
     assert "2 case(s) in 2 target(s)" in err and "[unscoped-evidence]" in err and "suite:s" in err
     rc, out, _ = run(capsys, "cases", "--evidence", str(tmp_path), "--target", "//pkg:t", "--json")
     (row,) = json.loads(out)
-    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1"]
+    assert row["case"] == "//pkg:t#m::a" and row["declared"] == ["REQ-1", "REQ-9"]
 
 
 def test_migrate_plan_and_apply(capsys, tmp_path, monkeypatch):
@@ -506,3 +529,125 @@ def test_migrate_apply_ignores_unrelated_python_modules(capsys, tmp_path):
     assert "tools/codec.py" not in out + err
     assert "not a Python test (its evidence names fw/codec_test.cc)" in out + err
     assert "would rewrite app/tests/test_config.py" in out + err
+
+
+def test_report_gates_on_invalid_and_incomplete(capsys, model_path, tmp_path):
+    """0.3: a quarantined case makes the ids it names INVALID, which --fail-on
+    failed counts; an INCOMPLETE set counts as unverified."""
+    logs = tmp_path / "bazel-testlogs"
+    junit(logs, "p/t/test.xml", [("both", "passed", ["REQ-1", "REQ-2"], ""), ("skip", "skipped", ["REQ-3"], "")])
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
+    assert rc == 3 and "INVALID: REQ-1, REQ-2" in err  # a quarantine exits 3 (it wins over --fail-on's 1)
+    assert "ATTRIBUTION ERROR: multi-tag: //p:t#suite::both declares REQ-1, REQ-2;" in err
+    assert "(0 failed, 0 unverified, 0 under-verified, 2 invalid, 1 incomplete)" in err
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed",
+                     "--on-attribution-error", "warn")  # fmt: skip
+    assert rc == 1 and "ATTRIBUTION ERROR: multi-tag" in err  # warn changes the exit status, never a verdict
+    junit(logs, "p/t/test.xml", [("one", "passed", ["REQ-1"], ""), ("skip", "skipped", ["REQ-3"], "")])
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "failed")
+    assert rc == 0 and "ATTRIBUTION ERROR" not in err
+    rc, _, err = run(capsys, "report", "--model", model_path, "--evidence", str(logs), "--fail-on", "unverified")
+    assert rc == 1 and "INCOMPLETE: REQ-3" in err
+
+
+def test_report_surfaces_every_attribution_issue_and_gates_on_errors(capsys, tmp_path):
+    """same-path-multiple-owners, unscoped-evidence, level-mismatch and an
+    ingest issue (suite-level-requirement) are gaps, never silent; one at
+    error severity (rules: or --strict) makes rr report exit 1."""
+    model_text = (
+        "user_needs: [{id: UN-1, title: n}]\n"
+        "requirements:\n"
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //a:t, cases: ['*'], level: hil}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //b:t, cases: ['*']}]}\n"
+    )
+    plain = write(tmp_path, "plain/model.yaml", model_text)
+    gated = write(tmp_path, "gated/model.yaml", "config: {rules: {same-path-multiple-owners: error}}\n" + model_text)
+    logs = tmp_path / "bazel-testlogs"
+    junit(logs, "a/t/test.xml", [("run", "passed", [], "simulation")])
+    junit(logs, "b/t/test.xml", [("run", "passed", [], "")])
+    other = tmp_path / "hitl-artifacts"
+    write(
+        other,
+        "copy.xml",
+        '<testsuite name="copied"><properties><property name="requirement" value="REQ-2"/></properties>'
+        '<testcase classname="suite" name="run"/></testsuite>',
+    )
+    evidence = ["--evidence", str(logs), str(other)]
+    out = tmp_path / "out.json"
+    rc, _, err = run(capsys, "report", "--model", plain, *evidence, "--json", str(out))
+    gaps = {g["kind"]: g for g in json.loads(out.read_text())["gaps"]}
+    assert {"same-path-multiple-owners", "unscoped-evidence", "level-mismatch", "suite-level-requirement"} <= set(gaps)
+    assert gaps["same-path-multiple-owners"]["entity"] == "REQ-1"
+    suite_level = gaps["suite-level-requirement"]
+    assert suite_level["entity"] == "suite:copied" and suite_level["message"].startswith("suite copied (or a parent")
+    assert str(tmp_path) not in out.read_text()  # no machine-specific evidence path in the report
+    assert rc == 0 and "ATTRIBUTION ERROR" not in err
+    assert "attribution: 4 warning(s) (level-mismatch x1, same-path-multiple-owners x1," in err
+    rc, _, err = run(capsys, "report", "--model", gated, *evidence)
+    assert rc == 1 and "ATTRIBUTION ERROR: [same-path-multiple-owners] case path 'suite::run' is owned by" in err
+    rc, _, err = run(capsys, "report", "--model", plain, *evidence, "--strict")
+    assert rc == 1 and "ATTRIBUTION ERROR: [unscoped-evidence] suite:copied:" in err
+
+
+def test_graph_cases_gives_each_owned_case_one_in_edge(capsys, model_path, tmp_path):
+    x = junit(
+        tmp_path,
+        "e.xml",
+        [("g", "passed", ["REQ-1"], ""), ("h", "failed", ["REQ-2"], ""), ("both", "passed", ["REQ-1", "REQ-2"], "")],
+    )
+    rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", "json", "--evidence", x, "--cases")
+    assert rc == 0
+    data = json.loads(out)
+    cases = [n for n in data["nodes"] if n["kind"] == "case"]
+    assert sorted(n["title"].split("::")[-1] for n in cases) == ["g", "h"]  # a multi-tag case is no one's: no node
+    for n in cases:
+        assert [e["source"] for e in data["edges"] if e["target"] == n["id"]] in (["REQ-1"], ["REQ-2"])
+    rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", "mermaid", "--evidence", x, "--cases")
+    assert rc == 0 and "-->|verifies| case_" in out
+    for fmt in ("dot", "svg"):
+        rc, out, _ = run(capsys, "graph", "--model", model_path, "--format", fmt, "--evidence", x, "--cases")
+        assert rc == 0 and ("rr-case" in out if fmt == "svg" else "verifies" in out)
+    rc, _, err = run(capsys, "graph", "--model", model_path, "--cases")
+    assert rc == 2 and "--cases needs --evidence" in err
+
+
+def test_serve_reads_lane_target_files(tmp_path):
+    from rules_requirements.cli import _serve_lanes
+
+    write(tmp_path, "lanes/hitl.txt", "# the rig lane\n//pi/hitl:e2e_test\n\n@//pi/hitl:smoke_test\n")
+    assert _serve_lanes(["hitl=lanes/hitl.txt"], str(tmp_path)) == {
+        "hitl": ["//pi/hitl:e2e_test", "@//pi/hitl:smoke_test"]
+    }
+    assert _serve_lanes(None, str(tmp_path)) == {}
+    with pytest.raises(SystemExit, match="cannot read"):
+        _serve_lanes(["sw=lanes/none.txt"], str(tmp_path))
+
+
+def test_scan_and_report_raise_multi_verifies_annotation(capsys, model_path, tmp_path):
+    """Release review: `rr scan`, `rr check-annotations` and `rr report --scan`
+    raise multi-verifies-annotation (a warning; an error under --strict or when
+    configured), where they used to print 'all references resolve.'"""
+    write(tmp_path, "tests/test_a.py", "# @rr.verifies(REQ-1, REQ-2)\ndef test_foo(): ...\n")
+    write(tmp_path, "tests/a_test.cc", "// @rr(REQ-1, REQ-2)\nTEST(A, B) {}\n")
+    for cmd in ("scan", "check-annotations"):
+        rc, _, err = run(capsys, cmd, "--model", model_path, "--root", str(tmp_path))
+        assert rc == 0 and err.count("warning: [multi-verifies-annotation]") == 2, err
+        assert "tests/test_a.py:1: def test_foo verifies REQ-1, REQ-2" in err
+        rc, _, err = run(capsys, cmd, "--model", model_path, "--root", str(tmp_path), "--strict")
+        assert rc == 1 and "error: [multi-verifies-annotation]" in err
+    off = write(tmp_path, "off/model.yaml", "config: {rules: {multi-verifies-annotation: 'off'}}\n" + MODEL)
+    rc, _, err = run(capsys, "scan", "--model", off, "--root", str(tmp_path))
+    assert rc == 0 and "multi-verifies-annotation" not in err
+    as_error = write(tmp_path, "err/model.yaml", "config: {rules: {multi-verifies-annotation: error}}\n" + MODEL)
+    rc, _, _ = run(capsys, "scan", "--model", as_error, "--root", str(tmp_path))
+    assert rc == 1
+    out = tmp_path / "r.json"
+    args = ("report", "--model", model_path, "--evidence", "--scan", "--root", str(tmp_path), "--json", str(out))
+    rc, _, err = run(capsys, *args)
+    assert rc == 0 and "multi-verifies-annotation x2" in err, err
+    issues = [
+        i for i in json.loads(out.read_text())["attribution"]["issues"] if i["code"] == "multi-verifies-annotation"
+    ]
+    assert len(issues) == 2 and issues[0]["severity"] == "warning"
+    rc, _, err = run(capsys, *args, "--strict")
+    assert rc == 1 and "ATTRIBUTION ERROR: [multi-verifies-annotation]" in err

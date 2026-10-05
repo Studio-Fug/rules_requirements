@@ -1,10 +1,14 @@
 # Manual verification record (TM-2). Records like this are evidence exactly
-# like test results: they name what they verify and at which level.
+# like test results. Each is a test case of the document's `target`, which
+# the model claims (REQ-7: record:panel_inspection); `requirement` names the
+# one requirement it verifies, as a cross-check, and `level` the rigor it
+# provides.
+target: record:panel_inspection
 evidence:
   - name: panel-shows-setpoint-unit
     classname: inspection.TM-2
     status: passed
-    requirements: [REQ-7]
+    requirement: REQ-7
     level: inspection
     properties:
       procedure: TM-2

@@ -12,19 +12,37 @@ evidence = ingest.collect(["bazel-testlogs/**/test.xml"])
 matrix = build_matrix(model, evidence, current_build={"dut_git_sha": "abc123"})
 with open("report.html", "w", encoding="utf-8") as fh:
     fh.write(report.render_html(matrix))
+
+# Who owns each case, and each entity's verification set:
+owner = matrix.attribution.owner  # CaseKey -> one entity id
+for member in matrix.attribution.members_of("REQ-1"):
+    print(member.key, member.state, member.via)
 ```
+
+`build_matrix` always runs {py:func}`rules_requirements.attribution.attribute`,
+the one function that decides which entity a test case verifies; verdicts read
+nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
 
 ## Model
 
 ```{eval-rst}
 .. automodule:: rules_requirements.model
-   :members: Model, UserNeed, Requirement, Risk, Mitigation, TestMethod, Entity, Note, VerifiedBy, Location, load_model, read_model, parse_documents, model_files
+   :members: Model, UserNeed, Requirement, Risk, Mitigation, TestMethod, Entity, Note, VerifiedBy, Claim, Location, load_model, read_model, parse_documents, model_files, claim_items
 
 .. automodule:: rules_requirements.config
    :members: Config, Level, parse_config
 
 .. automodule:: rules_requirements.validate
-   :members: validate, Issue, ValidationError
+   :members: validate, Issue, ValidationError, claim_conflicts, overlapping_claims, ClaimConflict
+
+.. automodule:: rules_requirements.case_selectors
+   :members: matches, witness, overlaps, tokens, check, is_literal, literal_path, escape, BadSelector
+
+.. automodule:: rules_requirements.labels
+   :members: normalize_label, try_normalize, is_pseudo, read_known_targets, BadTarget
+
+.. automodule:: rules_requirements.lock
+   :members: Lock, LockEntry, LockError, LockPlan, parse_lock, load_lock, configured_lock, render_lock, write_lock, plan_lock, is_no_lock
 ```
 
 ## Evidence
@@ -43,33 +61,43 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: RecordsIngestor
 
 .. automodule:: rules_requirements.case_keys
-   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
+   :members: CaseKey, CaseRow, RunDims, SYNTHETIC_PATH, case_path, name_tags, key_of, target_of, normalize_target, pseudo_target, is_synthetic, is_target_scope, is_unscoped, file_of, workspace_relative, run_dims_from_path, index_cases
 ```
 
 ## Migration
 
 ```{eval-rst}
 .. automodule:: rules_requirements.migrate
-   :members: census, worksheet, decisions, model_edits, check_worksheet, load_worksheet, render_yaml, render_json, render_markdown, Plan, Unit, WorksheetError
+   :members: census, worksheet, decisions, model_edits, check_worksheet, load_worksheet, render_yaml, render_json, render_markdown, Plan, Unit, WorksheetError, model_stage, check_model_stage, ModelStage
 
 .. automodule:: rules_requirements.tag_codemod
    :members: apply_tags, rewrite, TestFile, ApplyResult, FileResult, Unsupported
+```
+
+## Attribution
+
+```{eval-rst}
+.. automodule:: rules_requirements.attribution
+   :members: attribute, resolve_cases, Attribution, CaseResult, TargetRun, Member, Quarantine, AttributionIssue, AttributionInvariantError, is_stale
 ```
 
 ## Tracing and reports
 
 ```{eval-rst}
 .. automodule:: rules_requirements.trace
-   :members: build_matrix, Matrix, Verdict, EvidenceRef, Gap, classify, is_stale, route_for, find_gaps
+   :members: build_matrix, Matrix, Verdict, SetVerdict, verdict_from_members, EvidenceRef, Gap, classify, route_for, find_gaps
 
 .. automodule:: rules_requirements.annotations
    :members: Reference, extract, scan, candidate_files, unknown_references, is_test_path
 
 .. automodule:: rules_requirements.report
-   :members: to_dict, render_json, render_markdown, render_html
+   :members: to_dict, render_json, render_markdown, render_html, Lane, out_of_lane_gaps, case_rows, attribution_dict, set_summary
+
+.. automodule:: rules_requirements.checkreport
+   :members: check_report, load_report, summarize, ReportError, AmbiguousReportError
 
 .. automodule:: rules_requirements.graph
-   :members: Node, Edge, build, to_dot, to_mermaid, to_json, to_svg, layout
+   :members: Node, Edge, build, cases, to_dot, to_mermaid, to_json, to_svg, layout
 ```
 
 ## Hooks
@@ -113,7 +141,7 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: EntityChange, diff_models, summarize, render_text
 
 .. automodule:: rules_requirements.server.workspace
-   :members: Workspace, WorkspaceError, entity_payload
+   :members: Workspace, WorkspaceError, Conflict, Check, entity_payload
 
 .. automodule:: rules_requirements.server.app
    :members: Api, serve
@@ -125,5 +153,8 @@ with open("report.html", "w", encoding="utf-8") as fh:
    :members: LLM, ClaudeLLM, LLMError, LLMUnavailable, default_llm
 
 .. automodule:: rules_requirements.agents.workflows
-   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant
+   :members: Context, completeness, test_adequacy, implementation_review, mitigation_adequacy, risk_discovery, assistant, assign_cases, linked_tests
+
+.. automodule:: rules_requirements.agents.worksheet
+   :members: propose, record, resolve
 ```

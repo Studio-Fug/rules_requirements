@@ -6,7 +6,7 @@ The universal form is a comment (or docstring) tag::
     # @rr(REQ-0001): Implements isolated access to secure data
     class SecureStore: ...
 
-    // @rr.verifies(REQ-0002, REQ-0003)
+    // @rr.verifies(REQ-0002)
     TEST(Parser, RejectsEmpty) { ... }
 
 ``@rr(...)`` means *implements* in production code and *verifies* in test
@@ -14,7 +14,9 @@ files (``test_*.py``, ``*_test.*``, ``tests/`` ...); ``@rr.implements`` /
 ``@rr.verifies`` state it explicitly. The language hooks are recognised too:
 ``@pytest.mark.rr(...)`` / ``@pytest.mark.requirements(...)``,
 ``rr::verifies!(...)`` (Rust), ``RR_VERIFIES(...)`` (googletest) and
-``RR_CASE(name, "ID")`` (``rr_case.h``).
+``RR_CASE(name, "ID")`` (``rr_case.h``). A *verifies* annotation naming
+several ids is deprecated (rule ``multi-verifies-annotation``,
+:func:`multi_verifies`): a test case verifies at most one requirement.
 
 Each :class:`Reference` records the ids, the relation, the location, the
 trailing description and — when a definition follows the tag — the symbol it
@@ -236,6 +238,29 @@ def scan(
             continue
         refs.extend(extract(text, rel.replace(os.sep, "/"), config))
     return refs
+
+
+MULTI_VERIFIES = "multi-verifies-annotation"
+
+
+def multi_verifies(refs: Iterable[Reference]) -> list[tuple[Reference, str]]:
+    """``(reference, message)`` for every *verifies* annotation naming more than
+    one id (``@rr.verifies(REQ-1, REQ-2)``, ``@rr(REQ-1, REQ-2)`` in a test
+    file, ``RR_VERIFIES("A", "B")`` ...): rule ``multi-verifies-annotation``.
+
+    Annotations never attribute a case (they are display-only), but a test
+    case verifies at most one requirement, so the annotation should name one
+    id: split the test, or annotate the one requirement it verifies.
+    """
+    return [
+        (
+            ref,
+            f"{ref.path}:{ref.line}: {ref.symbol or 'the annotation'} verifies {', '.join(ref.ids)}; a test case "
+            "verifies at most one requirement: name one id (split the test, or drop the others)",
+        )
+        for ref in refs
+        if ref.relation == VERIFIES and len(ref.ids) > 1
+    ]
 
 
 def unknown_references(refs: Iterable[Reference], model: Model) -> list[tuple[Reference, str]]:

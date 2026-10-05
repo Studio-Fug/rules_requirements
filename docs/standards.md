@@ -135,6 +135,42 @@ with sufficient rigor) — and **validation** — did we build the right product
 (each user need, rolled up from the requirements that satisfy it and from any
 direct validation evidence, such as usability studies).
 
+(standards-one-owner)=
+## One test case, one requirement: stricter than required
+
+rules_requirements lets a test case verify at most one requirement, and makes
+it impossible for one case to count toward two
+({doc}`one-test-case-one-requirement`). The clauses that ask for traceable
+verification are these:
+
+- **IEC 62304 §5.1.1**: the software development plan addresses traceability
+  between system requirements, software requirements, software system tests
+  and risk control measures.
+- **IEC 62304 §5.2.6**: software requirements are verified, including that
+  they are traceable and testable.
+- **IEC 62304 §5.7**: software system testing.
+- **ISO 13485 §7.3.6**: design and development verification, with records of
+  its results.
+- **ISO 14971 §7.2**: verification of the implementation and effectiveness of
+  risk control measures, which this model already expresses as mitigations
+  verified through their requirements (MIT → REQ).
+
+None of them mandates a one-to-one mapping from test cases to requirements: a
+test that exercises two requirements and is recorded against both satisfies
+their wording. **The one-owner rule is this project's stricter policy.** Its
+value is that every verification record is unambiguous: one case's result is
+evidence for exactly one requirement, so a reviewer, an auditor or a
+change-impact analysis never has to work out which of several requirements a
+result was meant to prove, and removing, renaming or breaking a test changes
+exactly one verification set. The cost is real but bounded: a test that
+genuinely checks two things becomes two tests (or one test plus a refined
+requirement), and the model names cases rather than whole targets.
+
+A project adopting the tool in a regulated context should record the policy
+and its rationale in its software development plan (IEC 62304 §5.1), so the
+stricter-than-required rule is documented as deliberate rather than mistaken
+for a reading of the standard.
+
 ## Mapping
 
 | Concept | Source (edition-dependent) | In rules_requirements |
@@ -142,11 +178,11 @@ direct validation evidence, such as usability studies).
 | User needs, intended use | 21 CFR 820.30(c),(g); ISO 13485 §7.3.3, §7.3.7 | `user_needs` (UN); VALIDATED rollup; direct validation evidence |
 | Design inputs / software requirements | 21 CFR 820.30(c); ISO 13485 §7.3.3; IEC 62304 §5.2; IEC 60601-1 §14.7 | `requirements` (REQ) |
 | System → software requirement decomposition | IEC 62304 §5.2.1 | `refines` |
-| Requirements traceable and testable | IEC 62304 §5.2.6 | `requirement-orphan` rule; `method`; UNVERIFIED gaps |
+| Traceability between requirements, tests and risk controls | IEC 62304 §5.1.1, §5.2.6 | `requirement-orphan` rule; `method`; `verified_by` claims; UNVERIFIED gaps; one owner per test case (a stricter policy, above) |
 | Risk control measures in software requirements | IEC 62304 §5.2.3, §7.2.2 | `mitigations` (MIT) `implemented_by` requirements |
-| Design verification; unit, integration and system testing | 21 CFR 820.30(f); ISO 13485 §7.3.6; IEC 62304 §5.5–§5.7; IEC 60601-1 §14.10 | tagged test evidence → VERIFIED / UNDER-VERIFIED / FAILED |
+| Design verification; unit, integration and system testing | 21 CFR 820.30(f); ISO 13485 §7.3.6; IEC 62304 §5.5–§5.7; IEC 60601-1 §14.10 | each requirement's verification set of claimed test cases (one owner per case) → VERIFIED / UNDER-VERIFIED / INCOMPLETE / FAILED / INVALID |
 | Test procedures for each requirement | IEC 62304 §5.7.1 | `test_methods` (TM) with `level` and `procedure` |
-| Design validation | 21 CFR 820.30(g); ISO 13485 §7.3.7; IEC 60601-1 §14.11 | user-need rollup; evidence tagged with UN ids |
+| Design validation | 21 CFR 820.30(g); ISO 13485 §7.3.7; IEC 60601-1 §14.11 | user-need rollup; direct validation evidence claimed by `validated_by` |
 | Hazard, hazardous situation, harm | ISO 14971 §5.4 | `hazard`, `hazardous_situation`, `harm` |
 | Risk estimation | ISO 14971 §5.5 | `severity` × `likelihood`, risk score |
 | Risk evaluation | ISO 14971 §6 | `acceptable_risk_score`, `risk-unacceptable` rule (simplified) |
@@ -156,6 +192,6 @@ direct validation evidence, such as usability studies).
 | Completeness of risk control | ISO 14971 §7.6 | `risk-unmitigated`, `mitigation-unimplemented` rules; `high-risk-open` gaps |
 | Hazard → cause → control → verification traceability | IEC 62304 §7.3.3 | RISK → MIT → REQ → evidence, plus `@rr(...)` links to software items |
 | Traceability of outputs to inputs | ISO 13485 §7.3.2 | `@rr(...)` annotations (implemented in / verified in) |
-| Verified configuration | IEC 62304 §8 | artifact identity on evidence; staleness |
+| Verified configuration | IEC 62304 §8 | artifact identity on evidence; staleness; the verification-set lock (`verification.rrlock`) under version control |
 | Software safety class | IEC 62304 §4.3 | not a field — record in `project:`; drives the levels you demand |
 | Benefit–risk, overall residual risk | ISO 14971 §7.4, §8 | not computed — record the judgement in `residual` and your risk file |

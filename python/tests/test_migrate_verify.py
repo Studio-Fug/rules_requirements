@@ -279,6 +279,38 @@ def test_untagged_cases_with_a_model(tmp_path):
     assert res.untagged == [NODE_U] and res.pending == [] and res.also_claimed == []
 
 
+def test_untagged_cases_with_case_selectors_read_the_attribution(tmp_path):
+    """With a model, the claims selecting a case are the ones
+    :func:`~rules_requirements.attribution.attribute` selects: once case
+    selectors split //web:clocksync_test between REQ-4 and REQ-5, the
+    untagged case is owned through REQ-4's claim alone (not pending) and
+    the tagged one is claimed only by its owner (not also claimed). Under
+    the 0.2 whole-target union both would be flagged."""
+    from rules_requirements.case_selectors import escape
+    from rules_requirements.model import Model, Requirement, VerifiedBy
+
+    def req(i, paths=(), *, selectors=()):
+        cases = tuple(escape(p) for p in paths) + tuple(selectors)
+        return Requirement(id=i, title=i, verified_by=(VerifiedBy(target=NODE, cases=cases),) if cases else ())
+
+    split = Model(
+        requirements={
+            "REQ-1": req("REQ-1"), "REQ-2": req("REQ-2"), "REQ-3": req("REQ-3"),
+            "REQ-4": req("REQ-4", [NODE_U.path]), "REQ-5": req("REQ-5", [NODE_A.path]),
+        }
+    )  # fmt: skip
+    res = check(tmp_path, AFTER, model=split)
+    assert res.ok and res.untagged == [NODE_U] and res.pending == [] and res.also_claimed == []
+    # A selector that gives the untagged case to the wrong entity: pending, naming who claims it.
+    wrong = Model(requirements={**split.requirements, "REQ-4": req("REQ-4"), "REQ-5": req("REQ-5", [NODE_U.path])})
+    res = check(tmp_path / "w", AFTER, model=wrong)
+    assert res.untagged == [] and res.pending == [(NODE_U, ["REQ-5"])] and res.also_claimed == []
+    # A glob of REQ-4 that also reaches the tagged case decided for REQ-5: also claimed.
+    glob = Model(requirements={**split.requirements, "REQ-4": req("REQ-4", selectors=["clocksync > *"])})
+    res = check(tmp_path / "g", AFTER, model=glob)
+    assert res.also_claimed == [(NODE_A, ["REQ-4"])] and res.untagged == [NODE_U] and res.pending == []
+
+
 @pytest.mark.parametrize("key", [PY_C, CC_OPEN], ids=["undecided", "open"])
 def test_an_undecided_case_whose_ids_changed(tmp_path, key):
     res = check(tmp_path, {**AFTER, key: ["REQ-1"]})
@@ -394,3 +426,24 @@ def test_cli(tmp_path, capsys, monkeypatch):
     assert rc == 2 and "names more than one id" in err
     rc = cli.main(["migrate", "verify", "--worksheet", str(tmp_path / "none.rrplan"), "--evidence", good])
     assert rc == 2 and "cannot read worksheet" in capsys.readouterr().err
+
+
+def test_a_caseless_report_outside_testlogs_ran_under_its_suite_name(tmp_path):
+    """A non-Bazel pytest report that collected nothing (an empty
+    <testsuite name='pytest'>) ran the target its cases are keyed under,
+    suite:pytest, not suite:<file stem>: --allow-missing does not excuse
+    a decided case of it."""
+    doc = {
+        "schema": migrate.SCHEMA,
+        "groups": [{"target": "suite:pytest", "group": "m", "counts_toward": ["REQ-1", "REQ-2"],
+                    "tags": ["REQ-1", "REQ-2"], "owner": "REQ-1", "cases": [{"path": "m::t"}]}],
+    }  # fmt: skip
+    path = tmp_path / "reports" / "run1.xml"
+    path.parent.mkdir()
+    path.write_text("<testsuite name='pytest' tests='0'/>", encoding="utf-8")
+    res = migrate.verify(doc, ingest.collect([str(path)]), allow_missing=True)
+    assert [o.describe() for o in res.offences] == [
+        "suite:pytest#m::t: a decided case has no result in the evidence, though its target ran "
+        "(expected [REQ-1], found no result)"
+    ]
+    assert res.missing == []

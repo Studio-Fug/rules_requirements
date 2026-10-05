@@ -6,6 +6,9 @@ fn verifies_is_traced() {
     assert_eq!(4 * 4, 16);
 }
 
+// Quarantine case: two ids in one test are deprecated but still all recorded
+// (declared_ids_check asserts both reach the evidence), so attribution
+// quarantines the case and it verifies neither requirement.
 #[test]
 fn multiple_ids() {
     rr::verifies!("REQ-4", "REQ-1");
@@ -19,9 +22,15 @@ fn ignored_test() {
 
 #[test]
 fn trace_line_is_json() {
+    // One id: the singular form (0.3).
+    assert_eq!(rr::trace_line("t", &["REQ-1"], ""), "{\"test\":\"t\",\"requirement\":\"REQ-1\"}\n");
     assert_eq!(
-        rr::trace_line("a::b", &["REQ-1", "q\"x"], "sil"),
-        "{\"test\":\"a::b\",\"requirements\":[\"REQ-1\",\"q\\\"x\"],\"level\":\"sil\"}\n"
+        rr::trace_line("a::b", &["q\"x"], "sil"),
+        "{\"test\":\"a::b\",\"requirement\":\"q\\\"x\",\"level\":\"sil\"}\n"
     );
-    assert_eq!(rr::trace_line("t", &["REQ-1"], ""), "{\"test\":\"t\",\"requirements\":[\"REQ-1\"]}\n");
+    // Several ids (deprecated): the list form, which is quarantined.
+    assert_eq!(
+        rr::trace_line("a::b", &["REQ-1", "REQ-2"], ""),
+        "{\"test\":\"a::b\",\"requirements\":[\"REQ-1\",\"REQ-2\"]}\n"
+    );
 }

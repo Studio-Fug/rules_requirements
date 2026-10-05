@@ -1,11 +1,23 @@
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
+    "CHANGELOG.md",
     "LICENSE",
+    # python/tests/test_gap_issues.py: the docs that list the attribution issues that are gaps
+    # (and what to do about each).
+    "docs/concepts.md",
+    "docs/guides/migrating-to-per-case.md",
+    "docs/guides/model.md",
+    "docs/guides/outputs.md",
+    "docs/release-notes.md",
     "docs/_static/logo/rules_requirements_logo.svg",
     "docs/_static/logo/rules_requirements_logo-dark.svg",
+    "schema/report.v2.schema.json",
     "schema/rules_requirements.schema.json",
+    "schema/verification_lock.schema.json",
     "schema/worksheet.schema.json",
+    # python/tests/test_docs_build.py: the docs build step.
+    "tools/docs_build.py",
 ])
 
 # `bazel run @rules_requirements -- validate requirements/`

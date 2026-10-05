@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 from rules_requirements.ingest import (
     FAILED,
@@ -131,12 +131,32 @@ def parse_libtest(text: str, target: str = "", source: str = "") -> list[TestCas
     return list(cases.values())
 
 
+def trace_ids(rec: dict[str, Any]) -> list[str]:
+    """Every id one ``rr::verifies!`` trace line names, in any shape a producer
+    writes: ``"requirement": "<id>"`` (0.3), the 0.2 list ``"requirements":
+    [...]``, and also a string under ``requirements`` or a list under
+    ``requirement``. Values are returned as written (:func:`~rules_requirements.ingest.apply_properties`
+    splits ``"A,B"``); nothing a line names is dropped, so a line naming two
+    ids always reaches attribution as a multi-tag, never as one id or none.
+    """
+    out: list[str] = []
+    for key in ("requirement", "requirements"):
+        value = rec.get(key)
+        for item in value if isinstance(value, (list, tuple)) else [value]:
+            if item is not None and item != "":
+                out.append(str(item))
+    return out
+
+
 def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
     """Apply ``rr::verifies!`` trace lines to the matching cases.
 
-    Each line is JSON ``{"test": "<module::name>", "requirements": [...],
+    Each line is JSON ``{"test": "<module::name>", "requirement": "<id>",
     "level": "...", "artifact": {...}}``; ``test`` is the libtest thread name,
-    which is the test's full path.
+    which is the test's full path. The 0.2 list form (``"requirements":
+    [...]``) is still read. Every id becomes a declared tag of the case, so a
+    list of two, two lines for one test with different ids (two calls), or a
+    whitespace- or comma-separated id is a ``multi-tag`` case.
     """
     by_name = {(f"{c.classname}::{c.name}" if c.classname else c.name): c for c in cases}
     for line in trace_text.splitlines():
@@ -147,10 +167,12 @@ def merge_trace(cases: list[TestCase], trace_text: str) -> list[TestCase]:
             rec = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if not isinstance(rec, dict):
+            continue
         case = by_name.get(str(rec.get("test", "")))
         if case is None:
             continue
-        props = [("requirement", r) for r in rec.get("requirements", [])]
+        props = [("requirement", r) for r in trace_ids(rec)]
         if rec.get("level"):
             props.append(("level", str(rec["level"])))
         props += [(f"artifact.{k}", str(v)) for k, v in (rec.get("artifact") or {}).items()]

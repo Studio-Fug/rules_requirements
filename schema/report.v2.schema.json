@@ -1,0 +1,716 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://studio-fug.github.io/rules_requirements/schema/report.v2.schema.json",
+  "title": "rules_requirements traceability report (v2)",
+  "description": "The JSON report `rr report --json` writes (rules_requirements 0.3). `cases` is the inverse matrix: every test case key with its one owner or null; `rr check-report` re-proves from this document alone that no case is owned twice.",
+  "type": "object",
+  "required": [
+    "schema",
+    "title",
+    "project",
+    "summary",
+    "attribution",
+    "cases",
+    "levels",
+    "user_needs",
+    "requirements",
+    "mitigations",
+    "risks",
+    "test_methods",
+    "modules",
+    "high_open_risks",
+    "pyramid_violations",
+    "unknown_evidence",
+    "gaps"
+  ],
+  "properties": {
+    "schema": {
+      "const": "rules_requirements/report/v2"
+    },
+    "title": {
+      "type": "string"
+    },
+    "project": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "user_needs",
+        "user_needs_validated",
+        "requirements",
+        "requirements_verified",
+        "requirements_under_verified",
+        "requirements_partial",
+        "requirements_failed",
+        "requirements_unverified",
+        "requirements_incomplete",
+        "requirements_invalid",
+        "risks",
+        "risks_mitigated",
+        "mitigations",
+        "mitigations_verified",
+        "test_cases",
+        "test_cases_owned",
+        "test_cases_unowned",
+        "test_cases_quarantined",
+        "gaps"
+      ],
+      "properties": {
+        "user_needs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "user_needs_validated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_verified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_under_verified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_partial": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_unverified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_incomplete": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "requirements_invalid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "risks": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "risks_mitigated": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mitigations": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mitigations_verified": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "test_cases": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "test_cases_owned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "test_cases_unowned": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "test_cases_quarantined": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "gaps": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "attribution": {
+      "type": "object",
+      "required": [
+        "mode",
+        "main_repo",
+        "variants",
+        "lock",
+        "lane",
+        "targets",
+        "quarantined",
+        "issues",
+        "granularity"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "hybrid",
+            "model"
+          ]
+        },
+        "main_repo": {
+          "type": "string"
+        },
+        "variants": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "lock": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lane": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "cases",
+              "owned",
+              "quarantined",
+              "owners",
+              "synthetic",
+              "ran"
+            ],
+            "properties": {
+              "cases": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "owned": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "quarantined": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "owners": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "synthetic": {
+                "type": "boolean"
+              },
+              "ran": {
+                "type": "boolean"
+              },
+              "tainted": {
+                "type": "string"
+              },
+              "in_lane": {
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "quarantined": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "case",
+              "code",
+              "entities",
+              "declared",
+              "claims",
+              "detail"
+            ],
+            "properties": {
+              "case": {
+                "type": "string"
+              },
+              "code": {
+                "enum": [
+                  "multi-tag",
+                  "attribution-conflict",
+                  "same-code-multiple-owners"
+                ]
+              },
+              "entities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "declared": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "claims": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "entity",
+                    "selector"
+                  ],
+                  "properties": {
+                    "entity": {
+                      "type": "string"
+                    },
+                    "selector": {
+                      "type": "string"
+                    },
+                    "location": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "detail": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "severity",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "severity": {
+                "enum": [
+                  "error",
+                  "warning"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "case": {
+                "type": "string"
+              },
+              "entities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "declared": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "target": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "granularity": {
+          "type": "object",
+          "required": [
+            "owned_by_literal",
+            "owned_by_pattern",
+            "owned_by_whole",
+            "owned_by_tag",
+            "coarse_claims"
+          ],
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    },
+    "levels": {
+      "type": "array"
+    },
+    "user_needs": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "mitigations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "test_methods": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/entity"
+      }
+    },
+    "modules": {
+      "type": "object"
+    },
+    "high_open_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "pyramid_violations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unknown_evidence": {
+      "type": "object"
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "kind",
+          "entity",
+          "message",
+          "route"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string"
+          },
+          "entity": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "route": {
+            "enum": [
+              "autonomous",
+              "human-gate"
+            ]
+          },
+          "demanded_level": {
+            "type": "string"
+          },
+          "provided_level": {
+            "type": "string"
+          },
+          "lane_hint": {
+            "const": "out of lane"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "$defs": {
+    "entity": {
+      "type": "object",
+      "required": [
+        "id",
+        "title",
+        "status",
+        "basis"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "VERIFIED",
+            "UNDER-VERIFIED",
+            "PARTIAL",
+            "INCOMPLETE",
+            "INVALID",
+            "FAILED",
+            "UNVERIFIED",
+            "VALIDATED",
+            "UNVALIDATED",
+            "MITIGATED",
+            "OPEN"
+          ]
+        },
+        "basis": {
+          "enum": [
+            "own",
+            "derived",
+            "own+derived"
+          ]
+        },
+        "derived_from": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "$ref": "#/$defs/set"
+        },
+        "members": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/member"
+          }
+        },
+        "evidence": {
+          "type": "array",
+          "description": "DEPRECATED (0.3.x only): the owned members in the 0.2 shape.",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status",
+              "level"
+            ]
+          }
+        }
+      }
+    },
+    "member": {
+      "type": "object",
+      "required": [
+        "case",
+        "target",
+        "selector",
+        "via",
+        "state",
+        "owned"
+      ],
+      "properties": {
+        "case": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The case key '<target>#<path>' (null for a glob or whole claim that matched nothing)."
+        },
+        "target": {
+          "type": "string"
+        },
+        "selector": {
+          "type": "string",
+          "description": "The claim's pattern, '*whole*', 'tag' or 'lock'."
+        },
+        "via": {
+          "enum": [
+            "model",
+            "tag",
+            "lock"
+          ]
+        },
+        "state": {
+          "enum": [
+            "passed",
+            "failed",
+            "error",
+            "skipped",
+            "missing",
+            "not-run",
+            "moved",
+            "quarantined"
+          ]
+        },
+        "owned": {
+          "type": "boolean",
+          "description": "Whether the entity owns this case (it counts as the entity's evidence). An owned member is a row of cases[] owned by this entity; no case key is an owned member of two entities. A member that is not owned is a pseudo-member (missing, not-run, moved, quarantined, or an error for a case the evidence lacks)."
+        },
+        "level": {
+          "type": "string"
+        },
+        "stale": {
+          "const": true
+        },
+        "flaky": {
+          "const": true
+        },
+        "reason": {
+          "type": "string"
+        },
+        "lane_hint": {
+          "const": "out of lane"
+        }
+      },
+      "additionalProperties": false
+    },
+    "set": {
+      "type": "object",
+      "required": [
+        "complete",
+        "members",
+        "passed",
+        "failed",
+        "error",
+        "skipped",
+        "missing",
+        "not_run",
+        "moved",
+        "quarantined"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "members": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "error": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "skipped": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "not_run": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "moved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "quarantined": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "case": {
+      "type": "object",
+      "required": [
+        "case",
+        "target",
+        "path",
+        "owner",
+        "via",
+        "status",
+        "declared"
+      ],
+      "properties": {
+        "case": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The ONE entity this case verifies, or null. Never a list."
+        },
+        "via": {
+          "enum": [
+            "model",
+            "tag",
+            null
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "error",
+            "skipped"
+          ]
+        },
+        "level": {
+          "type": "string"
+        },
+        "declared": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "quarantine": {
+          "enum": [
+            "multi-tag",
+            "attribution-conflict",
+            "same-code-multiple-owners"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "synthetic": {
+          "const": true
+        },
+        "flaky": {
+          "const": true
+        },
+        "duplicate": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

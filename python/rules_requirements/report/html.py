@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import html
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rules_requirements import graph
 from rules_requirements.trace import Matrix
+
+if TYPE_CHECKING:  # pragma: no cover - typing only (report imports this module lazily)
+    from rules_requirements.report import Lane
 
 _CLASS = {
     "VERIFIED": "ok",
@@ -15,7 +18,9 @@ _CLASS = {
     "MITIGATED": "ok",
     "UNDER-VERIFIED": "amber",
     "PARTIAL": "warn",
+    "INCOMPLETE": "warn",
     "FAILED": "fail",
+    "INVALID": "fail",
 }
 
 
@@ -47,6 +52,34 @@ def _evidence(item: dict[str, Any]) -> str:
     return f'<ul class="ev">{"".join(lis)}</ul>'
 
 
+_STATE_CLASS = {"passed": "pass", "skipped": "skip", "missing": "skip", "not-run": "skip", "moved": "skip"}
+
+
+def _members(item: dict[str, Any], line: str) -> str:
+    """The set line, expanding to the member table (case, state, level, via, lane hint)."""
+    members = item.get("members") or []
+    if not members:
+        return ""
+    rows = "".join(
+        f'<tr class="{_STATE_CLASS.get(mb["state"], "fail")}"><td><code>{_e(mb["case"] or mb["target"])}</code></td>'
+        f'<td><span class="state">{_e(mb["state"])}</span></td><td><code>{_e(mb.get("level", ""))}</code></td>'
+        f"<td>{_e(mb['via'])} <code>{_e(mb['selector'])}</code></td>"
+        f"<td>{_e(mb.get('lane_hint', ''))}{' · ' if mb.get('lane_hint') and mb.get('reason') else ''}"
+        f"{_e(mb.get('reason', ''))}" + "</td></tr>"
+        for mb in members
+    )
+    return (
+        f'<details class="set"><summary>{_e(line)}</summary><table class="members"><thead><tr><th>Case</th>'
+        f"<th>State</th><th>Level</th><th>Via</th><th>Note</th></tr></thead><tbody>{rows}</tbody></table></details>"
+    )
+
+
+def _basis(item: dict[str, Any]) -> str:
+    if item.get("basis") in ("derived", "own+derived") and item.get("derived_from"):
+        return f'<div class="trace">{_e(item["basis"])} from {_links(item["derived_from"])}</div>'
+    return ""
+
+
 def _source_refs(item: dict[str, Any]) -> str:
     out = []
     for key, label in (("implemented_in", "implemented in"), ("verified_in", "verified in")):
@@ -71,8 +104,17 @@ def _notes(item: dict[str, Any]) -> str:
     return "".join(f'<div class="note"><b>{_e(n["kind"])}</b> {_e(n["text"])}</div>' for n in notes)
 
 
-def render(d: dict[str, Any], matrix: Matrix) -> str:
+def render(d: dict[str, Any], matrix: Matrix, lane: Lane | None = None) -> str:
+    from rules_requirements.report import LOCK_DRIFT, NO_LANE, set_line, unowned_cases
+
+    lane = lane or NO_LANE
     s = d["summary"]
+    att = d.get("attribution") or {}
+
+    def line_of(item: dict[str, Any]) -> str:
+        verdict = matrix.verdicts.get(item["id"])
+        return set_line(verdict.members if verdict is not None else (), lane)
+
     nodes, edges = graph.build(matrix.model, {k: v.status for k, v in matrix.verdicts.items()})
     svg = graph.to_svg(nodes, edges)
 
@@ -93,6 +135,25 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
     )
 
     alerts = []
+    if att.get("quarantined"):
+        items = []
+        for q in att["quarantined"]:
+            origins = [
+                f"{_e(c['entity'])} <code>{_e(c['selector'])}</code>"
+                + (f' <span class="muted">({_e(c["location"])})</span>' if c.get("location") else "")
+                for c in q.get("claims", [])
+            ]
+            if q.get("declared"):
+                origins.append("declared " + _e(", ".join(q["declared"])))
+            items.append(
+                f"<li><code>{_e(q['case'])}</code> — <b>{_e(q['code'])}</b>: {'; '.join(origins)}"
+                f'<div class="msg">{_e(q["detail"])}</div></li>'
+            )
+        alerts.append(
+            f'<div class="alert fail banner"><b>ATTRIBUTION ERROR: {len(att["quarantined"])} quarantined test '
+            "case(s) count for no requirement.</b> A test case verifies at most one requirement; every entity "
+            f"they name reads INVALID.<ul>{''.join(items)}</ul></div>"
+        )
     if d["high_open_risks"]:
         alerts.append(
             '<div class="alert fail"><b>High-severity risks not mitigated:</b> '
@@ -114,7 +175,7 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
 
     rows_un = "".join(
         f'<tr id="{_e(n["id"])}"><td class="id">{_e(n["id"])}</td><td>{_e(n["title"])}'
-        f'<div class="desc">{_e(n.get("description", ""))}</div>{_notes(n)}</td>'
+        f'<div class="desc">{_e(n.get("description", ""))}</div>{_notes(n)}{_members(n, line_of(n))}</td>'
         f"<td>{_links(n['requirements'])}</td><td>{_badge(n['status'])}</td></tr>"
         for n in d["user_needs"]
     )
@@ -138,15 +199,16 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
             f'<tr id="{_e(r["id"])}"><td class="id">{_e(r["id"])}</td><td>{_e(r["title"])}'
             f'<div class="desc">{_e(r.get("description", ""))}</div>'
             f'<div class="trace">{" · ".join(trace)}</div>{_source_refs(r)}{_notes(r)}</td>'
-            f'<td>{_evidence(r)}<div class="demand">{demand}</div></td><td>{badge}</td></tr>'
+            f'<td>{_members(r, line_of(r))}{_evidence(r)}<div class="demand">{demand}</div></td>'
+            f"<td>{badge}{_basis(r)}</td></tr>"
         )
 
     rows_req = "".join(req_row(r) for r in d["requirements"])
     rows_mit = "".join(
         f'<tr id="{_e(x["id"])}"><td class="id">{_e(x["id"])}<div class="kind">{_e(x["type"] or "")}</div></td>'
         f'<td>{_e(x["title"])}<div class="desc">{_e(x.get("description", ""))}</div>{_notes(x)}</td>'
-        f"<td>mitigates {_links(x['mitigates'])}<br>implemented by {_links(x['implemented_by'])}</td>"
-        f"<td>{_badge(x['status'])}</td></tr>"
+        f"<td>mitigates {_links(x['mitigates'])}<br>implemented by {_links(x['implemented_by'])}"
+        f"{_members(x, line_of(x))}</td><td>{_badge(x['status'])}{_basis(x)}</td></tr>"
         for x in d["mitigations"]
     )
 
@@ -176,6 +238,32 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
         for t in d["test_methods"]
     )
     rows_mod = "".join(f'<tr><td class="id">{_e(k)}</td><td>{_badge(v)}</td></tr>' for k, v in d["modules"].items())
+    targets = att.get("targets") or {}
+    rows_case = "".join(
+        f"<tr><td><code>{_e(t)}</code></td><td>{row['cases']}</td><td>{row['owned']}</td>"
+        f"<td>{row['quarantined']}</td><td>{row['cases'] - row['owned'] - row['quarantined']}</td>"
+        f"<td>{_links(row['owners']) if row['owners'] else _e('not run' if not row['ran'] else '—')}</td></tr>"
+        for t, row in targets.items()
+    )
+    unowned = unowned_cases(d)
+    backlog = "".join(
+        f"<li><code>{_e(t)}</code>: "
+        + ", ".join(f"<code>{_e(r['path'])}</code> ({_e(r['status'])})" for r in rows)
+        + "</li>"
+        for t, rows in unowned.items()
+    )
+    drift = [i for i in att.get("issues", []) if i["code"] in LOCK_DRIFT]
+    rows_drift = "".join(
+        f"<tr><td><code>{_e(i['code'])}</code></td><td><code>{_e(i.get('case', ''))}</code></td>"
+        f"<td>{_e(i['message'])}</td></tr>"
+        for i in drift
+    )
+    rows_coarse = "".join(
+        f"<tr><td>{_links(i.get('entities', []))}</td><td><code>{_e(i.get('target', ''))}</code></td>"
+        f"<td>{_e(i['message'])}</td></tr>"
+        for i in att.get("issues", [])
+        if i["code"] == "coarse-claim"
+    )
     rows_gap = "".join(
         f'<tr><td><code>{_e(g["kind"])}</code></td><td><a href="#{_e(g["entity"])}">{_e(g["entity"])}</a></td>'
         f'<td><span class="route {_e(g["route"])}">{_e(g["route"])}</span></td><td>{_e(g["message"])}</td></tr>'
@@ -200,10 +288,37 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
             ),
             section("Test methods", ["ID", "Method", "Level", "Used by"], rows_tm, "methods"),
             section("Modules — rolled-up verification", ["Module", "Status"], rows_mod, "modules"),
+            section(
+                "Case attribution",
+                ["Target", "Cases", "Owned", "Quarantined", "Unowned", "Owners"],
+                rows_case,
+                "cases",
+            )
+            + (
+                '<p class="sub">Unowned cases (the granularity backlog):</p><ul class="ev">' + backlog + "</ul>"
+                if backlog
+                else ""
+            ),
+            section("Lock drift", ["Kind", "Case", "Detail"], rows_drift, "lock-drift"),
+            section("Coarse claims", ["Entity", "Target", "Detail"], rows_coarse, "coarse-claims"),
             section("Gaps — work queue", ["Kind", "Entity", "Route", "Detail"], rows_gap, "gaps"),
         ]
     )
     source = d["project"].get("source") or d["project"].get("description") or ""
+    bits = []
+    if att.get("mode"):
+        bits.append(f"attribution: {att['mode']}")
+        bits.append(f"lock: {att['lock']}" if att.get("lock") else "lock: none (sets not pinned)")
+    if att.get("lane"):
+        bits.append(f"lane: {att['lane']}")
+    if bits:
+        source = (source + " · " if source else "") + " · ".join(bits)
+    cases = f"{s['test_cases']} test cases"
+    if "test_cases_owned" in s:
+        cases += (
+            f" ({s['test_cases_owned']} owned, {s['test_cases_unowned']} unowned, "
+            f"{s['test_cases_quarantined']} quarantined; each case verifies at most one requirement)"
+        )
     return _TEMPLATE.format(
         title=_e(d["title"]),
         source=_e(source),
@@ -211,7 +326,7 @@ def render(d: dict[str, Any], matrix: Matrix) -> str:
         alerts="".join(alerts),
         graph=svg,
         body=body,
-        cases=s["test_cases"],
+        cases=_e(cases),
         gaps=s["gaps"],
     )
 
@@ -271,6 +386,12 @@ ul.ev li.pass::marker {{ color: var(--ok); }} ul.ev li.fail {{ color: var(--fail
 .note {{ font-size: 12px; margin-top: 4px; padding: 3px 8px; border-radius: 6px; background: color-mix(in srgb, var(--amber) 12%, transparent); }}
 .route {{ font-size: 11.5px; font-weight: 600; }} .route.human-gate {{ color: var(--amber); }}
 .muted {{ color: var(--muted); }}
+.banner ul {{ margin: 6px 0 0; padding-left: 18px; }}
+details.set {{ margin: 0 0 6px; font-size: 12.5px; }}
+details.set summary {{ cursor: pointer; color: var(--muted); }}
+table.members {{ margin-top: 4px; font-size: 12px; }}
+table.members td, table.members th {{ padding: 4px 6px; }}
+table.members tr.fail .state {{ color: var(--fail); }} table.members tr.pass .state {{ color: var(--ok); }}
 footer {{ margin-top: 40px; color: var(--muted); font-size: 12px; }}
 </style></head>
 <body><main>

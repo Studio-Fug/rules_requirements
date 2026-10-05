@@ -4,6 +4,7 @@
 import { get } from "../api.js";
 import { badge, empty, glyph, idTag, section, sourceRef } from "../components.js";
 import { add, h, plural } from "../dom.js";
+import { invariantLine } from "../ledger.js";
 import { KIND, STATUS_ORDER, entitiesOf, statusClass, store } from "../store.js";
 
 const GOOD = { user_need: "validated", requirement: "verified", mitigation: "verified", risk: "mitigated" };
@@ -91,8 +92,26 @@ export async function renderOverview() {
         st.annotations_scanned ? "" : ". Source annotations were not scanned",
         ".",
       ),
+      st.attribution && st.attribution.cases ? invariantLine(st.attribution, { link: true }) : null,
     ),
   );
+  if (st.attribution && st.attribution.quarantined) {
+    add(
+      page,
+      h(
+        "div",
+        { class: "callout fail quarantine-banner" },
+        h("h2", null, `${plural(st.attribution.quarantined, "test case")} quarantined`),
+        h(
+          "p",
+          null,
+          "Each names two owners (two tags, two claims, or one test code owned twice). It counts for nobody, and every " +
+            "entity it names reads INVALID until it has one owner. ",
+          h("a", { href: "#/cases?state=quarantined" }, "Resolve them in the case ledger."),
+        ),
+      ),
+    );
+  }
 
   const alerts = [];
   if (report.high_open_risks && report.high_open_risks.length) {

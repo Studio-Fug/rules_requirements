@@ -11,6 +11,9 @@
     rr ingest    bazel-testlogs                   # debug: show parsed test cases
     rr case      --name "flash ok" --status passed --requirement REQ-21   # shell harnesses
     rr cases     --evidence bazel-testlogs        # every case key, to copy into the model
+    rr attribution --model requirements/ --evidence bazel-testlogs --check   # who owns each case
+    rr sets      lock --model requirements/ --evidence bazel-testlogs --write  # pin the sets
+    rr check-report report.json                   # re-prove one owner per case from the JSON
     rr migrate   plan --model requirements/ --evidence bazel-testlogs --out attribution.rrplan
     rr migrate   verify --worksheet attribution.rrplan --evidence ci/bazel-testlogs --baseline bazel-testlogs
 
@@ -24,14 +27,18 @@ import json
 import os
 import shlex
 import sys
+from dataclasses import replace
 from typing import Any, Iterable, Mapping
 
 from rules_requirements import __version__, graph, ingest, report
 from rules_requirements import annotations as rr_annotations
+from rules_requirements.attribution import AttributionIssue
+from rules_requirements.labels import read_known_targets, try_normalize
+from rules_requirements.lock import NO_LOCK, Lock
 from rules_requirements.model import Model, read_model
-from rules_requirements.trace import FAILED, UNVERIFIED, build_matrix
+from rules_requirements.trace import FAILED, INCOMPLETE, INVALID, UNVERIFIED, Matrix, build_matrix
 from rules_requirements.util import natural_key
-from rules_requirements.validate import validate
+from rules_requirements.validate import Issue, validate
 
 DEFAULT_MODEL = "requirements"
 
@@ -78,29 +85,140 @@ def _kv(pairs: list[str] | None) -> dict[str, str]:
     return out
 
 
-def _load(paths: list[str], strict: bool = False, quiet: bool = False) -> tuple[Model, bool]:
-    """Read + validate; print issues. Returns (model, ok)."""
+# Claim conflicts `rr migrate` exists to resolve: it plans and applies on a
+# model that still has them (every other error still stops it).
+_MIGRATE_TOLERATES = ("shared-case", "same-code-multiple-owners")
+
+
+def _with_lock(model: Model, sets_lock: str = "", no_lock: bool = False) -> Model:
+    """``model`` reading the lock at ``sets_lock`` instead of the configured
+    one (``--sets-lock``), or none at all (``--no-lock``)."""
+    if no_lock:
+        return replace(model, config=replace(model.config, sets_lock=""))
+    if sets_lock:
+        return replace(model, config=replace(model.config, sets_lock=os.path.abspath(_path(sets_lock))))
+    return model
+
+
+def _lock_arg(args: argparse.Namespace) -> Lock | None:
+    """The ``lock=`` for build_matrix: NO_LOCK under ``--no-lock``, else the configured one."""
+    return NO_LOCK if getattr(args, "no_lock", False) else None
+
+
+def _load(
+    paths: list[str],
+    strict: bool = False,
+    quiet: bool = False,
+    known_targets: list[str] | None = None,
+    tolerate: tuple[str, ...] = (),
+    *,
+    sets_lock: str = "",
+    no_lock: bool = False,
+    creating_lock: bool = False,
+) -> tuple[Model, bool]:
+    """Read + validate; print issues. Returns (model, ok); errors whose code
+    is in ``tolerate`` are printed but do not make the model invalid.
+    ``sets_lock`` / ``no_lock`` replace the configured verification-set lock.
+    ``creating_lock`` (``rr sets lock``): a lock file that is missing or blank
+    is about to be written, so it is not validated (no ``lock-invalid``)."""
     resolved = [_path(p) for p in paths]
     for p in resolved:
         if not os.path.exists(p):
             print(f"rr: model path not found: {p}", file=sys.stderr)
             return Model(), False
     model, warnings = read_model(resolved, root=_root())
-    issues = validate(model, strict=strict)
+    model = _with_lock(model, sets_lock, no_lock)
+    checked = model
+    lock_path = model.lock_path()
+    if creating_lock and lock_path and (not os.path.exists(lock_path) or _blank_file(lock_path)):
+        checked = replace(model, config=replace(model.config, sets_lock=""))
+    issues = validate(checked, strict=strict, known_targets=known_targets)
     for w in warnings:
         print(f"warning: [unknown-field] {w}", file=sys.stderr)
     errors = 0
     for issue in issues:
-        errors += issue.severity == "error"
+        errors += issue.severity == "error" and issue.code not in tolerate
         if not quiet or issue.severity == "error":
             print(str(issue), file=sys.stderr)
     return model, errors == 0
 
 
+def _known_targets(path: str) -> list[str] | None:
+    """The labels of a `--known-targets` file (`bazel query 'tests(//...)'`)."""
+    if not path:
+        return None
+    try:
+        with open(_path(path), encoding="utf-8") as fh:
+            known, bad = read_known_targets(fh.read())
+    except OSError as exc:
+        raise SystemExit(f"rr validate: cannot read --known-targets: {exc}") from None
+    for line in bad:
+        print(f"warning: --known-targets: not a label: {line!r}", file=sys.stderr)
+    return known
+
+
+# `rr validate` JUnit: one case per check family (`rr.validate::<family>`).
+VALIDATE_FAMILIES = ("shape", "references", "coverage-rules", "claims", "lock")
+_FAMILY = {
+    **dict.fromkeys(
+        ("shape", "unknown-field", "bad-id", "bad-enum", "bad-status", "bad-level", "missing-level", "duplicate-id"),
+        "shape",
+    ),
+    **dict.fromkeys(
+        ("bad-reference", "dangling-reference", "refines-cycle", "multi-parent-refines", "multi-parent-implements"),
+        "references",
+    ),
+    **dict.fromkeys(
+        (
+            "shared-case",
+            "same-code-multiple-owners",
+            "bad-selector",
+            "bad-target",
+            "unknown-target",
+            "redundant-selector",
+            "glob-selector",
+            "bare-target-reference",
+            "whole-target-reference",
+            "parent-with-claims",
+        ),
+        "claims",
+    ),
+    **dict.fromkeys(("lock-invalid", "lock-owner-changed", "lock-stale"), "lock"),
+}
+
+
+def validate_family(issue: Issue) -> str:
+    """The check family an issue belongs to (``coverage-rules`` for every configurable coverage rule)."""
+    if issue.code == "unknown-target" and "locked cases" in issue.message:
+        return "lock"
+    return _FAMILY.get(issue.code, "coverage-rules")
+
+
+def write_validate_junit(path: str, issues: Iterable[Issue]) -> None:
+    """One JUnit case per check family: failed when the family has an error."""
+    from rules_requirements.hooks.junit_writer import JUnitWriter
+
+    by_family: dict[str, list[Issue]] = {f: [] for f in VALIDATE_FAMILIES}
+    for issue in issues:
+        by_family[validate_family(issue)].append(issue)
+    writer = JUnitWriter("rr.validate", classname="rr.validate", file="")
+    for family, found in by_family.items():
+        errors = [str(i) for i in found if i.severity == "error"]
+        warnings = [str(i) for i in found if i.severity != "error"]
+        status = "failed" if errors else "passed"
+        message = "\n".join(errors) if errors else ("\n".join(warnings) if warnings else "")
+        writer.add(family, None, status=status, message=message)
+    writer.write(path)
+
+
 def cmd_validate(args: argparse.Namespace) -> int:
-    model, ok = _load(args.model, strict=args.strict)
+    known = _known_targets(args.known_targets)
+    model, ok = _load(args.model, strict=args.strict, known_targets=known, sets_lock=args.sets_lock)
+    junit = _path(args.junit) if args.junit else os.environ.get("XML_OUTPUT_FILE", "")
+    if junit:
+        write_validate_junit(junit, validate(model, strict=args.strict, known_targets=known))
     if args.format == "json":
-        issues = validate(model, strict=args.strict)
+        issues = validate(model, strict=args.strict, known_targets=known)
         print(
             json.dumps(
                 [
@@ -140,6 +258,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 2
     refs = _scan(args, model)
     unknown = rr_annotations.unknown_references(refs, model)
+    severity = model.config.rule(rr_annotations.MULTI_VERIFIES)
+    if args.strict and severity == "warning":
+        severity = "error"
+    multi = rr_annotations.multi_verifies(refs) if severity != "off" else []
     if args.list:
         for ref in refs:
             sym = f" [{ref.symbol}]" if ref.symbol else ""
@@ -148,25 +270,62 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.json:
         _write(args.json, json.dumps([r.to_dict() for r in refs], indent=2) + "\n")
     print(f"scanned: {len(refs)} annotation(s), {sum(len(r.ids) for r in refs)} reference(s)")
+    for _ref, message in multi:
+        print(f"{severity}: [{rr_annotations.MULTI_VERIFIES}] {message}", file=sys.stderr)
     if unknown:
         print(f"{len(unknown)} reference(s) to undefined ids:", file=sys.stderr)
         for ref, rid in unknown:
             print(f"  {ref.path}:{ref.line}: {rid}", file=sys.stderr)
         return 1
     print("all references resolve.")
-    return 0
+    return 1 if multi and severity == "error" else 0
+
+
+def _lane(args: argparse.Namespace, model: Model) -> report.Lane:
+    """``--lane NAME`` and ``--lane-targets FILE`` (labels, one per line)."""
+    targets: frozenset[str] | None = None
+    if getattr(args, "lane_targets", ""):
+        try:
+            with open(_path(args.lane_targets), encoding="utf-8") as fh:
+                labels, bad = read_known_targets(fh.read())
+        except OSError as exc:
+            raise SystemExit(f"rr report: cannot read --lane-targets: {exc}") from None
+        for line in bad:
+            print(f"warning: --lane-targets: not a label: {line!r}", file=sys.stderr)
+        norm = (try_normalize(label, model.config.main_repo) for label in labels)
+        targets = frozenset(n for n in norm if n)
+    return report.Lane(getattr(args, "lane", "") or "", targets)
+
+
+def _print_quarantines(matrix: Matrix, warn: bool = False) -> None:
+    """One ``ATTRIBUTION ERROR:`` line per quarantined case (stderr)."""
+    quarantined = matrix.attribution.quarantined if matrix.attribution is not None else ()
+    for q in quarantined:
+        print(f"ATTRIBUTION ERROR: {q.code}: {q.detail}", file=sys.stderr)
+    if quarantined:
+        tail = (
+            "--on-attribution-error=warn: the exit status ignores them"
+            if warn
+            else "exit 3 (--on-attribution-error=warn to report without failing)"
+        )
+        print(
+            f"rr: {len(quarantined)} quarantined test case(s) count for no requirement; every entity they name "
+            f"is INVALID; {tail}",
+            file=sys.stderr,
+        )
 
 
 def cmd_report(args: argparse.Namespace) -> int:
     for spec in args.ingestor or []:
         ingest.load_ingestor(spec)
-    model, ok = _load(args.model, strict=args.strict, quiet=True)
+    model, ok = _load(args.model, strict=args.strict, quiet=True, sets_lock=args.sets_lock, no_lock=args.no_lock)
     if not ok:
         print("rr: requirements model is invalid (see above)", file=sys.stderr)
         return 2
     evidence = ingest.collect([_path(p) for p in args.evidence], only=args.format or None)
     refs = _scan(args, model) if args.scan else None
-    matrix = build_matrix(model, evidence, current_build=_kv(args.current_build), references=refs)
+    matrix = build_matrix(model, evidence, current_build=_kv(args.current_build), references=refs, lock=_lock_arg(args))
+    lane = _lane(args, model)
 
     outputs = {"html": args.html, "json": args.json, "md": args.md}
     for extra in args.out or []:
@@ -176,11 +335,15 @@ def cmd_report(args: argparse.Namespace) -> int:
             print(f"rr: cannot infer report format from {extra!r}", file=sys.stderr)
             return 2
         outputs[fmt] = extra
+    # The reports are written first, whatever the exit status.
     for fmt, path in outputs.items():
         if path:
-            _write(path, report.FORMATS[fmt](matrix, args.title))
+            _write(path, report.FORMATS[fmt](matrix, args.title, lane=lane))
     if args.queue_out:
-        _write(args.queue_out, json.dumps({"queue": [g.to_dict() for g in matrix.gaps]}, indent=2) + "\n")
+        # Gaps only out-of-lane members cause are another lane's work.
+        away = {id(g) for g in report.out_of_lane_gaps(matrix, lane)}
+        queue = [g.to_dict() for g in matrix.gaps if id(g) not in away]
+        _write(args.queue_out, json.dumps({"queue": queue}, indent=2) + "\n")
 
     c = matrix.counts()
     print(
@@ -188,16 +351,20 @@ def cmd_report(args: argparse.Namespace) -> int:
         f"validation: {c['user_needs_validated']}/{c['user_needs']} needs | "
         f"verification: {c['requirements_verified']}/{c['requirements']} requirements "
         f"({c['requirements_failed']} failed, {c['requirements_unverified']} unverified, "
-        f"{c['requirements_under_verified']} under-verified) | "
+        f"{c['requirements_under_verified']} under-verified, {c['requirements_invalid']} invalid, "
+        f"{c['requirements_incomplete']} incomplete) | "
         f"risks: {c['risks_mitigated']}/{c['risks']} mitigated | gaps: {c['gaps']}",
         file=sys.stderr,
     )
     reqs = matrix.of_kind("requirement")
     # Any FAILED verdict gates: a failing validation test on a need, or a
     # failing effectiveness test on a mitigation, counts as much as a
-    # requirement's.
+    # requirement's. INVALID (a quarantined case names it) counts as failed,
+    # INCOMPLETE as unverified.
     failed = sorted((v.id for v in matrix.verdicts.values() if v.status == FAILED), key=natural_key)
+    invalid = sorted((v.id for v in matrix.verdicts.values() if v.status == INVALID), key=natural_key)
     unverified = [v.id for v in reqs if v.status == UNVERIFIED]
+    incomplete = [v.id for v in reqs if v.status == INCOMPLETE]
     current = _kv(args.current_build)
     if current:
         keys = {k for cs in evidence.cases for k in cs.artifact}
@@ -212,21 +379,50 @@ def cmd_report(args: argparse.Namespace) -> int:
     violations = matrix.pyramid_violations()
     if failed:
         print("FAILED: " + ", ".join(failed), file=sys.stderr)
+    if invalid:
+        print("INVALID: " + ", ".join(invalid), file=sys.stderr)
+    # A quarantined case counts for nobody: say so loudly (one line per case).
+    warn = args.on_attribution_error == "warn"
+    _print_quarantines(matrix, warn)
+    # Attribution issues are gaps; one at error severity (a hard error, a rule
+    # set to error, or any warning under --strict) also gates, one per line.
+    attribution_errors: list[AttributionIssue] = []
+    attribution_warnings: list[AttributionIssue] = []
+    for issue in matrix.attribution.issues if matrix.attribution is not None else ():
+        error = issue.severity == "error" or (args.strict and issue.severity == "warning")
+        (attribution_errors if error else attribution_warnings).append(issue)
+    for issue in attribution_errors:
+        print(f"ATTRIBUTION ERROR: [{issue.code}] {issue.message}", file=sys.stderr)
+    if attribution_warnings:
+        by_code: dict[str, int] = {}
+        for issue in attribution_warnings:
+            by_code[issue.code] = by_code.get(issue.code, 0) + 1
+        print(
+            f"attribution: {len(attribution_warnings)} warning(s) ("
+            + ", ".join(f"{code} x{n}" for code, n in sorted(by_code.items()))
+            + "), listed as gaps",
+            file=sys.stderr,
+        )
     if violations and args.pyramid_policy != "off":
         print(f"cost-pyramid {args.pyramid_policy}: " + ", ".join(violations), file=sys.stderr)
     if matrix.unknown_evidence:
         print("evidence references undefined ids: " + ", ".join(matrix.unknown_evidence), file=sys.stderr)
 
-    rc = 0
-    if args.fail_on in ("failed", "unverified", "gaps") and failed:
+    rc = 1 if attribution_errors else 0
+    if args.fail_on in ("failed", "unverified", "gaps") and (failed or invalid):
         rc = 1
     if args.fail_on in ("unverified", "gaps") and unverified:
         print("UNVERIFIED: " + ", ".join(unverified), file=sys.stderr)
+        rc = 1
+    if args.fail_on in ("unverified", "gaps") and incomplete:
+        print("INCOMPLETE: " + ", ".join(incomplete), file=sys.stderr)
         rc = 1
     if args.fail_on == "gaps" and matrix.gaps:
         rc = 1
     if args.pyramid_policy == "error" and violations:
         rc = 1
+    if matrix.attribution is not None and matrix.attribution.quarantined and not warn:
+        rc = 3  # the reports are written; the quarantine gates
     return rc
 
 
@@ -235,10 +431,18 @@ def cmd_graph(args: argparse.Namespace) -> int:
     if not ok:
         return 2
     statuses: dict[str, str] = {}
+    if args.cases and not args.evidence:
+        print("rr graph: --cases needs --evidence (a case's owner comes from attribution over it)", file=sys.stderr)
+        return 2
+    attribution = None
     if args.evidence:
         matrix = build_matrix(model, ingest.collect([_path(p) for p in args.evidence]))
         statuses = {k: v.status for k, v in matrix.verdicts.items()}
+        attribution = matrix.attribution
     nodes, edges = graph.build(model, statuses, include_methods=args.methods)
+    if args.cases and attribution is not None:
+        case_nodes, case_edges = graph.cases(attribution, {n.id for n in nodes})
+        nodes, edges = nodes + case_nodes, edges + case_edges
     render = {"dot": graph.to_dot, "mermaid": graph.to_mermaid, "json": graph.to_json, "svg": graph.to_svg}
     _write(args.out, render[args.format](nodes, edges))
     return 0
@@ -247,22 +451,36 @@ def cmd_graph(args: argparse.Namespace) -> int:
 def cmd_ingest(args: argparse.Namespace) -> int:
     for spec in args.ingestor or []:
         ingest.load_ingestor(spec)
+    from rules_requirements.case_keys import run_dims_from_path
+
     ev = ingest.collect([_path(p) for p in args.paths], only=args.format or None)
     rows: list[dict[str, Any]] = [
         {
             "name": c.name,
             "classname": c.classname,
             "status": c.status,
-            "requirements": list(c.requirements),
+            "declared": list(c.declared),  # tags, never owners
+            "requirements": list(c.declared),  # deprecated name of "declared" (0.3.x)
             "level": c.level,
             "artifact": c.artifact,
             "target": c.target,
+            "scope": c.scope,
+            "synthetic": c.synthetic,
+            "attempt": run_dims_from_path(c.source).attempt,
+            "file": c.file,
+            "line": c.line,
             "source": c.source,
         }
         for c in ev.cases
     ]
+    _print_ingest_issues(ev)
     print(json.dumps({"files": ev.files, "cases": rows}, indent=2))
     return 0
+
+
+def _print_ingest_issues(ev: ingest.Evidence) -> None:
+    for issue in ev.issues:
+        print(issue, file=sys.stderr)
 
 
 def _collect_evidence(args: argparse.Namespace, command: str, given: list[str] | None = None) -> ingest.Evidence | None:
@@ -280,6 +498,7 @@ def _collect_evidence(args: argparse.Namespace, command: str, given: list[str] |
     for name, path in zip(given, paths):
         if not any(f in used for f in ingest.expand([path])):
             print(f"warning: [no-evidence] {name}: no evidence file found there", file=sys.stderr)
+    _print_ingest_issues(ev)
     if not ev.files:
         print(f"rr {command}: no evidence found in {' '.join(given) or '(nothing given)'}", file=sys.stderr)
         return None
@@ -320,7 +539,7 @@ def cmd_cases(args: argparse.Namespace) -> int:
 def cmd_migrate_plan(args: argparse.Namespace) -> int:
     from rules_requirements import migrate
 
-    model, ok = _load(args.model, quiet=True)
+    model, ok = _load(args.model, quiet=True, tolerate=_MIGRATE_TOLERATES)
     if not ok:
         print("rr: requirements model is invalid (see above)", file=sys.stderr)
         return 2
@@ -406,7 +625,7 @@ def _decided_worksheet(args: argparse.Namespace) -> tuple[dict[str, Any], Model 
             model_paths = [str(p) for p in planned]
             print(f"rr migrate: checking owners against the planned model: {' '.join(model_paths)}", file=sys.stderr)
     if model_paths:
-        model, ok = _load(model_paths, quiet=True)
+        model, ok = _load(model_paths, quiet=True, tolerate=_MIGRATE_TOLERATES)
         if not ok:
             print("rr: requirements model is invalid (see above)", file=sys.stderr)
             return None
@@ -421,6 +640,13 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
 
     from rules_requirements import migrate, tag_codemod
 
+    if args.stage == "model":
+        try:
+            sheet = migrate.load_worksheet(_path(args.worksheet))
+        except migrate.WorksheetError as exc:
+            print(f"rr migrate: {exc}", file=sys.stderr)
+            return 2
+        return _migrate_apply_model(args, sheet)
     checked = _decided_worksheet(args)
     if checked is None:
         return 2
@@ -564,6 +790,115 @@ def cmd_migrate_apply(args: argparse.Namespace) -> int:
     return 1 if res.blocked or check_refused else 0
 
 
+def _planned(doc: Mapping[str, Any], key: str) -> list[str]:
+    """The worksheet's recorded ``inputs.<key>`` paths, when they all still exist."""
+    planned = (doc.get("inputs") or {}).get(key) if isinstance(doc.get("inputs"), dict) else None
+    if isinstance(planned, list) and planned and all(os.path.exists(_path(str(p))) for p in planned):
+        return [str(p) for p in planned]
+    return []
+
+
+def _migrate_apply_model(args: argparse.Namespace, doc: Mapping[str, Any]) -> int:
+    """``rr migrate apply --stage model``: write an explicit selector for every
+    current owner, after proving that the owner table stays unchanged under
+    ``attribution: model`` and that ``check_claims`` passes."""
+    import difflib
+
+    from rules_requirements import edit, migrate
+
+    model_paths = list(args.model) or _planned(doc, "model")
+    if not model_paths:
+        print("rr migrate: --stage model needs the model (--model, or the worksheet's inputs)", file=sys.stderr)
+        return 2
+    model, ok = _load(model_paths, quiet=True)
+    if not ok:
+        print("rr: requirements model is invalid (see above)", file=sys.stderr)
+        return 2
+    problems = migrate.check_worksheet(doc, model)
+    for problem in problems:
+        print(f"rr migrate: {args.worksheet}: {problem}", file=sys.stderr)
+    if problems:
+        return 2
+    if not args.evidence:
+        args.evidence = _planned(doc, "evidence")
+        if args.evidence:
+            print(f"rr migrate: owners from the planned evidence: {' '.join(args.evidence)}", file=sys.stderr)
+    evidence = _collect_evidence(args, "migrate apply")
+    if evidence is None:
+        return 2
+    stage = migrate.model_stage(model, evidence, doc, compress=args.compress)
+    written = set(stage.from_worksheet)
+    for key, decision in stage.unseen.items():
+        how = (
+            f"a literal selector of {decision} is written"
+            if key in written
+            else ("no claim may select it" if decision == migrate.NONE else f"a claim of {decision} selects it")
+        )
+        print(f"note: {key}: decided {decision} on the worksheet, not in the evidence given: {how}", file=sys.stderr)
+    for key, ent_id in stage.skipped.items():
+        print(
+            f"note: {key}: skipped in this evidence, now claimed by {ent_id}, which reads INCOMPLETE until it runs; "
+            "make it runnable, or decide it none on the worksheet (and leave it out of the claims)",
+            file=sys.stderr,
+        )
+    if stage.refused:
+        for reason in stage.refused:
+            print(f"rr migrate: {reason}", file=sys.stderr)
+        print("rr migrate: --stage model refused; nothing written", file=sys.stderr)
+        return 1
+    root = model.root or _root()
+    by_file: dict[str, list[str]] = {}
+    for ent_id in stage.data:
+        ent = model.get(ent_id)
+        where = ent.location.path if ent is not None else ""
+        if not where:
+            print(f"rr migrate: {ent_id}: no source file to write", file=sys.stderr)
+            return 1
+        by_file.setdefault(where if os.path.isabs(where) else os.path.join(root, where), []).append(ent_id)
+    rewritten: dict[str, tuple[str, str]] = {}
+    for path, ids in sorted(by_file.items()):
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        new = text
+        try:
+            for ent_id in ids:
+                step = edit.update_entity(new, ent_id, stage.data[ent_id])
+                edit.verify(new, step, {ent_id: stage.data[ent_id]})
+                new = step
+        except (edit.EditError, KeyError) as exc:
+            print(f"rr migrate: {path}: {exc}; nothing written", file=sys.stderr)
+            return 1
+        rewritten[path] = (text, new)
+    for path, (old, new) in rewritten.items():
+        shown = report._shown(path)
+        if args.dry_run:
+            sys.stdout.writelines(
+                difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"a/{shown}", f"b/{shown}")
+            )
+        else:
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(new)
+        print(f"{'would rewrite' if args.dry_run else 'rewrote'} {shown}", file=sys.stderr)
+    for ent_id in sorted(set(stage.additions) | set(stage.whole), key=natural_key):
+        for target, selectors in stage.additions.get(ent_id, {}).items():
+            print(f"  {ent_id}: {target}: {', '.join(selectors)}", file=sys.stderr)
+        for target in stage.whole.get(ent_id, []):
+            print(f"  {ent_id}: {target}: whole", file=sys.stderr)
+    n = sum(len(v) for t in stage.additions.values() for v in t.values()) + sum(map(len, stage.whole.values()))
+    unseen = (
+        f"; {len(stage.unseen)} decided case(s) the evidence lacks keep the worksheet's owner" if stage.unseen else ""
+    )
+    print(
+        f"{n} selector(s) for {len(stage.data)} entit{'y' if len(stage.data) == 1 else 'ies'}; over the evidence "
+        f"given, the owner table ({stage.owners} case(s)) is unchanged under attribution: model and check_claims "
+        f"passes{unseen}. Cases in neither the evidence nor the worksheet were not seen: re-run `rr attribution "
+        "--check` over every lane's evidence. Next: set config.attribution: model (and sets_lock), then "
+        "`rr sets lock --write`",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def cmd_migrate_verify(args: argparse.Namespace) -> int:
     """Check test evidence from after ``rr migrate apply`` against the worksheet."""
     from rules_requirements import migrate
@@ -599,11 +934,11 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
             print(f"  {key}", file=sys.stderr)
     if res.untagged:
         how = (
-            "verified_by gives each exactly its owner"
+            "the model's claims select each for exactly its owner"
             if model is not None
-            else "their owner is not checked (verify reads declared ids only; with --model, verified_by is checked "
-            "too): see the verified_by edits rr migrate apply lists, a target split between owners needs case "
-            "selectors (v0.3)"
+            else "their owner is not checked (verify reads declared ids only; with --model, the model's claims are "
+            "checked too): see the verified_by edits rr migrate apply lists, a target split between owners needs "
+            "case selectors (rr migrate apply --stage model)"
         )
         print(
             f"note: {len(res.untagged)} decided case(s) declare no id, before and after: they count only through "
@@ -614,17 +949,18 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
             print(f"  {key}", file=sys.stderr)
     if res.pending:
         print(
-            f"note: {len(res.pending)} decided case(s) declare no id, before and after, and verified_by does not "
-            "give their target exactly their owner: pending a model edit (keep/remove/split, see the verified_by "
-            "edits rr migrate apply lists; a split needs case selectors, v0.3)",
+            f"note: {len(res.pending)} decided case(s) declare no id, before and after, and the model's claims do "
+            "not select them for exactly their owner: pending a model edit (keep/remove/split, see the verified_by "
+            "edits rr migrate apply lists; a split needs case selectors: rr migrate apply --stage model)",
             file=sys.stderr,
         )
         for key, claimers in res.pending:
             print(f"  {key}: counts toward [{', '.join(claimers)}]", file=sys.stderr)
     if res.also_claimed:
         print(
-            f"note: {len(res.also_claimed)} decided case(s) declare exactly their owner, but verified_by gives their "
-            "target to other requirements too: they still count toward those",
+            f"note: {len(res.also_claimed)} decided case(s) declare exactly their owner, but claims of other entities "
+            "select them too: a claim decides a case's owner over its tag (tag-mismatch), and claims of two "
+            "entities quarantine it",
             file=sys.stderr,
         )
         for key, others in res.also_claimed:
@@ -633,7 +969,7 @@ def cmd_migrate_verify(args: argparse.Namespace) -> int:
     if res.untagged:
         parts.append(
             f"{len(res.untagged)} declare no id ("
-            + ("owned through verified_by" if model is not None else "count only through verified_by")
+            + ("owned through their owner's claims" if model is not None else "count only through verified_by")
             + ")"
         )
     if res.pending:
@@ -696,6 +1032,298 @@ def _collect_check(args: argparse.Namespace, root: str, res: Any, writes: set[st
     return True
 
 
+# --------------------------------------------------------------------------- #
+# rr attribution / rr sets / rr check-report                                  #
+# --------------------------------------------------------------------------- #
+
+# Attribution findings `rr attribution --check` and `rr sets check` fail on.
+_LOCK_DRIFT = ("unlocked-member", "lock-owner-changed", "lock-stale", "lock-invalid")
+
+
+# What `rr sets` exists to fix: a model whose only errors are about the lock still loads.
+_SETS_TOLERATES = ("lock-invalid", "lock-owner-changed", "lock-stale")
+
+
+def _model_and_evidence(
+    args: argparse.Namespace, command: str, tolerate: tuple[str, ...] = ()
+) -> tuple[Model, ingest.Evidence] | int:
+    """Load the model (with ``--sets-lock`` / ``--no-lock``) and ``--evidence``; an exit status on failure."""
+    model, ok = _load(
+        args.model,
+        quiet=True,
+        tolerate=tolerate,
+        sets_lock=getattr(args, "sets_lock", ""),
+        no_lock=getattr(args, "no_lock", False),
+        creating_lock=command == "sets lock",
+    )
+    if not ok:
+        print("rr: requirements model is invalid (see above)", file=sys.stderr)
+        return 2
+    evidence = _collect_evidence(args, command)
+    if evidence is None:
+        return 2
+    return model, evidence
+
+
+def _yaml_str(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)  # a JSON string is a YAML double-quoted scalar
+
+
+def _suggestions(matrix: Matrix) -> list[str]:
+    """The ``verified_by`` items that would make every tag-owned or
+    unclaimed-tag case a claimed one: one literal selector per case, grouped
+    by entity and target."""
+    from rules_requirements.case_selectors import escape
+
+    att = matrix.attribution
+    assert att is not None
+    wanted: dict[str, dict[str, list[str]]] = {}
+    for key, via in att.via.items():
+        if via == "tag":
+            wanted.setdefault(att.owner[key], {}).setdefault(key.target, []).append(key.path)
+    for issue in att.issues:
+        if issue.code == "unclaimed-tag" and issue.key is not None and issue.entities:
+            wanted.setdefault(issue.entities[0], {}).setdefault(issue.key.target, []).append(issue.key.path)
+    out = []
+    for ent in sorted(wanted, key=natural_key):
+        kind = matrix.model.get(ent)
+        rel = "validated_by" if kind is not None and kind.kind == "user_need" else "verified_by"
+        out.append(f"# {ent}: add to {rel}")
+        for target in sorted(wanted[ent], key=natural_key):
+            paths = sorted(set(wanted[ent][target]), key=natural_key)
+            if paths == ["[target]"]:
+                out.append(f'- {{target: {_yaml_str(target)}, whole: true, reason: "reports no per-case results"}}')
+                continue
+            cases = ", ".join(_yaml_str(escape(p)) for p in paths if p != "[target]")
+            out.append(f"- {{target: {_yaml_str(target)}, cases: [{cases}]}}")
+    return out
+
+
+def _attribution_problems(matrix: Matrix, only_targets: Iterable[str] | None = None) -> list[str]:
+    """What ``--check`` fails on: quarantines, missing cases, lock drift and
+    error-level attribution issues (restricted to ``only_targets`` when given)."""
+    att = matrix.attribution
+    assert att is not None
+    within = set(only_targets) if only_targets is not None else None
+
+    def inside(target: str) -> bool:
+        return within is None or target in within
+
+    problems = [f"{q.code}: {q.detail}" for q in att.quarantined if inside(q.key.target)]
+    for ent, members in att.members.items():
+        for m in members:
+            if m.state == "missing" and inside(m.target):
+                what = "lock entry" if m.via == "lock" else "selector"
+                problems.append(f"missing-case: {ent}: {what} {m.name!r} matched no case ({m.reason})")
+            elif m.state == "moved" and inside(m.target):
+                problems.append(f"moved: {ent}: {m.name} ({m.reason})")
+    for issue in att.issues:
+        target = issue.key.target if issue.key is not None else issue.target
+        if not inside(target) and target:
+            continue
+        if issue.code in _LOCK_DRIFT or issue.severity == "error":
+            problems.append(f"[{issue.code}] {issue.message}")
+    return list(dict.fromkeys(problems))
+
+
+def cmd_attribution(args: argparse.Namespace) -> int:
+    loaded = _model_and_evidence(args, "attribution")
+    if isinstance(loaded, int):
+        return loaded
+    model, evidence = loaded
+    matrix = build_matrix(model, evidence, lock=_lock_arg(args))
+    att = matrix.attribution
+    assert att is not None
+    rows = []
+    for row in report.case_rows(att):
+        if args.target and row["target"] not in args.target:
+            continue
+        if args.unowned and row["owner"] is not None:
+            continue
+        rows.append(row)
+    if args.output == "json":
+        doc = {
+            "mode": att.mode,
+            "cases": rows,
+            "quarantined": [q.to_dict() for q in att.quarantined],
+            "issues": [i.to_dict() for i in att.issues],
+        }
+        print(json.dumps(doc, indent=2, ensure_ascii=False))
+    else:
+        for row in rows:
+            note = row.get("quarantine", "")
+            fields = [row["case"], row["owner"] or "-", row["via"] or "-", ",".join(row["declared"]) or "-",
+                      row["status"], note or "-"]  # fmt: skip
+            print("\t".join(_tsv(f) for f in fields))
+    if args.suggest:
+        lines = _suggestions(matrix)
+        if lines:
+            print("\n".join(lines), file=sys.stdout if args.output != "json" else sys.stderr)
+    owned = sum(r["owner"] is not None for r in rows)
+    print(
+        f"{len(rows)} case(s): {owned} owned, {sum('quarantine' in r for r in rows)} quarantined, "
+        f"{len(rows) - owned - sum('quarantine' in r for r in rows)} unowned (attribution: {att.mode})",
+        file=sys.stderr,
+    )
+    if not args.check:
+        return 0
+    problems = _attribution_problems(matrix)
+    for problem in problems:
+        print(f"ATTRIBUTION ERROR: {problem}", file=sys.stderr)
+    if problems:
+        print(f"rr attribution --check: {len(problems)} problem(s)", file=sys.stderr)
+        return 1
+    print("rr attribution --check: OK: every case has at most one owner, no quarantine, no lock drift", file=sys.stderr)
+    return 0
+
+
+def _blank_file(path: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return not fh.read().strip()
+    except OSError:
+        return False
+
+
+def _lock_target(args: argparse.Namespace, model: Model) -> str:
+    """The lock path ``rr sets`` reads (``--sets-lock``, else config.sets_lock); "" without one."""
+    if args.sets_lock:
+        return os.path.abspath(_path(args.sets_lock))
+    return model.lock_path()
+
+
+def cmd_sets(args: argparse.Namespace) -> int:
+    from rules_requirements import attribution as rr_attribution
+    from rules_requirements import lock as rr_lock
+
+    loaded = _model_and_evidence(args, f"sets {args.sets_command}", tolerate=_SETS_TOLERATES)
+    if isinstance(loaded, int):
+        return loaded
+    model, evidence = loaded
+    path = _lock_target(args, model)
+    if args.sets_command == "show":
+        matrix = build_matrix(model, evidence, lock=None if path else NO_LOCK)
+        return _sets_show(matrix, args.entity)
+    if not path:
+        print(
+            f"rr sets {args.sets_command}: no lock: set config.sets_lock (e.g. sets_lock: verification.rrlock) "
+            "or pass --sets-lock PATH",
+            file=sys.stderr,
+        )
+        return 2
+    shown = report._shown(path)
+    previous: Lock | None = None
+    if _blank_file(path) and args.sets_command == "lock":
+        pass  # an empty file to start from (rr_sets_lock_test needs the file to exist): no lock yet
+    elif os.path.exists(path):
+        try:
+            previous = rr_lock.load_lock(path, model.config.main_repo, shown=shown)
+        except rr_lock.LockError as exc:
+            for problem in exc.problems:
+                print(f"error: [lock-invalid] {problem}", file=sys.stderr)
+            return 2
+    elif args.sets_command == "check":
+        print(f"error: [lock-invalid] {shown}: no lock there; generate it with `rr sets lock --write`", file=sys.stderr)
+        return 1
+    att = rr_attribution.attribute(model, evidence, lock=previous)
+    if args.sets_command == "check":
+        ran = [t for t, run in att.targets.items() if run.ran]
+        matrix = Matrix(model=model, verdicts={}, gaps=[], evidence=evidence, attribution=att)
+        problems = _attribution_problems(matrix, only_targets=ran)
+        for problem in problems:
+            print(f"SETS CHECK: {problem}", file=sys.stderr)
+        if problems:
+            print(
+                f"rr sets check: {len(problems)} problem(s) against {shown}; re-lock with `rr sets lock --write` "
+                "and review the diff",
+                file=sys.stderr,
+            )
+            return 1
+        n = len(previous) if previous is not None else 0
+        print(f"rr sets check: OK: {shown} ({n} locked case(s)) agrees with the evidence of {len(ran)} target(s)")
+        return 0
+    plan = rr_lock.plan_lock(model, att, previous, allow_removals=args.allow_removals)
+    for entry in plan.added:
+        print(f"  + {entry.case}: {entry.owner}", file=sys.stderr)
+    for old, new in plan.changed:
+        print(f"  ~ {new.case}: {old.owner} -> {new.owner}", file=sys.stderr)
+    for entry in plan.removed:
+        kept = "" if args.allow_removals else " (kept: pass --allow-removals to drop it)"
+        print(f"  - {entry.case}: {entry.owner}{kept}", file=sys.stderr)
+    if plan.refused:
+        for reason in plan.refused:
+            print(f"ATTRIBUTION ERROR: {reason}", file=sys.stderr)
+        print("rr sets lock: refusing to lock quarantined cases (they have no owner); nothing written", file=sys.stderr)
+        return 3
+    text = rr_lock.render_lock(plan.lock)
+    old_text = rr_lock.render_lock(previous) if previous is not None else ""
+    if not args.write:
+        import difflib
+
+        sys.stdout.writelines(
+            difflib.unified_diff(old_text.splitlines(True), text.splitlines(True), f"a/{shown}", f"b/{shown}")
+        )
+        print(
+            f"rr sets lock: {len(plan.added)} added, {len(plan.changed)} changed, {len(plan.removed)} removed"
+            + ("" if args.allow_removals or not plan.removed else " (kept)")
+            + "; pass --write to write it",
+            file=sys.stderr,
+        )
+        return 0
+    out = args.out or path
+    if args.out and not os.path.isabs(out):
+        out = os.path.join(_root(), out)
+    if plan.removed and not args.allow_removals:
+        print(
+            f"rr sets lock: {len(plan.removed)} entr(y/ies) would be removed (a case missing from a target that ran, "
+            "a case no claim selects, or a suite:/record: entry whose case now runs under another target): kept; "
+            "pass --allow-removals after checking the run was complete",
+            file=sys.stderr,
+        )
+    if text != old_text or not os.path.exists(out):
+        rr_lock.write_lock(out, plan.lock)
+        print(f"rr sets lock: wrote {report._shown(out)} ({len(plan.lock)} locked case(s))", file=sys.stderr)
+    else:
+        print(f"rr sets lock: {report._shown(out)} is up to date", file=sys.stderr)
+    return 0
+
+
+def _sets_show(matrix: Matrix, entity: str) -> int:
+    att = matrix.attribution
+    assert att is not None
+    if entity not in att.members:
+        print(f"rr sets show: {entity} is not a user need, requirement or mitigation of the model", file=sys.stderr)
+        return 2
+    members = att.members_of(entity)
+    verdict = matrix.verdicts[entity]
+    print(f"{entity}: {verdict.status} · {report.set_line(members) or 'no members'}")
+    for m in members:
+        fields = [m.state, m.name, m.via, m.selector, m.level or "-", m.reason or "-"]
+        print("\t".join(_tsv(f) for f in fields))
+    return 0
+
+
+def cmd_check_report(args: argparse.Namespace) -> int:
+    from rules_requirements import checkreport
+
+    try:
+        doc = checkreport.load_report(_path(args.report))
+    except checkreport.AmbiguousReportError as exc:
+        print(f"CHECK-REPORT: {exc}", file=sys.stderr)
+        return 1
+    except checkreport.ReportError as exc:
+        print(f"rr check-report: {exc}", file=sys.stderr)
+        return 2
+    problems = checkreport.check_report(doc)
+    for problem in problems:
+        print(f"CHECK-REPORT: {problem}", file=sys.stderr)
+    if problems:
+        print(f"rr check-report: {args.report}: {len(problems)} problem(s)", file=sys.stderr)
+        return 1
+    print(f"rr check-report: OK: {checkreport.summarize(doc)}; no case is owned twice")
+    return 0
+
+
 def cmd_diff(args: argparse.Namespace) -> int:
     from rules_requirements.server.workspace import Workspace, WorkspaceError
 
@@ -736,6 +1364,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         current_build=_kv(args.current_build),
         scan=not args.no_scan,
         author=args.author,
+        lanes=_serve_lanes(args.lane_targets, root),
     )
     snap = ws.snapshot()
     llm = default_llm(enabled=not args.no_llm, model=args.agent_model, effort=args.agent_effort)
@@ -772,6 +1401,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         httpd.shutdown()
     return 0
+
+
+def _serve_lanes(specs: list[str] | None, root: str) -> dict[str, list[str]]:
+    """``--lane-targets NAME=FILE``: each lane's targets, one label per line
+    (``#`` comments and blank lines skipped), as ``rr report --lane-targets``
+    reads them."""
+    lanes: dict[str, list[str]] = {}
+    for name, path in _kv(specs).items():
+        full = path if os.path.isabs(path) else os.path.join(root, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                lines = [line.strip() for line in fh]
+        except OSError as exc:
+            raise SystemExit(f"rr serve: --lane-targets {name}: cannot read {path}: {exc}") from None
+        lanes[name] = [line for line in lines if line and not line.startswith("#")]
+    return lanes
 
 
 def cmd_wrap(args: argparse.Namespace) -> int:
@@ -829,6 +1474,23 @@ def build_parser() -> argparse.ArgumentParser:
     def model_arg(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--model", "--requirements", nargs="+", default=[DEFAULT_MODEL], help="model files/directories")
 
+    def lock_args(sp: argparse.ArgumentParser) -> None:
+        group = sp.add_mutually_exclusive_group()
+        group.add_argument(
+            "--sets-lock", default="", metavar="PATH", help="read this verification-set lock, not config.sets_lock"
+        )
+        group.add_argument(
+            "--no-lock", action="store_true", help="read no verification-set lock (the sets are not pinned)"
+        )
+
+    def evidence_args(sp: argparse.ArgumentParser, ingestors: bool = True) -> None:
+        sp.add_argument("--evidence", nargs="*", default=["bazel-testlogs"], help="evidence files/dirs/globs")
+        if ingestors:
+            sp.add_argument("--format", action="append", help="only use these ingestors (repeatable)")
+        else:
+            sp.set_defaults(format=None)
+        sp.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
+
     def scan_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--root", default="", help="source tree to scan (default: workspace)")
         sp.add_argument("--include", action="append", help="glob of files to scan (repeatable)")
@@ -839,6 +1501,21 @@ def build_parser() -> argparse.ArgumentParser:
     v.add_argument("model", nargs="*", default=[DEFAULT_MODEL])
     v.add_argument("--strict", action="store_true", help="treat warnings as errors")
     v.add_argument("--format", choices=["text", "json"], default="text")
+    v.add_argument(
+        "--known-targets",
+        default="",
+        metavar="FILE",
+        help="labels of every test target, one per line (`bazel query 'tests(//...)'`); "
+        "a claim, config.variants entry or lock target naming any other label is an unknown-target error",
+    )
+    v.add_argument("--sets-lock", default="", metavar="PATH", help="check this lock instead of config.sets_lock")
+    v.add_argument(
+        "--junit",
+        default="",
+        metavar="PATH",
+        help="also write one JUnit case per check family (rr.validate::shape, ::references, ::coverage-rules, "
+        "::claims, ::lock); default $XML_OUTPUT_FILE when set (under `bazel test`)",
+    )
     v.set_defaults(func=cmd_validate)
 
     s = sub.add_parser("scan", aliases=["check-annotations"], help="check source annotations")
@@ -847,6 +1524,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list", action="store_true", help="print every annotation found")
     s.add_argument("--json", default="", help="write annotations as JSON")
     s.add_argument("--ignore-model-errors", action="store_true")
+    s.add_argument(
+        "--strict", action="store_true", help="treat annotation warnings (multi-verifies-annotation) as errors"
+    )
     s.set_defaults(func=cmd_scan)
 
     for name in ("report", "aggregate"):
@@ -861,7 +1541,7 @@ def build_parser() -> argparse.ArgumentParser:
         r.add_argument("--out", action="append", help="output file; format from extension (repeatable)")
         r.add_argument("--queue-out", default="", help="write the gaps as a JSON work queue")
         r.add_argument("--title", default="")
-        r.add_argument("--strict", action="store_true")
+        r.add_argument("--strict", action="store_true", help="treat model and attribution warnings as errors")
         r.add_argument("--fail-on", choices=["none", "failed", "unverified", "gaps"], default="none")
         r.add_argument("--pyramid-policy", choices=["off", "warn", "error"], default="warn")
         r.add_argument(
@@ -871,6 +1551,23 @@ def build_parser() -> argparse.ArgumentParser:
             help="current artifact identity; mismatching evidence is stale",
         )
         r.add_argument("--scan", action="store_true", help="also scan sources for implementation annotations")
+        lock_args(r)
+        r.add_argument("--lane", default="", metavar="NAME", help="stamp the report with this lane (e.g. software)")
+        r.add_argument(
+            "--lane-targets",
+            default="",
+            metavar="FILE",
+            help="the targets this lane runs, one label per line: not-run members of other targets read "
+            "'out of lane' and their gaps stay out of --queue-out (verdicts never change)",
+        )
+        r.add_argument(
+            "--on-attribution-error",
+            choices=["fail", "warn"],
+            default="fail",
+            help="a quarantined test case (several ids, several claimants, one test code with several owners) "
+            "makes rr report exit 3 after writing the reports (fail, the default); warn keeps the exit status "
+            "(the cases still count for nobody, and every entity they name is INVALID)",
+        )
         scan_args(r)
         r.set_defaults(func=cmd_report)
 
@@ -879,6 +1576,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--format", choices=["dot", "mermaid", "json", "svg"], default="mermaid")
     g.add_argument("--evidence", nargs="*", default=[], help="color nodes by status")
     g.add_argument("--methods", action="store_true", help="include test methods")
+    g.add_argument(
+        "--cases",
+        action="store_true",
+        help="add a node per owned test case, with one edge from its one owner (needs --evidence)",
+    )
     g.add_argument("--out", default="-")
     g.set_defaults(func=cmd_graph)
 
@@ -910,7 +1612,26 @@ def build_parser() -> argparse.ArgumentParser:
     mp.set_defaults(func=cmd_migrate_plan)
     ma = msub.add_parser("apply", help="rewrite test tags to the owners decided on a worksheet")
     ma.add_argument("worksheet", help="the decided .rrplan (or .json) worksheet")
-    ma.add_argument("--stage", choices=["tags"], required=True, help="tags: split multi-id pytest/unittest tags")
+    ma.add_argument(
+        "--stage",
+        choices=["tags", "model"],
+        required=True,
+        help="tags: split multi-id pytest/unittest tags; model: write an explicit selector for every current "
+        "owner into the model (the owner table must stay unchanged under attribution: model)",
+    )
+    ma.add_argument(
+        "--compress",
+        action="store_true",
+        help="--stage model: a '*' glob where it selects exactly the entity's cases (none skipped, no overlap)",
+    )
+    ma.add_argument(
+        "--evidence",
+        nargs="*",
+        default=[],
+        help="--stage model: the evidence the owners come from (default: the worksheet's inputs)",
+    )
+    ma.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
+    ma.set_defaults(format=None)
     ma.add_argument("--root", default="", help="source tree to rewrite (default: workspace)")
     ma.add_argument("--only", action="append", help="only rewrite files below this path (repeatable)")
     ma.add_argument(
@@ -1002,6 +1723,56 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument("--ingestor", action="append", help="load an extra ingestor, module:attr")
     mv.set_defaults(func=cmd_migrate_verify)
 
+    at = sub.add_parser("attribution", help="print who owns each test case (and why), or check that nothing is wrong")
+    model_arg(at)
+    evidence_args(at, ingestors=False)
+    lock_args(at)
+    at.add_argument("--target", action="append", help="only this target (repeatable)")
+    at.add_argument("--unowned", action="store_true", help="only cases no entity owns (quarantined ones included)")
+    at.add_argument("--format", dest="output", choices=["tsv", "json"], default="tsv")
+    at.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 1 on any quarantine, missing case, lock drift or error-level attribution issue",
+    )
+    at.add_argument(
+        "--suggest", action="store_true", help="print the selector to add for each tag-owned or unclaimed-tag case"
+    )
+    at.set_defaults(func=cmd_attribution)
+
+    st = sub.add_parser("sets", help="the verification-set lock: write it, check it, show one set")
+    ssub = st.add_subparsers(dest="sets_command", required=True)
+    for name, text in (
+        ("lock", "compute the lock from the evidence; print the diff, or --write it"),
+        ("check", "exit 1 when the lock disagrees with the evidence (missing cases, unlocked members, owner changes)"),
+        ("show", "print one entity's verification set"),
+    ):
+        sp = ssub.add_parser(name, help=text)
+        if name == "show":
+            sp.add_argument("entity", help="a user need, requirement or mitigation id")
+        model_arg(sp)
+        evidence_args(sp)
+        sp.add_argument("--sets-lock", default="", metavar="PATH", help="the lock to read (default: config.sets_lock)")
+        if name == "lock":
+            sp.add_argument("--write", action="store_true", help="write the lock (default: print the diff)")
+            sp.add_argument(
+                "--allow-removals",
+                action="store_true",
+                help="drop entries the evidence no longer has, including those of a suite:/record: pseudo-target "
+                "it does not hold (default: keep them, so a crashed or filtered run never shrinks a set silently)",
+            )
+            sp.add_argument(
+                "--out", default="", metavar="PATH", help="write here instead (relative: to the workspace root)"
+            )
+        sp.set_defaults(func=cmd_sets)
+
+    cr = sub.add_parser(
+        "check-report",
+        help="re-prove from a JSON report alone that no test case is owned by two entities",
+    )
+    cr.add_argument("report", help="a JSON report (rules_requirements/report/v2)")
+    cr.set_defaults(func=cmd_check_report)
+
     d = sub.add_parser("diff", help="semantic diff of the model between two git refs")
     model_arg(d)
     d.add_argument("old", help="git ref (e.g. main, v1.0, HEAD~3)")
@@ -1021,6 +1792,12 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--allow-host", action="append", help="extra Host header value to accept (e.g. behind a proxy)")
     sv.add_argument("--author", default="", help='default author for edits and commits, "Name <email>"')
     sv.add_argument("--current-build", action="append", metavar="KEY=VALUE")
+    sv.add_argument(
+        "--lane-targets",
+        action="append",
+        metavar="NAME=FILE",
+        help="the targets lane NAME runs, one label per line: the case ledger can filter by lane",
+    )
     sv.add_argument("--no-scan", action="store_true", help="skip the source annotation scan")
     sv.add_argument("--no-llm", action="store_true", help="disable LLM-backed agent workflows")
     sv.add_argument("--agent-model", default="", help="Claude model for agents (default claude-opus-5-5)")

@@ -6,7 +6,7 @@ from rules_requirements import ingest
 from rules_requirements.hooks.checkplan import CheckPlan, HarnessError
 from rules_requirements.hooks.junit_writer import JUnitWriter
 from rules_requirements.model import read_model
-from rules_requirements.trace import FAILED, VERIFIED, build_matrix
+from rules_requirements.trace import FAILED, INCOMPLETE, VERIFIED, build_matrix
 
 STEPS = {
     "flash_boot": ("ble_advertising",),
@@ -64,7 +64,7 @@ def full_run(plan, fail_in=None, exc=None):
 
 
 def cases_of(report):
-    return {(c.classname, c.name): (c.status, c.requirements, c.message) for c in report.cases}
+    return {(c.classname, c.name): (c.status, list(c.requirements), c.message) for c in report.cases}
 
 
 def test_full_pass_records_one_single_owner_case_per_check():
@@ -115,18 +115,20 @@ def test_rig_trouble_before_setup_fails_nothing():
         assert message == "not run: rig trouble: ValueError: no WiFi credentials"
 
 
-def test_rig_trouble_mid_run_withdraws_partial_tags():
+def test_rig_trouble_mid_run_keeps_the_passed_checks_tags():
     report, plan = plan_for()
     with pytest.raises(RigError):
         full_run(plan, "between_checks", RigError("tunnel dropped"))
     cases = cases_of(report)
     assert cases[("hitl_e2e", "rig")][0] == "error"
     assert not any(status == "failed" for status, _, _ in cases.values())
-    # REQ-13 also tags `rename`, which never ran: its passed checks stop counting (v0.2).
+    # REQ-13 also tags `rename`, which never ran. 0.2 withdrew the passed
+    # checks' tags; from 0.3 recorded cases are final, and REQ-13's set reads
+    # INCOMPLETE through the skipped `rename` instead.
     for name in ("ble_advertising", "provisioned", "ws_connect"):
         status, ids, _ = next(v for (_, n), v in cases.items() if n == name)
-        assert status == "passed" and ids == [], name
-    # REQ-35's only check passed: it keeps its tag.
+        assert status == "passed" and ids == ["REQ-13"], name
+    # REQ-35's only check passed.
     assert cases[("hitl_e2e.websocket_checks", "build_info")] == ("passed", ["REQ-35"], "")
     assert cases[("hitl_e2e.websocket_checks", "rename")][:2] == ("skipped", ["REQ-13"])
     assert cases[("hitl_e2e.run", "completed")][:2] == ("skipped", ["REQ-23"])
@@ -238,7 +240,7 @@ def test_construction_validates_single_ids_and_names():
         CheckPlan(report, {"a": ["x", "x"]})
     with pytest.raises(TypeError, match="not a string"):
         CheckPlan(report, {"a": "x"})
-    assert report.cases == []
+    assert report.cases == ()
 
 
 def test_reexported_from_junit_writer():
@@ -276,13 +278,19 @@ def test_verdicts_through_the_report(tmp_path):
         full_run(plan, "flash", OSError("no boot"))
     assert verdicts(tmp_path / "device", report) == dict.fromkeys(("REQ-13", "REQ-23", "REQ-35"), FAILED)
 
+
+def test_rig_trouble_verdicts_are_neither_verified_nor_failed(tmp_path):
     report, plan = plan_for()
     with pytest.raises(RigError):
         full_run(plan, "between_checks", RigError("tunnel dropped"))
     rig = verdicts(tmp_path / "rig", report)
     # neither VERIFIED nor FAILED where a check never ran; REQ-35's one check passed
-    assert rig["REQ-13"] not in (VERIFIED, FAILED) and rig["REQ-23"] not in (VERIFIED, FAILED)
     assert rig["REQ-35"] == VERIFIED
+    assert rig["REQ-13"] not in (VERIFIED, FAILED) and rig["REQ-23"] not in (VERIFIED, FAILED)
+    # 0.3 verification sets: a passed check next to a skipped one is INCOMPLETE
+    # (CheckPlan no longer withdraws tags), and the rig case, owned by nobody,
+    # fails nothing.
+    assert rig["REQ-13"] == INCOMPLETE and rig["REQ-23"] == INCOMPLETE
 
 
 def test_a_result_recorded_inside_its_own_check_block_is_the_only_case():

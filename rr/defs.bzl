@@ -22,7 +22,11 @@ Test hooks:
 
 Reports:
   * `rr_evidence`         — run tests inside a build action, collecting JUnit.
-  * `rr_report`           — model + evidence -> HTML / JSON / Markdown report.
+  * `rr_report`           — model + evidence -> HTML / JSON / Markdown report;
+                            with a JSON report it adds `<name>_check_test`
+                            (`rr check-report`: one owner per test case).
+  * `rr_sets_lock_test`   — the model's verification-set lock agrees with
+                            the evidence (`rr sets check`); `.update` re-locks.
   * `rr_golden_test`      — compare a generated file with a checked-in golden.
 """
 
@@ -34,16 +38,18 @@ load(
     _EXECUTABLE_ARG = "EXECUTABLE_ARG",
     _RrEvidenceInfo = "RrEvidenceInfo",
     _RrModelInfo = "RrModelInfo",
+    _RrReportInfo = "RrReportInfo",
     _rr_evidence = "rr_evidence",
     _rr_main = "rr_main",
     _rr_model = "rr_model_rule",
     _rr_report = "rr_report",
+    _rr_sets_lock = "rr_sets_lock",
 )
 
 RrModelInfo = _RrModelInfo
 RrEvidenceInfo = _RrEvidenceInfo
+RrReportInfo = _RrReportInfo
 rr_evidence = _rr_evidence
-rr_report = _rr_report
 rr_node_test = _rr_node_test
 
 _LIB = Label("//python")
@@ -76,27 +82,109 @@ def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], exe
         **kwargs
     )
 
-def rr_model(name, srcs, strict = False, validate = True, visibility = None, **kwargs):
+def rr_model(name, srcs, strict = False, validate = True, visibility = None, lock = None, **kwargs):
     """Declare requirements model files.
 
     Args:
       name: target name; other rules take it as `model`.
       srcs: YAML/JSON model files (any layout; they are merged).
       strict: treat validation warnings as errors in `<name>_test`.
-      validate: create the `<name>_test` validation test.
+      validate: create the `<name>_test` validation test. It writes one JUnit
+        case per check family (`rr.validate::shape`, `::references`,
+        `::coverage-rules`, `::claims`, `::lock`).
       visibility: visibility of the model target.
+      lock: the verification-set lock (`verification.rrlock`, written by
+        `rr sets lock --write`). `<name>_test` checks it statically against
+        the claims, and `rr_report` pins the sets with it (`RrModelInfo.lock`).
+        After `visibility`, so the 0.2 positional order still holds.
       **kwargs: forwarded to the validation test (e.g. `tags`).
     """
-    _rr_model(name = name, srcs = srcs, visibility = visibility)
+    _rr_model(name = name, srcs = srcs, lock = lock, visibility = visibility)
     if validate:
+        lock_args = ["--sets-lock", "$(rootpath %s)" % lock] if lock else []
         _py(
             "test",
             name + "_test",
             "cli",
-            baked_args = ["validate"] + (["--strict"] if strict else []) + ["$(rootpaths :%s)" % name],
-            data = [":" + name],
+            baked_args = ["validate"] + (["--strict"] if strict else []) + lock_args + ["$(rootpaths :%s)" % name],
+            data = [":" + name] + ([lock] if lock else []),
             **kwargs
         )
+
+def rr_report(name, model, check = None, **kwargs):
+    """Renders the traceability report for a model and its evidence.
+
+    See the private rule for every attribute (`evidence`, `srcs`, `formats`,
+    `title`, `strict`, `current_build`, `lane`, `lane_targets`,
+    `on_attribution_error`, `testonly`). The build fails when a test case is
+    quarantined (it would verify two requirements, or none unambiguously)
+    unless `on_attribution_error = "warn"`.
+
+    Args:
+      name: target name; also the output file stem.
+      model: `rr_model` target(s) or model files.
+      check: also create `<name>_check_test`, which re-proves from
+        `<name>.json` alone that no test case is owned by two entities
+        (`rr check-report`). Default: whenever "json" is in `formats`.
+      **kwargs: the report's other attributes.
+    """
+    if check == None:
+        check = "json" in kwargs.get("formats", ["html", "json", "md"])
+    _rr_report(name = name, model = model, check = check, **kwargs)
+    if check:
+        _py(
+            "test",
+            name + "_check_test",
+            "cli",
+            baked_args = ["check-report", "$(rootpath :%s.json)" % name],
+            data = [":%s.json" % name],
+            testonly = kwargs.get("testonly", True),
+            tags = kwargs.get("tags", []),
+            visibility = kwargs.get("visibility"),
+        )
+
+def rr_sets_lock_test(name, model, evidence, lock = None, **kwargs):
+    """Test that the verification-set lock agrees with the evidence.
+
+    Runs `rr sets check` (exit 1 on a missing case, an unlocked member, an
+    owner change or a stale entry) on the lock the model pins
+    (`rr_model(lock)`, the one `rr_report` reads). `bazel run :<name>.update`
+    re-locks: `rr sets lock --write` rewrites that lock in the source tree
+    from the same evidence (pass `-- --allow-removals` to drop entries the
+    evidence no longer has). For hermetic projects whose evidence is
+    `rr_evidence`.
+
+    Args:
+      name: test name.
+      model: an `rr_model` target (or model files).
+      evidence: `rr_evidence` targets and/or JUnit / records files.
+      lock: the lock file, for a model that names none (model files, or an
+        `rr_model` without `lock`). Analysis fails when it differs from the
+        model's lock.
+      **kwargs: forwarded to the test.
+    """
+    lock_target = ":%s_lock" % name
+    _rr_sets_lock(
+        name = name + "_lock",
+        model = [model],
+        lock = lock,
+        testonly = True,
+        visibility = ["//visibility:private"],
+    )
+    evidence_args = ["$(rootpaths %s)" % e for e in evidence]
+    common = ["--model", "$(rootpaths %s)" % model, "--evidence"] + evidence_args + ["--sets-lock", "$(rootpath %s)" % lock_target]
+    data = [model, lock_target] + evidence
+    _py("test", name, "cli", baked_args = ["sets", "check"] + common, data = data, **kwargs)
+    _py(
+        "binary",
+        name + ".update",
+        "cli",
+        # The lock's runfiles path is its workspace-relative source path.
+        baked_args = ["sets", "lock", "--write"] + common + ["--out", "$(rootpath %s)" % lock_target],
+        data = data,
+        tags = ["manual"],
+        testonly = True,
+    )
 
 def rr_annotations_test(name, model, srcs, **kwargs):
     """Fail if any `@rr(...)`-style annotation in `srcs` names an unknown id.

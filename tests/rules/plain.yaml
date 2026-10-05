@@ -1,0 +1,13 @@
+# The fixture model without a lock (plain_report in BUILD.bazel).
+project:
+  name: rules_requirements rule fixture
+user_needs:
+  - id: UN-1
+    title: Pin a verification set
+requirements:
+  - id: REQ-1
+    title: The fixture case verifies this requirement
+    satisfies: [UN-1]
+    verified_by:
+      - target: "suite:fixture"
+        cases: ["c::ok"]

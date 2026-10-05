@@ -30,11 +30,11 @@ so each trace has exactly one source of truth:
 | Field | From → to | Meaning |
 | ----- | --------- | ------- |
 | `satisfies` | requirement → user need | The requirement is (part of) how the need is met. |
-| `refines` | requirement → requirement | Decomposition, e.g. system → software requirement. |
+| `refines` | requirement → requirement | Decomposition, e.g. system → software requirement. One parent per requirement: refines forms a tree (`multi-parent-refines`). |
 | `method` | requirement → test method *or* level | The verification rigor the requirement demands. |
-| `verified_by` | requirement → build target | Whole-target evidence (see [below](#evidence)). |
+| `verified_by` | requirement, mitigation → test cases | The cases that verify it ({ref}`claims <claims>`, see {ref}`below <evidence>`); a user need's are `validated_by`. |
 | `mitigates` | mitigation → risk | The control acts on this risk. |
-| `implemented_by` | mitigation → requirement | The requirements that realise the control. |
+| `implemented_by` | mitigation → requirement | The requirements that realise the control. A requirement that implements a mitigation has no other parent (`multi-parent-implements`). |
 | `mitigated_by` | risk → mitigation | *Optional* back-reference; if given it must agree with `mitigates`. |
 
 The reverse views ("which requirements satisfy UN-1?", "which risks does
@@ -76,87 +76,154 @@ which requirements depend on which procedure. A test method's own status is the
 rollup of the requirements that use it.
 
 (evidence)=
-## Evidence
+## Evidence and attribution
 
 Evidence is a set of test cases, each with a status (`passed`, `failed`,
-`error`, `skipped`), the ids it verifies, the level it provides and, optionally,
-the identity of the artifact it exercised. It reaches an entity in two ways:
+`error`, `skipped`), the level it provides, optionally the identity of the
+artifact it exercised, and the ids it **declares** — its tags. Every case is
+filed under a key, `<target>#<path>` ({ref}`case-keys`): retries, repeated
+runs, shards and several evidence roots of one case merge into one result.
 
-Per test case
+**A test case verifies at most one requirement**; a set of test cases may
+together verify one ({doc}`one-test-case-one-requirement` explains the rule
+and why it cannot be bypassed). Which entity a case verifies — its *owner* —
+is decided in one place, {py:func}`rules_requirements.attribution.attribute`,
+from two inputs:
+
+Claims (the model)
+: `verified_by` on requirements and mitigations and `validated_by` on user
+  needs name the cases of a target an entity claims — per case, by selector,
+  or the whole target ({ref}`claims`). A case selected by exactly one entity's
+  claims is owned by that entity.
+
+Tags (the evidence)
 : A `requirement` property on a JUnit `<testcase>` (written by the
-  {doc}`hooks <guides/hooks>`) attaches that case to the id. This is the precise,
-  preferred form.
+  {doc}`hooks <guides/hooks>`), a record's `requirement`, an `[rr:ID]` name
+  tag. With `config.attribution: hybrid` (the default) a single tag owns a case
+  that no claim covers; with `model` a tag never owns anything and only
+  cross-checks the claims (`tag-mismatch`, `unclaimed-tag`).
 
-Per target (`verified_by`)
-: A requirement may list build targets (for example Bazel test labels) in
-  `verified_by`. Each target's status is the most severe status among its
-  cases (`error` > `failed` > `skipped` > `passed`), recovered from the
-  `bazel-testlogs/<pkg>/<name>/test.xml` path. This suits suites that cannot
-  tag individual cases. Note that a single skipped case makes the whole target
-  count as skipped, so it then provides no passing evidence.
+Ambiguity fails closed: a case is **quarantined** when its evidence names more
+than one id (`multi-tag`), when claims of more than one entity select it
+(`attribution-conflict`, also a static `shared-case` error), or when the same
+test code — the same source file and case path, or targets declared in
+`config.variants` — is owned by different entities in different targets
+(`same-code-multiple-owners`; a source file is compared in one spelling, so
+`./x.py`, `a/../x.py` and the absolute path a harness started outside the
+workspace records are one file). Equal case paths with different owners whose
+source is unknown or recorded differently get the `same-path-multiple-owners`
+warning — or, when one of them is an absolute path outside the workspace that
+ends with two recorded relative paths (it may be either file), the
+`ambiguous-source` error: whether two owners share test code is then unknown,
+so it fails closed. A quarantined case owns nothing, and every
+entity it names reads INVALID until it has one owner. A tag naming a risk or a
+test method is `misdirected-evidence` and one naming an undefined id
+`unknown-id`; neither owns anything.
 
-Evidence may be tagged with the id of a requirement, a user need (direct
-validation evidence, below) or a mitigation. Evidence naming an id the model
-does not define is reported as an `unknown-id` gap.
+A result about a whole target run — an exit status after passing cases, a load
+error, a report that cannot be read (`rr.scope=target`) — is never a case of
+anyone. It *taints* the target: every member claimed on it reads `error`, so
+each requirement fails through its own members.
 
 ## Verdicts
 
+### Verification sets
+
+Each requirement, user need and mitigation has one **verification set**:
+
+- the cases it **owns** (through its claims, or its tag in hybrid mode);
+- the cases it **expects**: each literal selector's case, and each entry of the
+  verification-set lock ({ref}`verification-lock`) naming it;
+- a member for each selector that matched nothing, and for each quarantined
+  case that names it.
+
+A member's state is the result of its case (`passed`, `failed`, `error`,
+`skipped`), or: `missing` (its target ran without it — a renamed or deleted
+test, a filter), `not-run` (no evidence for its target at all — another lane,
+a target that never built), `moved` (a lock entry whose case now has another
+owner or none) or `quarantined`. A member's level is its case's own `level`,
+else its claim's, else `default_provided_level`; when the case and the claim
+disagree the lower one counts (`level-mismatch`), and when either level is
+unordered (`inspection`, say: it has no rank) the case's own level counts, so
+a selector can never lend a case a level it did not provide.
+
 ### Requirements
 
-For each requirement the matrix gathers its evidence and classifies it:
+A requirement's verdict is the first that applies to its set:
 
-1. If any of it `failed` or `error`ed → <span class="rr-status">FAILED</span>.
-2. Otherwise consider the *fresh* passing evidence (see
-   [staleness](#staleness)); skipped cases never count as passing.
-   - None at all → <span class="rr-status">UNVERIFIED</span>; or, if there is
-     passing evidence but all of it is stale,
-     <span class="rr-status">UNDER-VERIFIED</span> flagged **stale**.
-   - The best ranked level provided meets or exceeds the demanded level →
-     <span class="rr-status">VERIFIED</span>.
-   - Otherwise → <span class="rr-status">UNDER-VERIFIED</span>: the requirement
-     is exercised, but not with the rigor it asks for.
+1. Any member quarantined → <span class="rr-status">INVALID</span>.
+2. Any member failed or errored (a taint included), or a member passed only on
+   a retry under `config.flaky: fail` → <span class="rr-status">FAILED</span>.
+3. No members at all, or none of them ran →
+   <span class="rr-status">UNVERIFIED</span>.
+4. Any member missing, not run, skipped or moved (or the set mixes builds
+   under `config.set_consistency: enforce`) →
+   <span class="rr-status">INCOMPLETE</span>.
+5. The whole set passed, but a member is [stale](#staleness), or passed only on
+   a retry (`config.flaky: under-verify`, the default), or the best level of
+   the set is below the demanded one →
+   <span class="rr-status">UNDER-VERIFIED</span>.
+6. Otherwise → <span class="rr-status">VERIFIED</span>: the whole set passed
+   together, at the demanded rigor; it provides the best level among its
+   members, the cheaper members being the pyramid's base.
 
-For an unordered demand (`inspection`) the requirement is VERIFIED only if some
-passing evidence is at exactly that level.
+For an unordered demand (`inspection`) the set must include a passing member at
+exactly that level. `config.flaky` decides what a retry-masked pass is worth:
+`accept` (a pass), `flag` (a pass and a `flaky` gap), `under-verify` or
+`fail`. Only an earlier failed or errored attempt makes a member flaky.
 
-**Refinement.** When other requirements `refine` a requirement, their statuses
-roll up into it:
+**Refinement.** When other requirements `refine` a requirement, their verdicts
+roll up into it — verdicts, never cases: a parent's set holds only its own
+claims. Each verdict says what it rests on: `basis` is `own` (its own set),
+`derived` (other entities' verdicts, listed in `derived_from`) or
+`own+derived`.
 
-- the children's rollup is FAILED if any child failed, VERIFIED if all are
-  verified, PARTIAL if at least one is verified, under-verified or partial, and
-  UNVERIFIED otherwise;
-- the parent is FAILED if it or any child failed;
+- the children's rollup is FAILED if any child failed or is INVALID, VERIFIED
+  if all are verified, PARTIAL if at least one is verified, under-verified,
+  partial or incomplete, and UNVERIFIED otherwise;
+- the parent is INVALID if its own set is, and FAILED if its own set or any
+  child failed;
+- a parent with claims of its own needs its own set complete too: while it is
+  incomplete (or did not run), the parent is INCOMPLETE;
 - when every child is VERIFIED, the parent is VERIFIED only if its *own* demand
-  is met — by its own evidence, or because every child's best evidence is at
-  least as rigorous as the parent demands. A `hitl` system requirement is not
-  proven by simulation-verified software requirements: it stays
-  UNDER-VERIFIED until system-level evidence at `hitl` exists;
-- otherwise a parent with any passing evidence of its own, or with partly
-  verified children, is PARTIAL; a parent with neither stays UNVERIFIED.
+  is met — by its own set, or because every child's best evidence is at least
+  as rigorous as the parent demands (a stale or flaky own set is not made good
+  by the children). A `hitl` system requirement is not proven by
+  simulation-verified software requirements: it stays UNDER-VERIFIED until
+  system-level evidence at `hitl` exists;
+- otherwise a parent whose own set passed, or with partly verified children,
+  is PARTIAL; a parent with neither stays UNVERIFIED.
 
 ### Rollups
 
 | Entity | Rolls up | Verdicts |
 | ------ | -------- | -------- |
-| User need | requirements that `satisfies` it | VALIDATED · PARTIAL · FAILED · UNVALIDATED |
-| Mitigation | requirements it is `implemented_by` | VERIFIED · PARTIAL · FAILED · UNVERIFIED |
+| User need | requirements that `satisfies` it, and its own set | VALIDATED · PARTIAL · FAILED · INVALID · UNVALIDATED |
+| Mitigation | requirements it is `implemented_by`, and its own set | VERIFIED · PARTIAL · FAILED · INVALID · UNVERIFIED |
 | Risk | mitigations that `mitigates` it | MITIGATED · PARTIAL · FAILED · OPEN |
 | Test method | requirements whose `method` names it | VERIFIED · PARTIAL · FAILED · UNVERIFIED |
 | Module | requirements listing it in `modules` | VERIFIED · PARTIAL · FAILED · UNVERIFIED |
 
 Every rollup uses the same rule: no children → the "none" verdict
-(UNVALIDATED, UNVERIFIED, OPEN); any child FAILED → FAILED; every child fully
-verified → the "all good" verdict; at least one child verified, under-verified
-or partial → PARTIAL; otherwise the "none" verdict. An under-verified
-requirement therefore makes its user need and its mitigation PARTIAL, never
-VALIDATED or VERIFIED.
+(UNVALIDATED, UNVERIFIED, OPEN); any child FAILED or INVALID → FAILED; every
+child fully verified → the "all good" verdict; at least one child verified,
+under-verified, partial or incomplete → PARTIAL; otherwise the "none" verdict.
+An under-verified or incomplete requirement therefore makes its user need and
+its mitigation PARTIAL, never VALIDATED or VERIFIED, and an INVALID one makes
+them FAILED. A user need or mitigation that is itself named by a quarantined
+case is INVALID.
 
 ### Direct validation evidence
 
-Evidence can be tagged with a user need or mitigation id directly — a usability
-study that validates `UN-2`, say. Such evidence is not graded by level (any
-pass counts) and joins the rollup as one more child: a failing usability study
-makes the need FAILED even if every requirement is verified.
+A user need's `validated_by` and a mitigation's `verified_by` claim cases of
+their own — a usability study that validates `UN-2`, say (in hybrid mode a
+case tagged with the need's id works too). Such a set is not graded by level
+(any pass counts) and joins the rollup as one more child: a failing usability
+study makes the need FAILED even if every requirement is verified. A user
+need's or mitigation's verdict is therefore always a rollup: an own set that
+is INCOMPLETE (a skipped or missing member) or UNDER-VERIFIED makes it
+PARTIAL, never INCOMPLETE, while the set's own `incomplete` gap is still
+raised; only INVALID (a quarantined case names it) is carried through as is.
 
 (staleness)=
 ## Staleness
@@ -167,12 +234,14 @@ claims. Evidence can record the identity of what it exercised as
 SHA. When a report is built with the current identity
 (`--current-build KEY=VALUE`, or `current_build` in Bazel), a passing case
 whose recorded identity differs on **any key both sides have** is **stale**.
-Evidence without an identity, and `verified_by` target evidence, is never
-stale.
+Evidence without an identity is never stale.
 
-Fresh evidence decides the verdict whenever there is any. A requirement whose
-*only* passing evidence is stale is UNDER-VERIFIED and flagged stale (the
-reports show a `STALE` badge), and the gap queue carries a `stale` item for it.
+A verification set must hold on the current build as a whole: a set that passed
+but has any stale member is UNDER-VERIFIED and flagged stale (the reports show
+a `STALE` badge), and the gap queue carries a `stale` item for it. Passed
+members stamped with different values of one key (two `dut_git_sha` values in
+one set) are *mixed builds*: a `mixed-builds` gap with
+`config.set_consistency: warn` (the default), INCOMPLETE with `enforce`.
 
 ## The cost pyramid
 
@@ -204,18 +273,34 @@ writes as a machine-readable work queue:
 
 | Gap kind | Raised for | Route |
 | -------- | ---------- | ----- |
-| `failed` | a requirement with failing evidence (also a user need or mitigation with failing direct evidence) | by demanded level — reproducing a bench failure needs the bench |
-| `stale` | a requirement whose only passing evidence is stale | by demanded level |
-| `unverified` | a requirement with no evidence | by demanded level |
-| `under-verified` | a requirement whose evidence is below its demand | by demanded level |
+| `multi-tag`, `attribution-conflict`, `same-code-multiple-owners` | a quarantined case (one gap per case, naming every claim's origin and the ids its evidence declares); first in the queue | autonomous |
+| `invalid` | an entity a quarantined case names | autonomous |
+| `failed` | a requirement with a failed or errored member (also a user need or mitigation whose own set has one), or failing refinements | by demanded level — reproducing a bench failure needs the bench |
+| `incomplete` | a requirement whose set is incomplete: `17/23 passed; 6 not run (//pi/hitl/harness:e2e_netstack)` | human-gate if a member that did not run or was skipped is above `autonomous_max_level`, else autonomous |
+| `missing-case` | a selector or lock entry whose case its target did not report, with the nearest case it did report | autonomous |
+| `stale` | a requirement whose set passed with a stale member | by demanded level |
+| `flaky` | a requirement whose set passed with a retry-masked member (`config.flaky: under-verify` or `flag`) | by demanded level |
+| `mixed-builds` | a set whose passed members were stamped with different builds (`config.set_consistency: warn`) | by demanded level |
+| `unverified` | a requirement with no members (`no test evidence`), or none that ran (`not run: <targets>`) | by demanded level; by the members' levels when they did not run |
+| `under-verified` | a requirement whose set is below its demand | by demanded level |
 | `partial` | a requirement whose refinements are only partly verified | by demanded level |
 | `pyramid` | a cost-pyramid violation | autonomous |
 | `no-implementation` | a requirement (without refinements) that no source annotation implements — only when sources were scanned | autonomous |
+| `misdirected-evidence` | evidence tagged with a risk or test-method id (they are not verified by tests — tag the requirement) | autonomous |
+| `unattributed-failure` | a failing case no entity owns, or a target-scope failure that affects no member (`untraced-failure` is still emitted alongside in 0.3) | autonomous |
+| `tag-mismatch`, `unclaimed-tag` | a tag that disagrees with the claim owning its case, or (`attribution: model`) a tag on a case no claim selects | autonomous |
+| `duplicate-case`, `coarse-claim` | one case key reported twice in a run; a whole-target claim on a target with per-case results | autonomous |
+| `unlocked-member`, `lock-owner-changed`, `lock-stale`, `lock-invalid` | the lock disagrees with the attribution ({ref}`verification-lock`) | autonomous |
+| `same-path-multiple-owners`, `ambiguous-source`, `level-mismatch`, `unscoped-evidence`, `suite-level-requirement` | equal case paths in two targets with different owners and no common recorded source (`ambiguous-source`, always an error: one recorded source may be either of two files); a case level that differs from its claim's; JUnit outside a testlogs tree; a suite-level requirement property (not inherited) | autonomous |
+| `unpinned-sets` | no lock: the entities whose sets have glob, whole-target or tag-owned members | autonomous |
 | `high-risk-open` | a high-severity risk that is not MITIGATED | human-gate |
 | `unknown-id` | evidence tagged with an id the model does not define | autonomous |
-| `misdirected-evidence` | evidence tagged with a risk or test-method id (they are not verified by tests — tag the requirement) | autonomous |
-| `untraced-failure` | a failing test case that traces to no requirement (and whose target no `verified_by` names) | autonomous |
+| `multi-verifies-annotation` | (`rr report --scan`) a source *verifies* annotation that names several ids | autonomous |
 | `note:gap`, `note:todo`, `note:question` | an open note of that kind on any entity (questions route to a human) | by demanded level |
+
+Every attribution issue is one of these gaps, warnings included, so
+`rr report --fail-on gaps` fails on any of them ({ref}`gap-issues` lists
+each one and what to do about it).
 
 **Routing** splits the work between agents and people. A gap whose
 requirement demands a level at or below `autonomous_max_level` (default `sil`)

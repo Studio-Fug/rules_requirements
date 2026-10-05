@@ -299,8 +299,8 @@ def test_plan_paths_are_relative_below_cwd(tmp_path, monkeypatch):
 
 def test_exit_status_taint_is_target_scope_not_a_decision(tmp_path, monkeypatch):
     """rr wrap's exit-status case (libtest and --format junit) and
-    rr_evidence's are about the run: listed under target_scope, never a
-    group an owner must decide."""
+    rr_evidence's are about the run: never a group an owner must decide, and
+    (from 0.3) declaring no id, nothing to list under target_scope either."""
     from rules_requirements import bazel
     from rules_requirements.hooks import wrap
 
@@ -345,9 +345,8 @@ def test_exit_status_taint_is_target_scope_not_a_decision(tmp_path, monkeypatch)
     doc = migrate.worksheet(plan)
     decided_paths = {c["path"] for g in doc["groups"] for c in g["cases"]}
     assert not any("exit-status" in p for p in decided_paths), decided_paths
-    scoped = {r["case"]: r["counts_toward"] for r in doc["target_scope"]}
-    assert scoped == {
-        "//hw:bench_test#bench_test::exit-status": ["REQ-1", "REQ-2"],
-        "//hw:leaky_test#//hw:leaky_test::exit-status": ["REQ-1", "REQ-2"],
-        "//rs:parse_test#parse::exit-status": ["REQ-5", "REQ-6"],
-    }
+    # From 0.3 the writers' exit-status cases declare no id (P8/P9): they count
+    # toward nothing, so the worksheet has no target-scope rows to list.
+    exits = [u for u in plan.units if u.row.key.path.endswith("exit-status")]
+    assert len(exits) == 3 and all(u.row.target_scope and not u.counts_toward for u in exits)
+    assert "target_scope" not in doc
