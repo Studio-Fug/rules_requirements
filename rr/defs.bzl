@@ -82,7 +82,7 @@ def _py(kind, name, entry, baked_args = [], data = [], deps = [], srcs = [], exe
         **kwargs
     )
 
-def rr_model(name, srcs, strict = False, validate = True, lock = None, visibility = None, **kwargs):
+def rr_model(name, srcs, strict = False, validate = True, visibility = None, lock = None, **kwargs):
     """Declare requirements model files.
 
     Args:
@@ -92,10 +92,11 @@ def rr_model(name, srcs, strict = False, validate = True, lock = None, visibilit
       validate: create the `<name>_test` validation test. It writes one JUnit
         case per check family (`rr.validate::shape`, `::references`,
         `::coverage-rules`, `::claims`, `::lock`).
+      visibility: visibility of the model target.
       lock: the verification-set lock (`verification.rrlock`, written by
         `rr sets lock --write`). `<name>_test` checks it statically against
         the claims, and `rr_report` pins the sets with it (`RrModelInfo.lock`).
-      visibility: visibility of the model target.
+        After `visibility`, so the 0.2 positional order still holds.
       **kwargs: forwarded to the validation test (e.g. `tags`).
     """
     _rr_model(name = name, srcs = srcs, lock = lock, visibility = visibility)

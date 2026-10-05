@@ -274,3 +274,24 @@ def test_model_stage_refuses_a_quarantine_before_writing_anything(tmp_path):
     stage = migrate.model_stage(model, ev)
     assert [r.split(":")[0] for r in stage.refused] == ["multi-tag"]
     assert stage.model is None and not stage.additions and not stage.data
+
+
+def test_stage_model_notes_every_skipped_case_it_claims(capsys, tmp_path, monkeypatch):
+    """Release review (S7): a permanently skipped case got a literal selector
+    and silently left its entity INCOMPLETE; the apply now says so."""
+    stage = migrate.model_stage(load(write(tmp_path, "m.yaml", MODEL)), evidence())
+    assert stage.skipped == {"//p:t#s::skip": "REQ-1"}
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    monkeypatch.delenv("BUILD_WORKING_DIRECTORY", raising=False)
+    write(tmp_path, "req/requirements.yaml", MODEL)
+    prop = '<properties><property name="requirement" value="REQ-1"/></properties>'
+    write(tmp_path, "bazel-testlogs/p/t/test.xml",
+          f'<testsuites><testsuite name="s"><testcase classname="a" name="1">{prop}</testcase>'
+          f'<testcase classname="a" name="2">{prop}<skipped/></testcase></testsuite></testsuites>')  # fmt: skip
+    sheet = {"schema": migrate.SCHEMA, "inputs": {"model": ["req"], "evidence": ["bazel-testlogs"]}, "groups": []}
+    write(tmp_path, "plan.rrplan", json.dumps(sheet))
+    rc = cli.main(["migrate", "apply", "plan.rrplan", "--stage", "model", "--dry-run"])
+    err = capsys.readouterr().err
+    assert rc == 0 and "note: //p:t#a::2: skipped in this evidence, now claimed by REQ-1" in err, err
+    assert "//p:t#a::1" not in err.split("note:", 1)[-1].split("\n")[0]

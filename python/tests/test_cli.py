@@ -621,3 +621,33 @@ def test_serve_reads_lane_target_files(tmp_path):
     assert _serve_lanes(None, str(tmp_path)) == {}
     with pytest.raises(SystemExit, match="cannot read"):
         _serve_lanes(["sw=lanes/none.txt"], str(tmp_path))
+
+
+def test_scan_and_report_raise_multi_verifies_annotation(capsys, model_path, tmp_path):
+    """Release review: `rr scan`, `rr check-annotations` and `rr report --scan`
+    raise multi-verifies-annotation (a warning; an error under --strict or when
+    configured), where they used to print 'all references resolve.'"""
+    write(tmp_path, "tests/test_a.py", "# @rr.verifies(REQ-1, REQ-2)\ndef test_foo(): ...\n")
+    write(tmp_path, "tests/a_test.cc", "// @rr(REQ-1, REQ-2)\nTEST(A, B) {}\n")
+    for cmd in ("scan", "check-annotations"):
+        rc, _, err = run(capsys, cmd, "--model", model_path, "--root", str(tmp_path))
+        assert rc == 0 and err.count("warning: [multi-verifies-annotation]") == 2, err
+        assert "tests/test_a.py:1: def test_foo verifies REQ-1, REQ-2" in err
+        rc, _, err = run(capsys, cmd, "--model", model_path, "--root", str(tmp_path), "--strict")
+        assert rc == 1 and "error: [multi-verifies-annotation]" in err
+    off = write(tmp_path, "off/model.yaml", "config: {rules: {multi-verifies-annotation: 'off'}}\n" + MODEL)
+    rc, _, err = run(capsys, "scan", "--model", off, "--root", str(tmp_path))
+    assert rc == 0 and "multi-verifies-annotation" not in err
+    as_error = write(tmp_path, "err/model.yaml", "config: {rules: {multi-verifies-annotation: error}}\n" + MODEL)
+    rc, _, _ = run(capsys, "scan", "--model", as_error, "--root", str(tmp_path))
+    assert rc == 1
+    out = tmp_path / "r.json"
+    args = ("report", "--model", model_path, "--evidence", "--scan", "--root", str(tmp_path), "--json", str(out))
+    rc, _, err = run(capsys, *args)
+    assert rc == 0 and "multi-verifies-annotation x2" in err, err
+    issues = [
+        i for i in json.loads(out.read_text())["attribution"]["issues"] if i["code"] == "multi-verifies-annotation"
+    ]
+    assert len(issues) == 2 and issues[0]["severity"] == "warning"
+    rc, _, err = run(capsys, *args, "--strict")
+    assert rc == 1 and "ATTRIBUTION ERROR: [multi-verifies-annotation]" in err

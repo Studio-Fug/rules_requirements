@@ -107,6 +107,15 @@ class VerifiedBy:
     # rewrites the entity must neither lose nor "repair" it.
     authored: Any = field(default=None, compare=False, repr=False)
 
+    def __post_init__(self) -> None:
+        if isinstance(self.cases, str):
+            # VerifiedBy("//p:hw", "hil") is the 0.2 field order (target, level):
+            # it would claim the selectors "h", "i" and "l" without a word.
+            raise TypeError(
+                f"VerifiedBy({self.target!r}, {self.cases!r}): cases is a tuple of selectors, not a string; "
+                "pass the fields after target by keyword (level=..., cases=(...,))"
+            )
+
     @property
     def label(self) -> str:
         """The target as written."""

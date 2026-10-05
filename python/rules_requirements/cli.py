@@ -114,10 +114,13 @@ def _load(
     *,
     sets_lock: str = "",
     no_lock: bool = False,
+    creating_lock: bool = False,
 ) -> tuple[Model, bool]:
     """Read + validate; print issues. Returns (model, ok); errors whose code
     is in ``tolerate`` are printed but do not make the model invalid.
-    ``sets_lock`` / ``no_lock`` replace the configured verification-set lock."""
+    ``sets_lock`` / ``no_lock`` replace the configured verification-set lock.
+    ``creating_lock`` (``rr sets lock``): a lock file that is missing or blank
+    is about to be written, so it is not validated (no ``lock-invalid``)."""
     resolved = [_path(p) for p in paths]
     for p in resolved:
         if not os.path.exists(p):
@@ -125,7 +128,11 @@ def _load(
             return Model(), False
     model, warnings = read_model(resolved, root=_root())
     model = _with_lock(model, sets_lock, no_lock)
-    issues = validate(model, strict=strict, known_targets=known_targets)
+    checked = model
+    lock_path = model.lock_path()
+    if creating_lock and lock_path and (not os.path.exists(lock_path) or _blank_file(lock_path)):
+        checked = replace(model, config=replace(model.config, sets_lock=""))
+    issues = validate(checked, strict=strict, known_targets=known_targets)
     for w in warnings:
         print(f"warning: [unknown-field] {w}", file=sys.stderr)
     errors = 0
@@ -248,6 +255,10 @@ def cmd_scan(args: argparse.Namespace) -> int:
         return 2
     refs = _scan(args, model)
     unknown = rr_annotations.unknown_references(refs, model)
+    severity = model.config.rule(rr_annotations.MULTI_VERIFIES)
+    if args.strict and severity == "warning":
+        severity = "error"
+    multi = rr_annotations.multi_verifies(refs) if severity != "off" else []
     if args.list:
         for ref in refs:
             sym = f" [{ref.symbol}]" if ref.symbol else ""
@@ -256,13 +267,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
     if args.json:
         _write(args.json, json.dumps([r.to_dict() for r in refs], indent=2) + "\n")
     print(f"scanned: {len(refs)} annotation(s), {sum(len(r.ids) for r in refs)} reference(s)")
+    for _ref, message in multi:
+        print(f"{severity}: [{rr_annotations.MULTI_VERIFIES}] {message}", file=sys.stderr)
     if unknown:
         print(f"{len(unknown)} reference(s) to undefined ids:", file=sys.stderr)
         for ref, rid in unknown:
             print(f"  {ref.path}:{ref.line}: {rid}", file=sys.stderr)
         return 1
     print("all references resolve.")
-    return 0
+    return 1 if multi and severity == "error" else 0
 
 
 def _lane(args: argparse.Namespace, model: Model) -> report.Lane:
@@ -819,6 +832,12 @@ def _migrate_apply_model(args: argparse.Namespace, doc: Mapping[str, Any]) -> in
             else ("no claim may select it" if decision == migrate.NONE else f"a claim of {decision} selects it")
         )
         print(f"note: {key}: decided {decision} on the worksheet, not in the evidence given: {how}", file=sys.stderr)
+    for key, ent_id in stage.skipped.items():
+        print(
+            f"note: {key}: skipped in this evidence, now claimed by {ent_id}, which reads INCOMPLETE until it runs; "
+            "make it runnable, or decide it none on the worksheet (and leave it out of the claims)",
+            file=sys.stderr,
+        )
     if stage.refused:
         for reason in stage.refused:
             print(f"rr migrate: {reason}", file=sys.stderr)
@@ -1032,6 +1051,7 @@ def _model_and_evidence(
         tolerate=tolerate,
         sets_lock=getattr(args, "sets_lock", ""),
         no_lock=getattr(args, "no_lock", False),
+        creating_lock=command == "sets lock",
     )
     if not ok:
         print("rr: requirements model is invalid (see above)", file=sys.stderr)
@@ -1500,6 +1520,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list", action="store_true", help="print every annotation found")
     s.add_argument("--json", default="", help="write annotations as JSON")
     s.add_argument("--ignore-model-errors", action="store_true")
+    s.add_argument("--strict", action="store_true", help="treat annotation warnings (multi-verifies-*) as errors")
     s.set_defaults(func=cmd_scan)
 
     for name in ("report", "aggregate"):

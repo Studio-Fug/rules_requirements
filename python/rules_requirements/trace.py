@@ -55,7 +55,7 @@ from typing import Iterable, Mapping, Sequence
 from rules_requirements import case_selectors
 from rules_requirements import config as cfg
 from rules_requirements import lock as rr_lock
-from rules_requirements.annotations import Reference
+from rules_requirements.annotations import MULTI_VERIFIES, Reference, multi_verifies
 from rules_requirements.attribution import (
     MISSING,
     MOVED,
@@ -549,6 +549,14 @@ def build_matrix(
         )
 
     if references is not None:
+        severity = c.rule(MULTI_VERIFIES)
+        if severity != "off":
+            multi = tuple(
+                AttributionIssue(MULTI_VERIFIES, message, severity, entities=ref.ids)
+                for ref, message in multi_verifies(references)
+            )
+            if multi:
+                attribution = replace(attribution, issues=(*attribution.issues, *multi))
         for ref in references:
             for rid in ref.ids:
                 found = verdicts.get(rid)

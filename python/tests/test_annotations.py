@@ -139,3 +139,34 @@ def test_unknown_references(model):
     refs = extract("# @rr(REQ-1, REQ-77)\n# @rr(UN-1)", "a.py", Config())
     assert [(r.line, i) for r, i in unknown_references(refs, model)] == [(1, "REQ-77")]
     assert refs[0].to_dict() == {"ids": ["REQ-1", "REQ-77"], "relation": "implements", "path": "a.py", "line": 1}
+
+
+@pytest.mark.parametrize(
+    ("path", "line"),
+    [
+        ("tests/test_a.py", "# @rr.verifies(REQ-1, REQ-2)"),
+        ("tests/test_a.py", "# @rr(REQ-1, REQ-2)"),  # @rr in a test file means verifies
+        ("src/a_test.cc", "// @rr(REQ-1, REQ-2)"),
+        ("src/lib.py", "# @rr.verifies(REQ-1, REQ-2)"),  # explicit, whatever the path
+        ("tests/test_a.py", '@pytest.mark.rr("REQ-1", "REQ-2")'),
+        ("src/a_test.cc", '  RR_VERIFIES("REQ-1", "REQ-2");'),
+        ("src/lib.rs", '    rr::verifies!("REQ-1", "REQ-2");'),
+    ],
+    ids=["rr.verifies", "rr-in-test", "rr-in-cc-test", "rr.verifies-in-src", "pytest-mark", "gtest", "rust"],
+)
+def test_a_verifies_annotation_naming_two_ids_raises_multi_verifies_annotation(path, line):
+    """Release review: the rule was documented and configurable, but nothing raised it."""
+    from rules_requirements.annotations import MULTI_VERIFIES, multi_verifies
+
+    refs = extract(line + "\ndef test_foo(): ...\n", path, Config())
+    (found,) = multi_verifies(refs)
+    assert found[0].ids == ("REQ-1", "REQ-2") and "verifies REQ-1, REQ-2" in found[1]
+    assert MULTI_VERIFIES == "multi-verifies-annotation"
+    single = extract(line.replace(', "REQ-2"', "").replace(", REQ-2", "") + "\n", path, Config())
+    assert single and not multi_verifies(single)
+
+
+def test_an_implements_annotation_may_name_several_ids():
+    from rules_requirements.annotations import multi_verifies
+
+    assert not multi_verifies(extract("# @rr(REQ-1, REQ-2)\nclass A: ...\n", "src/lib.py", Config()))

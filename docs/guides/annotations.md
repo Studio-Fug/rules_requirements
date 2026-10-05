@@ -15,7 +15,7 @@ class SecureStore: ...
 ```
 
 ```cpp
-// @rr.verifies(REQ-0002, REQ-0003)
+// @rr.verifies(REQ-0002)
 TEST(Parser, RejectsEmpty) { ... }
 ```
 
@@ -47,6 +47,14 @@ Details:
   only, not annotations.
 - Any entity kind can be annotated — `# @rr(MIT-2)` on the function that
   realises a risk control is as useful as a requirement link.
+- A *verifies* annotation names one id: a test case verifies at most one
+  requirement. Several ids in one *verifies* annotation
+  (`@rr.verifies(REQ-1, REQ-2)`, or `@rr(REQ-1, REQ-2)` in a test file) are
+  deprecated: `rr scan` (`rr check-annotations`) and `rr report --scan` raise
+  `multi-verifies-annotation` for each (a warning by default, an error under
+  `--strict` or with `config.rules: {multi-verifies-annotation: error}`, and
+  an error by default from 0.4). Annotations are display-only, so a verdict
+  never depends on them. *Implements* annotations may name several ids.
 
 ### Which files are tests
 

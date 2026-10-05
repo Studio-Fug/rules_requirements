@@ -294,3 +294,13 @@ def test_plan_lock_removed_and_lock_agree(tmp_path):
         assert [(old.owner, new.owner) for old, new in plan.changed] == [("REQ-3", "REQ-2")]
         for gone in plan.removed:
             assert (plan.lock.entry(gone.target, gone.path) == gone) is not allow
+
+
+def test_a_lock_case_path_ending_with_a_name_tag_is_invalid():
+    """Ingest strips [rr:ID] tags from case names, so such an entry could only
+    ever read missing under a key no report may write."""
+    text = f"schema: {rr_lock.SCHEMA}\ncases:\n  //p:t:\n    'm::a [rr:REQ-2]': REQ-1\n"
+    with pytest.raises(rr_lock.LockError, match="name tag"):
+        rr_lock.parse_lock(text)
+    tagged_class = f"schema: {rr_lock.SCHEMA}\ncases:\n  //p:t:\n    'm [rr:REQ-2]::a': REQ-1\n"
+    assert len(rr_lock.parse_lock(tagged_class)) == 1  # a classname keeps its tags

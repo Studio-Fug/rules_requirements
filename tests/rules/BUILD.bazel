@@ -39,6 +39,17 @@ rr_report(
     model = ["plain.yaml"],
 )
 
+# rr_model keeps 0.2's positional order (name, srcs, strict, validate,
+# visibility); `lock` comes after it. This package fails to load otherwise.
+# buildifier: disable=positional-args
+rr_model(
+    "positional_model",
+    ["plain.yaml"],
+    False,
+    False,
+    ["//visibility:private"],
+)
+
 rr_sets_lock_test(
     name = "lock_test",
     evidence = ["evidence.xml"],

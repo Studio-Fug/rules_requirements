@@ -383,3 +383,14 @@ def test_an_absolute_lock_below_the_root_shows_relative(tmp_path):
     assert m.lock_path(shown=True) == "req/other.rrlock" and m.lock_path() == lock
     outside = replace(m, config=replace(m.config, sets_lock="/elsewhere/x.rrlock"))
     assert outside.lock_path(shown=True) == "/elsewhere/x.rrlock"
+
+
+def test_verified_by_rejects_the_0_2_positional_level():
+    """Release review: 0.2's VerifiedBy(target, level) now binds level to
+    ``cases`` and silently claimed the selectors "h", "i" and "l"."""
+    from rules_requirements.model import VerifiedBy
+
+    with pytest.raises(TypeError, match="by keyword"):
+        VerifiedBy("//pkg:hw", "hil")
+    assert VerifiedBy("//pkg:hw", level="hil").selectors == (None,)
+    assert VerifiedBy("//pkg:hw", ("a",)).selectors == ("a",)

@@ -856,6 +856,9 @@ class ModelStage:
     refused: list[str] = field(default_factory=list)
     unseen: dict[str, str] = field(default_factory=dict)  # decided case key -> decision, not in the evidence
     from_worksheet: list[str] = field(default_factory=list)  # unseen keys given a literal selector
+    # Tag-owned cases that were skipped in this evidence and get a selector:
+    # each makes its entity INCOMPLETE until it runs (key -> entity).
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 def _decided_against(doc: Mapping[str, Any] | None, owner: Mapping[CaseKey, str], cases: Iterable[CaseKey],
@@ -974,6 +977,9 @@ def model_stage(
                 stage.whole.setdefault(ent_id, []).append(target)
                 continue
             paths = [p for p in paths if p != "[target]"]
+            for path in paths:
+                if before.cases[CaseKey(target, path)].status == "skipped":
+                    stage.skipped[str(CaseKey(target, path))] = ent_id
             keys = [k for k in before.cases if k.target == target and not before.cases[k].synthetic]
             if compress:
                 # A glob must not reach a decided case of another owner the

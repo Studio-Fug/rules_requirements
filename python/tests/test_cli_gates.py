@@ -296,3 +296,30 @@ def test_fail_on_failed_counts_an_invalid_requirement_that_rolls_up_into_no_fail
     assert statuses["REQ-2"] == "INVALID" and "FAILED" not in statuses.values(), statuses
     rc, _, _ = run(capsys, *common, "--fail-on", "failed")
     assert rc == 1
+
+
+def test_creating_the_first_lock_reports_no_lock_invalid_and_writes_a_readable_file(capsys, project):
+    """Release review: `sets lock --write` on the configured, not yet existing
+    (or empty) lock printed 'error: [lock-invalid] ... does not exist' before
+    writing it, and the file came out 0600 (mkstemp) beside 0644 siblings."""
+    write(project, "req/requirements.yaml", "config: {sets_lock: verification.rrlock}\n" + MODEL)
+    lock = project / "req" / "verification.rrlock"
+    old = os.umask(0o022)
+    try:
+        rc, _, err = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--write")
+        assert rc == 0 and lock.exists() and "lock-invalid" not in err, err
+        assert lock.stat().st_mode & 0o777 == 0o644
+        lock.write_text("")
+        rc, _, err = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--write")
+        assert rc == 0 and "lock-invalid" not in err and "suite::a1" in lock.read_text(), err
+        os.chmod(lock, 0o640)  # an existing lock keeps its mode
+        junit(project / "bazel-testlogs", "p/t/test.xml", [("a1", "passed", [], ""), ("a2", "passed", [], ""),
+                                                           ("a9", "passed", [], ""), ("b", "passed", [], "")])  # fmt: skip
+        rc, _, _ = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--write")
+        assert rc == 0 and "suite::a9" in lock.read_text() and lock.stat().st_mode & 0o777 == 0o640
+    finally:
+        os.umask(old)
+    # A broken lock is still reported (by the lock command itself) and nothing is written.
+    lock.write_text("cases: [1]\n")
+    rc, _, err = run(capsys, "sets", "lock", "--model", "req", *evidence(project), "--write")
+    assert rc == 2 and "lock-invalid" in err and lock.read_text() == "cases: [1]\n"
