@@ -325,7 +325,7 @@ as `:<name>.json` and so on.
 | `title` | `""` | Report title (default: the project name). |
 | `strict` | `False` | Fail on model **and attribution** warnings too (`rr report --strict`): every warning-level attribution issue — `coarse-claim`, `same-path-multiple-owners`, `unscoped-evidence`, `tag-mismatch`, ... — then fails the build, with no report written. |
 | `current_build` | `{}` | Current artifact identity; evidence recorded against another is stale. |
-| `check` | `False` | Also create `<name>_check_test`: `rr check-report` re-proves from `<name>.json` alone that no test case is owned by two entities. Needs `"json"` in `formats`. |
+| `check` | `"json" in formats` | Also create `<name>_check_test`: `rr check-report` re-proves from `<name>.json` alone that no test case is owned by two entities. On by default whenever the JSON report is built; `check = False` opts out; `check = True` without `"json"` in `formats` is an error. |
 | `lane` | `""` | The lane the evidence comes from (`rr report --lane`), stamped into the report. |
 | `lane_targets` | `None` | A file listing the targets that lane runs, one label per line (`--lane-targets`): not-run members of other targets read "out of lane". Verdicts never change. |
 | `on_attribution_error` | `"fail"` | A quarantined test case (several ids, several claimants, one test code with several owners) fails the build (`rr report` exits 3); `"warn"` builds the report anyway, where the case still counts for nobody and every entity it names reads INVALID. |
@@ -342,16 +342,18 @@ An `rr_model` with a `lock` pins the sets. The target provides
 ```starlark
 rr_sets_lock_test(
     name = "lock_test",
-    model = ":model",
+    model = ":model",  # rr_model(lock = "verification.rrlock")
     evidence = [":evidence"],
-    lock = "verification.rrlock",
 )
 ```
 
-Runs `rr sets check`: fails on a case the lock expects but the evidence does
+Runs `rr sets check` on the lock the model pins (`rr_model(lock)`, the one
+`rr_report` reads): fails on a case the lock expects but the evidence does
 not hold (`missing-case`), an owned case the lock does not list
-(`unlocked-member`), an owner change and a stale entry. `bazel run
-:lock_test.update` rewrites `lock` in the source tree from the same evidence
+(`unlocked-member`), an owner change and a stale entry. `lock` names the lock
+only for a model that has none (model files, or an `rr_model` without
+`lock`); analysis fails when it differs from the model's. `bazel run
+:lock_test.update` rewrites that lock in the source tree from the same evidence
 (`rr sets lock --write`; append `-- --allow-removals` to drop entries the
 evidence no longer has, after checking the run was complete). For hermetic
 projects whose evidence comes from `rr_evidence`; with real `bazel-testlogs`

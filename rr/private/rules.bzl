@@ -44,6 +44,28 @@ rr_model_rule = rule(
     },
 )
 
+def _rr_sets_lock_impl(ctx):
+    model_locks = [m[RrModelInfo].lock for m in ctx.attr.model if RrModelInfo in m and m[RrModelInfo].lock]
+    if len(model_locks) > 1:
+        fail("%s: more than one model names a lock: %s" % (ctx.label, [f.short_path for f in model_locks]))
+    given = ctx.file.lock
+    if model_locks and given and model_locks[0] != given:
+        fail(("%s: lock = %s, but the model pins %s (rr_model(lock)), which rr_report reads; check the same " +
+              "lock: drop `lock` here") % (ctx.label, given.short_path, model_locks[0].short_path))
+    chosen = model_locks[0] if model_locks else given
+    if not chosen:
+        fail("%s: no lock: give the rr_model a lock (rr_model(lock = ...)), or pass `lock`" % ctx.label)
+    return [DefaultInfo(files = depset([chosen]))]
+
+rr_sets_lock = rule(
+    implementation = _rr_sets_lock_impl,
+    doc = "The verification-set lock rr_sets_lock_test checks: the model's (RrModelInfo.lock), else `lock`.",
+    attrs = {
+        "model": attr.label_list(allow_files = True),
+        "lock": attr.label(allow_single_file = [".rrlock"]),
+    },
+)
+
 # A baked argument standing for the runfiles path of `executable`. Not
 # `$(rootpath <target>)`: that expands a target's files to build, which for a
 # py_binary under Bazel 7 are its launcher and its .py source (an error).

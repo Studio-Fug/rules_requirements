@@ -104,10 +104,11 @@ def _sets_lock_test_test_impl(ctx):
     problems = []
     check = _written(ctx.attr.check_main)
     update = _written(ctx.attr.update_main)
-    if '"sets","check"' not in check or '"--sets-lock","tests/rules/verification.rrlock"' not in check:
-        problems.append("the test does not run rr sets check on the lock: %s" % check)
-    if '"sets","lock","--write"' not in update or '"--out","tests/rules/verification.rrlock"' not in update:
-        problems.append("the .update binary does not rewrite the source lock: %s" % update)
+    lock = ctx.attr.lock
+    if '"sets","check"' not in check or '"--sets-lock","%s"' % lock not in check:
+        problems.append("the test does not run rr sets check on %s: %s" % (lock, check))
+    if '"sets","lock","--write"' not in update or '"--out","%s"' % lock not in update:
+        problems.append("the .update binary does not rewrite the source lock %s: %s" % (lock, update))
     return _result(problems)
 
 sets_lock_test_test = rule(
@@ -116,5 +117,6 @@ sets_lock_test_test = rule(
     attrs = {
         "check_main": attr.label(aspects = [_actions_aspect]),
         "update_main": attr.label(aspects = [_actions_aspect]),
+        "lock": attr.string(doc = "the workspace-relative lock both mains must name"),
     },
 )

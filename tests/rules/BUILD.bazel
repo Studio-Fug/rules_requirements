@@ -22,7 +22,8 @@ rr_report(
     on_attribution_error = "warn",
 )
 
-# No lock, no lane, the default on_attribution_error.
+# No lock, no lane, the default on_attribution_error, the default check
+# (a JSON report gets <name>_check_test).
 rr_report(
     name = "plain_report",
     evidence = ["evidence.xml"],
@@ -30,10 +31,39 @@ rr_report(
     model = ["plain.yaml"],
 )
 
+# No JSON: no check test (and no error).
+rr_report(
+    name = "md_report",
+    evidence = ["evidence.xml"],
+    formats = ["md"],
+    model = ["plain.yaml"],
+)
+
 rr_sets_lock_test(
     name = "lock_test",
     evidence = ["evidence.xml"],
     model = ":model",
+)
+
+# The lock comes from the model (rr_model(lock)): the one rr_report reads.
+rr_model(
+    name = "sub_model",
+    srcs = ["model.yaml"],
+    lock = "sets/v.rrlock",
+)
+
+rr_sets_lock_test(
+    name = "sub_lock_test",
+    evidence = ["evidence.xml"],
+    model = ":sub_model",
+)
+
+# Model files and an explicit lock.
+rr_sets_lock_test(
+    name = "files_lock_test",
+    evidence = ["evidence.xml"],
+    lock = "verification.rrlock",
+    model = "model.yaml",
 )
 
 model_lock_test(
@@ -53,6 +83,7 @@ report_test(
 
 report_test(
     name = "plain_report_analysis_test",
+    check_main = ":plain_report_check_test.rr_main",
     expect_lock = False,
     on_attribution_error = "fail",
     report = ":plain_report",
@@ -61,5 +92,20 @@ report_test(
 sets_lock_test_test(
     name = "sets_lock_test_analysis_test",
     check_main = ":lock_test.rr_main",
+    lock = "tests/rules/verification.rrlock",
     update_main = ":lock_test.update.rr_main",
+)
+
+sets_lock_test_test(
+    name = "sub_lock_test_analysis_test",
+    check_main = ":sub_lock_test.rr_main",
+    lock = "tests/rules/sets/v.rrlock",
+    update_main = ":sub_lock_test.update.rr_main",
+)
+
+sets_lock_test_test(
+    name = "files_lock_test_analysis_test",
+    check_main = ":files_lock_test.rr_main",
+    lock = "tests/rules/verification.rrlock",
+    update_main = ":files_lock_test.update.rr_main",
 )

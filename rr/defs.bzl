@@ -23,10 +23,10 @@ Test hooks:
 Reports:
   * `rr_evidence`         — run tests inside a build action, collecting JUnit.
   * `rr_report`           — model + evidence -> HTML / JSON / Markdown report;
-                            `check = True` adds `<name>_check_test`
+                            with a JSON report it adds `<name>_check_test`
                             (`rr check-report`: one owner per test case).
-  * `rr_sets_lock_test`   — the verification-set lock agrees with the
-                            evidence (`rr sets check`); `.update` re-locks.
+  * `rr_sets_lock_test`   — the model's verification-set lock agrees with
+                            the evidence (`rr sets check`); `.update` re-locks.
   * `rr_golden_test`      — compare a generated file with a checked-in golden.
 """
 
@@ -43,6 +43,7 @@ load(
     _rr_main = "rr_main",
     _rr_model = "rr_model_rule",
     _rr_report = "rr_report",
+    _rr_sets_lock = "rr_sets_lock",
 )
 
 RrModelInfo = _RrModelInfo
@@ -109,7 +110,7 @@ def rr_model(name, srcs, strict = False, validate = True, lock = None, visibilit
             **kwargs
         )
 
-def rr_report(name, model, check = False, **kwargs):
+def rr_report(name, model, check = None, **kwargs):
     """Renders the traceability report for a model and its evidence.
 
     See the private rule for every attribute (`evidence`, `srcs`, `formats`,
@@ -123,9 +124,11 @@ def rr_report(name, model, check = False, **kwargs):
       model: `rr_model` target(s) or model files.
       check: also create `<name>_check_test`, which re-proves from
         `<name>.json` alone that no test case is owned by two entities
-        (`rr check-report`).
+        (`rr check-report`). Default: whenever "json" is in `formats`.
       **kwargs: the report's other attributes.
     """
+    if check == None:
+        check = "json" in kwargs.get("formats", ["html", "json", "md"])
     _rr_report(name = name, model = model, check = check, **kwargs)
     if check:
         _py(
@@ -139,32 +142,44 @@ def rr_report(name, model, check = False, **kwargs):
             visibility = kwargs.get("visibility"),
         )
 
-def rr_sets_lock_test(name, model, evidence, lock = "verification.rrlock", **kwargs):
+def rr_sets_lock_test(name, model, evidence, lock = None, **kwargs):
     """Test that the verification-set lock agrees with the evidence.
 
     Runs `rr sets check` (exit 1 on a missing case, an unlocked member, an
-    owner change or a stale entry). `bazel run :<name>.update` re-locks:
-    `rr sets lock --write` rewrites `lock` in the source tree from the same
-    evidence (pass `-- --allow-removals` to drop entries the evidence no
-    longer has). For hermetic projects whose evidence is `rr_evidence`.
+    owner change or a stale entry) on the lock the model pins
+    (`rr_model(lock)`, the one `rr_report` reads). `bazel run :<name>.update`
+    re-locks: `rr sets lock --write` rewrites that lock in the source tree
+    from the same evidence (pass `-- --allow-removals` to drop entries the
+    evidence no longer has). For hermetic projects whose evidence is
+    `rr_evidence`.
 
     Args:
       name: test name.
       model: an `rr_model` target (or model files).
       evidence: `rr_evidence` targets and/or JUnit / records files.
-      lock: the lock file in this package.
+      lock: the lock file, for a model that names none (model files, or an
+        `rr_model` without `lock`). Analysis fails when it differs from the
+        model's lock.
       **kwargs: forwarded to the test.
     """
+    lock_target = ":%s_lock" % name
+    _rr_sets_lock(
+        name = name + "_lock",
+        model = [model],
+        lock = lock,
+        testonly = True,
+        visibility = ["//visibility:private"],
+    )
     evidence_args = ["$(rootpaths %s)" % e for e in evidence]
-    common = ["--model", "$(rootpaths %s)" % model, "--evidence"] + evidence_args + ["--sets-lock", "$(rootpath %s)" % lock]
-    data = [model, lock] + evidence
+    common = ["--model", "$(rootpaths %s)" % model, "--evidence"] + evidence_args + ["--sets-lock", "$(rootpath %s)" % lock_target]
+    data = [model, lock_target] + evidence
     _py("test", name, "cli", baked_args = ["sets", "check"] + common, data = data, **kwargs)
-    lock_path = "%s/%s" % (native.package_name(), lock) if native.package_name() else lock
     _py(
         "binary",
         name + ".update",
         "cli",
-        baked_args = ["sets", "lock", "--write"] + common + ["--out", lock_path],
+        # The lock's runfiles path is its workspace-relative source path.
+        baked_args = ["sets", "lock", "--write"] + common + ["--out", "$(rootpath %s)" % lock_target],
         data = data,
         tags = ["manual"],
         testonly = True,
