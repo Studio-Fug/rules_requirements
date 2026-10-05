@@ -1,6 +1,12 @@
 # Thermostat
 
-**1/2** user needs validated · **5/7** requirements verified (0 under-verified, 0 failed, 2 invalid, 0 incomplete, 0 unverified) · **1/2** risks mitigated · 17 test cases · 4 gaps
+**1/2** user needs validated · **5/7** requirements verified (0 under-verified, 0 failed, 2 invalid, 0 incomplete, 0 unverified) · **1/2** risks mitigated · 17 test cases (16 owned, 0 unowned, 1 quarantined) · 4 gaps
+
+_attribution: hybrid · lock: none (sets not pinned)_
+
+> ⛔ **ATTRIBUTION ERROR: 1 quarantined test case(s) count for no requirement** (a test case verifies at most one requirement); every entity they name is INVALID:
+>
+> - `//:setpoint_test#tests::requires_a_unit` — **multi-tag**: declared REQ-3, REQ-4
 
 ## User needs — validation
 
@@ -13,13 +19,13 @@
 
 | ID | Requirement | Traces | Demands | Evidence | Status |
 |---|---|---|---|---|---|
-| REQ-1 | Heat when the room is below the setpoint band | satisfies UN-1 | simulation | ✓ tests.test_controller::test_heats_below_band [simulation] | ✅ VERIFIED |
-| REQ-2 | Stop heating above the band; hold state inside it | satisfies UN-1 | simulation | ✓ tests.test_controller::test_stops_above_band_and_holds_inside_it [simulation] | ✅ VERIFIED |
-| REQ-3 | Parse setpoints in °C and °F | satisfies UN-2; implements MIT-2 | simulation | ✓ tests::parses_celsius_and_fahrenheit [simulation]<br>⛔ tests::requires_a_unit (multi-tag) | ❌ INVALID |
-| REQ-4 | Reject setpoints outside 5-30 °C | satisfies UN-2; implements MIT-2 | simulation | ✓ tests.test_controller::test_accepts_range_limits [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[30.1] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[4.9] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[80.0] [simulation]<br>✓ tests::rejects_out_of_range [simulation]<br>⛔ tests::requires_a_unit (multi-tag) | ❌ INVALID |
-| REQ-5 | Independent over-temperature cutoff | implements MIT-1 | sil | ✓ Interlock::NanReadingTrips [sil]<br>✓ Interlock::StaysTrippedUntilBelowReset [sil]<br>✓ Interlock::TripsAtLimit [sil] | ✅ VERIFIED |
-| REQ-6 | Fail safe on an invalid sensor reading | implements MIT-1 | simulation | ✓ tests.test_controller::test_invalid_reading_turns_heater_off[-41.0] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[85.1] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[nan] [simulation] | ✅ VERIFIED |
-| REQ-7 | Show the setpoint with its unit | satisfies UN-2 | inspection | ✓ display_test.DisplayTest::test_setpoint_shows_unit [simulation]<br>✓ inspection.TM-2::panel-shows-setpoint-unit [inspection] | ✅ VERIFIED |
+| REQ-1 | Heat when the room is below the setpoint band | satisfies UN-1 | simulation | set 1/1 passed<br>✓ tests.test_controller::test_heats_below_band [simulation] | ✅ VERIFIED |
+| REQ-2 | Stop heating above the band; hold state inside it | satisfies UN-1 | simulation | set 1/1 passed<br>✓ tests.test_controller::test_stops_above_band_and_holds_inside_it [simulation] | ✅ VERIFIED |
+| REQ-3 | Parse setpoints in °C and °F | satisfies UN-2; implements MIT-2 | simulation | set 1/2 passed · 1 quarantined<br>✓ tests::parses_celsius_and_fahrenheit [simulation]<br>⛔ tests::requires_a_unit (multi-tag) | ❌ INVALID |
+| REQ-4 | Reject setpoints outside 5-30 °C | satisfies UN-2; implements MIT-2 | simulation | set 5/6 passed · 1 quarantined<br>✓ tests.test_controller::test_accepts_range_limits [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[30.1] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[4.9] [simulation]<br>✓ tests.test_controller::test_rejects_setpoints_outside_range[80.0] [simulation]<br>✓ tests::rejects_out_of_range [simulation]<br>⛔ tests::requires_a_unit (multi-tag) | ❌ INVALID |
+| REQ-5 | Independent over-temperature cutoff | implements MIT-1 | sil | set 3/3 passed<br>✓ Interlock::NanReadingTrips [sil]<br>✓ Interlock::StaysTrippedUntilBelowReset [sil]<br>✓ Interlock::TripsAtLimit [sil] | ✅ VERIFIED |
+| REQ-6 | Fail safe on an invalid sensor reading | implements MIT-1 | simulation | set 3/3 passed<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[-41.0] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[85.1] [simulation]<br>✓ tests.test_controller::test_invalid_reading_turns_heater_off[nan] [simulation] | ✅ VERIFIED |
+| REQ-7 | Show the setpoint with its unit | satisfies UN-2 | inspection | set 2/2 passed<br>✓ display_test.DisplayTest::test_setpoint_shows_unit [simulation]<br>✓ inspection.TM-2::panel-shows-setpoint-unit [inspection] | ✅ VERIFIED |
 
 ## Risks — control
 
@@ -63,6 +69,87 @@
 | interlock | ✅ VERIFIED |
 | setpoint | ❌ FAILED |
 | thermostat | ❌ FAILED |
+
+## Verification sets
+
+Each entity's set: the cases it owns, the cases it expects (literal selectors, the lock) and every quarantined case that names it. It is verified only when the whole set passed together.
+
+### REQ-1 — ✅ VERIFIED
+
+set 1/1 passed
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:controller_test#tests.test_controller::test_heats_below_band | passed | simulation | tag | tag |  |
+
+### REQ-2 — ✅ VERIFIED
+
+set 1/1 passed
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:controller_test#tests.test_controller::test_stops_above_band_and_holds_inside_it | passed | simulation | tag | tag |  |
+
+### REQ-3 — ❌ INVALID
+
+set 1/2 passed · 1 quarantined
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:setpoint_test#tests::parses_celsius_and_fahrenheit | passed | simulation | tag | tag |  |
+| //:setpoint_test#tests::requires_a_unit | quarantined | simulation | tag | tag | multi-tag |
+
+### REQ-4 — ❌ INVALID
+
+set 5/6 passed · 1 quarantined
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:controller_test#tests.test_controller::test_accepts_range_limits | passed | simulation | tag | tag |  |
+| //:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[4.9] | passed | simulation | tag | tag |  |
+| //:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[30.1] | passed | simulation | tag | tag |  |
+| //:controller_test#tests.test_controller::test_rejects_setpoints_outside_range[80.0] | passed | simulation | tag | tag |  |
+| //:setpoint_test#tests::rejects_out_of_range | passed | simulation | tag | tag |  |
+| //:setpoint_test#tests::requires_a_unit | quarantined | simulation | tag | tag | multi-tag |
+
+### REQ-5 — ✅ VERIFIED
+
+set 3/3 passed
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:interlock_test#Interlock::NanReadingTrips | passed | sil | tag | tag |  |
+| //:interlock_test#Interlock::StaysTrippedUntilBelowReset | passed | sil | tag | tag |  |
+| //:interlock_test#Interlock::TripsAtLimit | passed | sil | tag | tag |  |
+
+### REQ-6 — ✅ VERIFIED
+
+set 3/3 passed
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[85.1] | passed | simulation | tag | tag |  |
+| //:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[-41.0] | passed | simulation | tag | tag |  |
+| //:controller_test#tests.test_controller::test_invalid_reading_turns_heater_off[nan] | passed | simulation | tag | tag |  |
+
+### REQ-7 — ✅ VERIFIED
+
+set 2/2 passed
+
+| Case | State | Level | Via | Selector | Note |
+|---|---|---|---|---|---|
+| //:display_test#display_test.DisplayTest::test_setpoint_shows_unit | passed | simulation | tag | tag |  |
+| record:panel_inspection#inspection.TM-2::panel-shows-setpoint-unit | passed | inspection | tag | tag |  |
+
+## Case attribution
+
+| Target | Cases | Owned | Quarantined | Unowned | Owners |
+|---|---|---|---|---|---|
+| //:controller_test | 9 | 9 | 0 | 0 | REQ-1, REQ-2, REQ-4, REQ-6 |
+| //:display_test | 1 | 1 | 0 | 0 | REQ-7 |
+| //:interlock_test | 3 | 3 | 0 | 0 | REQ-5 |
+| //:setpoint_test | 3 | 2 | 1 | 0 | REQ-3, REQ-4 |
+| record:panel_inspection | 1 | 1 | 0 | 0 | REQ-7 |
 
 ## Gaps
 

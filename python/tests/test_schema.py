@@ -259,3 +259,23 @@ def test_report_schema_accepts_generated_reports_and_rejects_a_list_owner():
     bad = {**doc, "cases": [{**owned, "owner": [owned["owner"], "REQ-2"]}]}
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(bad)
+
+
+@pytest.mark.parametrize(
+    "golden",
+    [
+        "tests/integration/report.golden.json",
+        "tests/integration/rr_case_report.golden.json",
+        "examples/thermostat/report.golden.json",
+    ],
+)
+def test_report_schema_accepts_the_checked_in_goldens(golden):
+    from rules_requirements import checkreport
+
+    path = os.path.join(_ROOT, golden)
+    if not os.path.exists(path):
+        pytest.skip(f"{golden} not available")
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    jsonschema.Draft202012Validator(_report_schema()).validate(doc)
+    assert checkreport.check_report(doc) == []
