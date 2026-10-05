@@ -142,3 +142,21 @@ def test_graph_refines_loop_and_layout(tmp_path):
     assert pos["REQ-1"][0] == pos["REQ-2"][0]
     svg = graph.to_svg(nodes, edges)
     assert 'stroke-dasharray="4 3"' in svg and "…" in svg
+
+
+def test_graph_case_nodes_read_the_attribution(model):
+    from rules_requirements.attribution import attribute
+    from rules_requirements.ingest import Evidence, TestCase
+
+    ev = Evidence()
+    ev.add(TestCase("a", "passed", classname="s", target="//t:x_test", declared=("REQ-1",)))
+    ev.add(TestCase("b", "passed", classname="s", target="//t:x_test", declared=("REQ-1", "REQ-2")))
+    att = attribute(model, ev)
+    nodes, edges = graph.cases(att)
+    assert [(n.id, n.kind, n.status) for n in nodes] == [("//t:x_test#s::a", "case", "passed")]  # b: multi-tag
+    assert [(e.source, e.target, e.relation) for e in edges] == [(o, str(k), "verifies") for k, o in att.owner.items()]
+    assert len({e.target for e in edges}) == len(edges)  # one in-edge per case
+    assert graph.cases(att, {"REQ-2"}) == ([], [])
+    entity_nodes, entity_edges = graph.build(model)
+    svg = graph.to_svg(entity_nodes + nodes, entity_edges + edges)
+    assert "Test cases" in svg and svg.count("rr-case") == len(nodes)

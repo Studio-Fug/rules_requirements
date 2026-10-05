@@ -294,10 +294,18 @@ def cmd_graph(args: argparse.Namespace) -> int:
     if not ok:
         return 2
     statuses: dict[str, str] = {}
+    if args.cases and not args.evidence:
+        print("rr graph: --cases needs --evidence (a case's owner comes from attribution over it)", file=sys.stderr)
+        return 2
+    attribution = None
     if args.evidence:
         matrix = build_matrix(model, ingest.collect([_path(p) for p in args.evidence]))
         statuses = {k: v.status for k, v in matrix.verdicts.items()}
+        attribution = matrix.attribution
     nodes, edges = graph.build(model, statuses, include_methods=args.methods)
+    if args.cases and attribution is not None:
+        case_nodes, case_edges = graph.cases(attribution, {n.id for n in nodes})
+        nodes, edges = nodes + case_nodes, edges + case_edges
     render = {"dot": graph.to_dot, "mermaid": graph.to_mermaid, "json": graph.to_json, "svg": graph.to_svg}
     _write(args.out, render[args.format](nodes, edges))
     return 0
@@ -702,6 +710,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         current_build=_kv(args.current_build),
         scan=not args.no_scan,
         author=args.author,
+        lanes=_serve_lanes(args.lane_targets, root),
     )
     snap = ws.snapshot()
     llm = default_llm(enabled=not args.no_llm, model=args.agent_model, effort=args.agent_effort)
@@ -738,6 +747,22 @@ def cmd_serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         httpd.shutdown()
     return 0
+
+
+def _serve_lanes(specs: list[str] | None, root: str) -> dict[str, list[str]]:
+    """``--lane-targets NAME=FILE``: each lane's targets, one label per line
+    (``#`` comments and blank lines skipped), as ``rr report --lane-targets``
+    reads them."""
+    lanes: dict[str, list[str]] = {}
+    for name, path in _kv(specs).items():
+        full = path if os.path.isabs(path) else os.path.join(root, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                lines = [line.strip() for line in fh]
+        except OSError as exc:
+            raise SystemExit(f"rr serve: --lane-targets {name}: cannot read {path}: {exc}") from None
+        lanes[name] = [line for line in lines if line and not line.startswith("#")]
+    return lanes
 
 
 def cmd_wrap(args: argparse.Namespace) -> int:
@@ -852,6 +877,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--format", choices=["dot", "mermaid", "json", "svg"], default="mermaid")
     g.add_argument("--evidence", nargs="*", default=[], help="color nodes by status")
     g.add_argument("--methods", action="store_true", help="include test methods")
+    g.add_argument(
+        "--cases",
+        action="store_true",
+        help="add a node per owned test case, with one edge from its one owner (needs --evidence)",
+    )
     g.add_argument("--out", default="-")
     g.set_defaults(func=cmd_graph)
 
@@ -954,6 +984,12 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--allow-host", action="append", help="extra Host header value to accept (e.g. behind a proxy)")
     sv.add_argument("--author", default="", help='default author for edits and commits, "Name <email>"')
     sv.add_argument("--current-build", action="append", metavar="KEY=VALUE")
+    sv.add_argument(
+        "--lane-targets",
+        action="append",
+        metavar="NAME=FILE",
+        help="the targets lane NAME runs, one label per line: the case ledger can filter by lane",
+    )
     sv.add_argument("--no-scan", action="store_true", help="skip the source annotation scan")
     sv.add_argument("--no-llm", action="store_true", help="disable LLM-backed agent workflows")
     sv.add_argument("--agent-model", default="", help="Claude model for agents (default claude-opus-5-5)")
