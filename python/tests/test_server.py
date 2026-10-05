@@ -84,7 +84,7 @@ def test_trace_graph_queue_annotations_source(api):
     assert {n["id"] for n in g["nodes"]} == {"RISK-1", "MIT-1"} and "#/entity/" in g["svg"]
     g = call(api, "GET", "/api/graph", kinds="user_need,requirement", methods="1")
     assert {n["kind"] for n in g["nodes"]} == {"user_need", "requirement"} and "flowchart" in g["mermaid"]
-    assert call(api, "GET", "/api/report")["schema"] == "rules_requirements/report/v1"
+    assert call(api, "GET", "/api/report")["schema"] == "rules_requirements/report/v2"
     assert any(q["kind"] == "unverified" for q in call(api, "GET", "/api/queue")["queue"])
     ann = call(api, "GET", "/api/annotations")
     assert ann["scanned"] and ann["annotations"][0]["unknown"] == []
