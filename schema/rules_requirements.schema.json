@@ -192,6 +192,11 @@
                   "default": "error",
                   "description": "A requirement that refines two or more parents: refines must form a tree, so each test case's evidence rolls up one chain of requirements."
                 },
+                "multi-parent-implements": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A requirement that implements a mitigation and has another parent (a second mitigation, or a requirement it refines): each test case's evidence would roll up two chains of verified entities."
+                },
                 "parent-with-claims": {
                   "$ref": "#/$defs/ruleSeverity",
                   "default": "warning",
@@ -205,7 +210,7 @@
                 "lock-stale": {
                   "$ref": "#/$defs/ruleSeverity",
                   "default": "error",
-                  "description": "A lock entry that no claim of its owner matches (model mode)."
+                  "description": "A lock entry that no claim of its owner matches (model mode), or the entry of an absent suite:/record: pseudo-target whose case now runs under another target."
                 }
               },
               "additionalProperties": false,

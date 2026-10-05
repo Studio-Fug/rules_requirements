@@ -46,7 +46,7 @@ from rules_requirements.case_keys import (
 from rules_requirements.config import Config
 from rules_requirements.ingest import ERROR, FAILED, PASSED, SKIPPED, Evidence, TestCase
 from rules_requirements.ingest.junit import target_from_path
-from rules_requirements.lock import Lock, is_no_lock
+from rules_requirements.lock import Lock, is_no_lock, moved_from_pseudo
 from rules_requirements.model import VERIFIABLE_KINDS, Claim, Model
 from rules_requirements.util import dedupe, natural_key
 
@@ -1072,9 +1072,20 @@ class _Attributor:
                 continue  # not a verifiable entity: lock-invalid, which validation reports
             key = CaseKey(entry.target, entry.path)
             origin = f"{where}:{entry.line}" if entry.line else where
-            if self.mode == "model" and not any(
-                _claim_matches(c, entry.path) for c in by_owner_target.get((ent, entry.target), ())
-            ):
+            claimed = any(_claim_matches(c, entry.path) for c in by_owner_target.get((ent, entry.target), ()))
+            moved = None if claimed else moved_from_pseudo(entry, self.owner, self.targets)
+            if moved is not None:
+                # Filed under the moved case's key, a target that ran, so
+                # `rr sets check` (restricted to those) reports it too.
+                self.issue(
+                    "lock-stale",
+                    f"{key} is locked to {ent} ({origin}), but {key.target} is not in the evidence and "
+                    f"{ent} now owns the case as {moved}: the evidence moved into a testlogs tree; re-lock "
+                    "(`rr sets lock --write --allow-removals`) to drop the old entry",
+                    key=moved,
+                    entities=(ent,),
+                )
+            elif self.mode == "model" and not claimed:
                 self.issue(
                     "lock-stale",
                     f"{key} is locked to {ent} ({origin}), but no claim of {ent} selects it; re-lock "

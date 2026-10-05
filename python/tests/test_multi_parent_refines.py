@@ -129,3 +129,35 @@ def test_the_editor_refuses_a_second_parent_with_409(tmp_path):
     assert (tmp_path / "req/m.yaml").read_text() == before  # nothing written
     # Another edit of a requirement with one parent saves.
     ws.update("REQ-3", {**leaf, "refines": ["REQ-2"], "title": "leaf, renamed"})
+
+
+def test_the_editor_lets_a_grandfathered_child_drop_parents_but_not_gain_one(tmp_path):
+    """REQ-3 already refines two parents on disk (the model is invalid, but an
+    edit must not make it worse): an edit that keeps its parents, or renames
+    one, saves; a third parent, or swapping one for another, is a 409; and
+    dropping one saves."""
+    import subprocess
+
+    from rules_requirements.server.workspace import Workspace, WorkspaceError
+
+    write(tmp_path, "req/m.yaml", TWO_PARENTS + "  - {id: REQ-4, title: lights, satisfies: [UN-2]}\n")
+    junit(tmp_path / "bazel-testlogs", "p/t/test.xml", [("only", "passed", [], "")])
+    for args in (("init", "-q", "-b", "main"), ("add", "-A"), ("commit", "-qm", "init")):
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args], cwd=tmp_path, check=True, capture_output=True
+        )
+    ws = Workspace(root=str(tmp_path), model_paths=["req"], evidence_paths=["bazel-testlogs"])
+    child = {"title": "one child of both", "verified_by": [{"target": "//p:t", "cases": ["suite::only"]}]}
+    ws.update("REQ-3", {**child, "title": "still both", "refines": ["REQ-2", "REQ-1"]})
+    ws.rename("REQ-1", "REQ-10")  # a renamed parent is the same parent
+    for refines in (["REQ-10", "REQ-2", "REQ-4"], ["REQ-10", "REQ-4"]):
+        before = (tmp_path / "req/m.yaml").read_text()
+        with pytest.raises(WorkspaceError) as exc:
+            ws.update("REQ-3", {**child, "refines": refines})
+        assert exc.value.status == 409
+        (conflict,) = exc.value.data["conflicts"]
+        assert conflict["code"] == "multi-parent-refines"
+        assert "already had 2 parents (REQ-2, REQ-10)" in conflict["message"] and "not add REQ-4" in conflict["message"]
+        assert (tmp_path / "req/m.yaml").read_text() == before
+    ws.update("REQ-3", {**child, "refines": ["REQ-10"]})
+    assert not [i for i in validate(ws.model) if i.code == "multi-parent-refines"]

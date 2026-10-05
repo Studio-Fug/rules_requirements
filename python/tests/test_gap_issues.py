@@ -164,3 +164,39 @@ def test_the_gap_queue_table_has_a_row_for_every_attribution_issue():
     rows = _table("\n" + _doc("docs/concepts.md"), "\n| Gap kind | Raised for | Route |")
     kinds = {k for row in rows for k in CODE.findall(row[0])}
     assert kinds >= CODES, sorted(CODES - kinds)
+
+
+# The unscoped-evidence fix changes case keys (suite:<name>#... to the build
+# target's), so a lock written first keeps stale suite: entries: every place
+# that tells an upgrader to move the JUnit also says to do it before locking,
+# or how to drop them after.
+@pytest.mark.parametrize(
+    "doc, start",
+    [
+        ("docs/guides/outputs.md", "| `unscoped-evidence` |"),
+        ("docs/release-notes.md", "- **`--fail-on gaps` fails on more gaps.**"),
+        ("docs/guides/migrating-to-per-case.md", "2. Replace each shared whole-target reference"),
+    ],
+)
+def test_the_unscoped_evidence_fix_says_to_move_before_locking_or_relock(doc, start):
+    item = _bullet(_doc(doc), start)
+    assert "before lock" in item or "first" in item, doc
+    assert "rr sets lock --write --allow-removals" in item and "`lock-stale`" in item, doc
+
+
+def test_the_model_guide_says_what_allow_removals_drops_for_an_absent_target():
+    text = " ".join(_doc("docs/guides/model.md").split())
+    begin = text.index("`rr sets lock` refuses while a case is quarantined")
+    para = text[begin : text.index("`rr sets check` exits 1", begin)]
+    assert "keeps an entry even with `--allow-removals`" in para
+    assert "`suite:`/`record:` pseudo-target" in para and "`lock-stale`" in para
+
+
+def test_the_release_notes_validation_bullet_is_whole():
+    """The rule bullets that follow 'Validation of claims' must not split it:
+    its last sentence (rr validate's per-family JUnit) stays in it."""
+    text = _doc("docs/release-notes.md")
+    validation = _bullet(text, "- **Validation of claims**")
+    assert "`rr validate` writes one JUnit case per check family" in " ".join(validation.split())
+    for rule in ("multi-parent-refines", "multi-parent-implements"):
+        assert "XML_OUTPUT_FILE" not in _bullet(text, f"- **`{rule}`**"), rule

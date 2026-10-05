@@ -214,6 +214,7 @@ def test_schema_lists_exactly_the_configurable_rules_with_their_defaults():
     rules = schema["oneOf"][0]["properties"]["config"]["properties"]["rules"]
     assert {k: v["default"] for k, v in rules["properties"].items()} == dict(cfg.DEFAULT_RULES)
     assert rules["properties"]["multi-parent-refines"]["default"] == "error"
+    assert rules["properties"]["multi-parent-implements"]["default"] == "error"
     validator = jsonschema.Draft202012Validator(schema)
     assert validator.is_valid({"config": {"rules": {"multi-parent-refines": "warning"}}})
     assert not validator.is_valid({"config": {"rules": {"multi-parent-refines": "loud"}}})

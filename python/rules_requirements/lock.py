@@ -46,7 +46,8 @@ from rules_requirements._vendor import yaml
 from rules_requirements.util import natural_key
 
 if TYPE_CHECKING:  # pragma: no cover - typing only (attribution imports this module)
-    from rules_requirements.attribution import Attribution
+    from rules_requirements.attribution import Attribution, TargetRun
+    from rules_requirements.case_keys import CaseKey
     from rules_requirements.model import Model
 
 SCHEMA = "rules_requirements/verification-lock/v1"
@@ -367,6 +368,12 @@ def plan_lock(
       select to that entity (an owner change, in ``changed``), gains each
       literal selector's case, and ``[target]`` for a whole-target claim
       whose entity has no entry there yet.
+    * A ``suite:``/``record:`` pseudo-target names no build target, so its
+      absence cannot be told from a move: in hybrid mode its entry that no
+      claim selects is ``removed`` when its case path now runs under another
+      target (JUnit moved into a testlogs tree), and always under
+      ``allow_removals``. A build target's entry is never dropped for its
+      target's absence alone (another lane may run it).
     * Entries dropped from a target that ran, and stale entries of absent
       targets (no claim selects them), are ``removed``; they stay in
       ``lock``, unchanged, unless ``allow_removals``.
@@ -403,7 +410,7 @@ def plan_lock(
         others = list(dict.fromkeys(c.entity for c in on_target if c.entity != entry.owner and c.matches(entry.path)))
         if len(others) == 1:
             new.setdefault(k, LockEntry(entry.target, entry.path, others[0]))
-        elif hybrid and not own and not others:
+        elif hybrid and not own and not others and not _pseudo_gone(entry, attribution, ran, allow_removals):
             new.setdefault(k, LockEntry(entry.target, entry.path, entry.owner))  # may be tag-owned
         else:
             removed.append(entry)  # stale: no claim selects it (or several do: shared-case)
@@ -440,6 +447,40 @@ def plan_lock(
         refused=refused,
         allow_removals=allow_removals,
     )
+
+
+def moved_from_pseudo(
+    entry: LockEntry, owner: Mapping[CaseKey, str], targets: Mapping[str, TargetRun]
+) -> CaseKey | None:
+    """The case key that now holds ``entry``'s case when ``entry`` is filed
+    under a ``suite:``/``record:`` pseudo-target the evidence does not hold
+    and a target that ran gives the same case path the same owner; None
+    otherwise. ``owner`` and ``targets`` are an attribution's.
+
+    That is JUnit moved from outside a testlogs tree into one: the old
+    pseudo-target's entry is stale, and would otherwise stay an expected
+    ``not-run`` member of its owner's set for good."""
+    if not labels.is_pseudo(entry.target):
+        return None
+    run = targets.get(entry.target)
+    if run is not None and run.ran:
+        return None
+    for key in sorted(owner, key=lambda k: (natural_key(k.target), natural_key(k.path))):
+        if key.path != entry.path or key.target == entry.target or owner[key] != entry.owner:
+            continue
+        other = targets.get(key.target)
+        if other is not None and other.ran:
+            return key
+    return None
+
+
+def _pseudo_gone(entry: LockEntry, attribution: Attribution, ran: set[str], allow_removals: bool) -> bool:
+    """Whether a hybrid "may be tag-owned" entry of an absent target is stale:
+    its target is a pseudo-target and removals are allowed, or its case now
+    runs under another target (:func:`moved_from_pseudo`)."""
+    if not labels.is_pseudo(entry.target) or entry.target in ran:
+        return False
+    return allow_removals or moved_from_pseudo(entry, attribution.owner, attribution.targets) is not None
 
 
 def _order(entry: LockEntry) -> tuple[Any, ...]:

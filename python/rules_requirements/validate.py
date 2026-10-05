@@ -138,6 +138,7 @@ class _Validator:
                 self.add("missing-level", f"{tm.id}: a test method must declare its level", tm)
         self.check_refines_cycles()
         self.check_refines_tree()
+        self.check_implements_chain()
         for un in self.m.user_needs.values():
             if not self.m.requirements_for_need(un.id):
                 self.rule("need-unsatisfied", f"{un.id}: no requirement satisfies this need", un)
@@ -299,6 +300,33 @@ class _Validator:
                     "through derived verdicts. Keep one parent, or split it into one requirement per parent",
                     req,
                 )
+
+    def check_implements_chain(self) -> None:
+        """A requirement that implements a mitigation has no other parent.
+
+        A mitigation's VERIFIED is derived from the requirements that
+        implement it, as a parent requirement's is from its children. A
+        requirement implementing two mitigations, or implementing one and
+        refining a requirement, would make each of its test cases the basis
+        of two VERIFIED verdicts that are not on one chain. One requirement
+        may still satisfy several user needs (VALIDATED is not a
+        verification), and one mitigation may mitigate several risks."""
+        for req in self.m.requirements.values():
+            mits = [m.id for m in self.m.mitigations_implemented_by(req.id)]
+            if not mits:
+                continue
+            parents = sorted({p for p in req.refines if p != req.id}, key=natural_key)
+            if len(mits) + len(parents) < 2:
+                continue
+            links = [f"implements {', '.join(mits)}"] + ([f"refines {', '.join(parents)}"] if parents else [])
+            self.rule(
+                "multi-parent-implements",
+                f"{req.id}: {' and '.join(links)}; a requirement that implements a mitigation has no other "
+                f"parent, or every test case of {req.id} would be the basis of {' and '.join(mits + parents)} "
+                "through derived verdicts. Keep one link: one mitigation may mitigate several risks, and a parent "
+                "requirement may implement the mitigation for all of its children",
+                req,
+            )
 
     # --- claims: one owner per test case --------------------------------------
 

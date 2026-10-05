@@ -13,8 +13,9 @@ before anything is written. An edit that would let one test case verify two
 entities (``shared-case``, ``same-code-multiple-owners``, a new
 ``attribution-conflict``), break a selector or a target (``bad-selector``,
 ``bad-target``), claim a whole target without a reason
-(``whole-target-reference``), give a requirement two ``refines`` parents
-(``multi-parent-refines``, while that rule is an error) or contradict the verification-set lock
+(``whole-target-reference``), give a requirement a second parent (two ``refines`` parents,
+``multi-parent-refines``; or a mitigation it implements and another parent,
+``multi-parent-implements``; while those rules are errors) or contradict the verification-set lock
 (``lock-owner-changed``, ``lock-invalid``) is refused with a 409 that names
 the case and its current owner (:class:`Conflict`). Which entity owns a case
 is read from the :class:`~rules_requirements.attribution.Attribution` alone;
@@ -88,8 +89,9 @@ class WorkspaceError(Exception):
 
 # Problems a save may not introduce (refused with 409): the hard errors of
 # the one-owner rule, which cannot be configured off, plus an unreasoned
-# whole-target claim and a requirement with two refines parents
-# (``multi-parent-refines``, while the rule is an error). Every conflict
+# whole-target claim and a requirement with a second parent
+# (``multi-parent-refines``, ``multi-parent-implements``, while those rules
+# are errors). Every conflict
 # Workspace.check builds names one of these codes (it refuses the save as a
 # guard error otherwise), so this tuple is the guard's whole vocabulary.
 GUARDED = (
@@ -100,10 +102,23 @@ GUARDED = (
     "bad-target",
     "whole-target-reference",
     "multi-parent-refines",
+    "multi-parent-implements",
     "lock-owner-changed",
     "lock-invalid",
 )
 REPORT_TIME = ("attribution-conflict", "same-code-multiple-owners")  # quarantines a save may not introduce
+PARENT_RULES = ("multi-parent-refines", "multi-parent-implements")
+
+
+def _parents(model: Model, req_id: str, code: str) -> set[str]:
+    """The parents ``code`` counts for requirement ``req_id``: the
+    requirements it refines, and for ``multi-parent-implements`` also the
+    mitigations it implements."""
+    req = model.requirements.get(req_id)
+    out = {p for p in req.refines if p != req_id} if req is not None else set()
+    if code == "multi-parent-implements":
+        out |= {m.id for m in model.mitigations_implemented_by(req_id)}
+    return out
 
 
 @dataclass(frozen=True)
@@ -523,13 +538,27 @@ class Workspace:
                 continue
             conflicts.append(Conflict(i.code, i.message, entities=(i.entity,)))
         conflicts += self._unreasoned_whole_claims(candidate, snap.model, edited, old)
-        # Refines must form a tree (multi-parent-refines, an error unless
-        # configured): two parents would make each of the requirement's
-        # cases the basis of both parents' derived verdicts.
-        had_tree = {i.entity for i in snap.issues if i.code == "multi-parent-refines" and i.severity == "error"}
+        # One parent per requirement (multi-parent-refines and
+        # multi-parent-implements, errors unless configured): a second parent
+        # would make each of the requirement's cases the basis of both
+        # parents' derived verdicts. A requirement that already had several
+        # parents may keep or drop them, never gain one.
+        had = {(i.code, i.entity) for i in snap.issues if i.code in PARENT_RULES and i.severity == "error"}
         for i in issues:
-            if i.code == "multi-parent-refines" and i.severity == "error" and old(i.entity) not in had_tree:
-                conflicts.append(Conflict(i.code, i.message, entities=(i.entity,)))
+            if i.code not in PARENT_RULES or i.severity != "error":
+                continue
+            prev = old(i.entity)
+            message = i.message
+            if (i.code, prev) in had:
+                before = _parents(snap.model, prev, i.code)
+                gained = sorted({old(p) for p in _parents(candidate, i.entity, i.code)} - before, key=natural_key)
+                if not gained:
+                    continue
+                message += (
+                    f"; {prev} already had {len(before)} parents ({', '.join(sorted(before, key=natural_key))}), "
+                    f"and an edit may drop them but not add {', '.join(gained)}"
+                )
+            conflicts.append(Conflict(i.code, message, entities=(i.entity,)))
         # The lock: a locked case another entity's claims would select, or
         # an entry whose owner the save removes.
         if lock == "configured":

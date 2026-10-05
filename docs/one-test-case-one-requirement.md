@@ -9,7 +9,7 @@ applies to user needs and mitigations as well: requirements, user needs and
 mitigations share one namespace, so a case verifies at most one *entity*.
 Verdicts derived through `refines`, `satisfies` and `implements` are not
 ownership; {ref}`derived-verdicts` explains why they cannot make one case
-verify two requirements.
+verify two requirements or two mitigations.
 
 ## Why the rule exists
 
@@ -127,6 +127,21 @@ shows the shared rollup honestly (`basis: derived` on both parents, each
 `derived_from` the one child), but the rule is the tool's default for a
 reason.
 
+**A requirement that implements a mitigation has no other parent.** A
+mitigation's VERIFIED is derived from the requirements that implement it,
+exactly as a parent requirement's is from its children, so a mitigation is a
+parent too. A requirement implementing two mitigations, or implementing one
+and refining a requirement, would make each of its cases the basis of two
+VERIFIED verdicts that are not on one chain. `rr validate` raises
+`multi-parent-implements`, an error by default, wherever
+`multi-parent-refines` is raised. The fixes keep the traceability: one
+mitigation may mitigate several risks, so two mitigations one requirement
+implements can be merged into one that mitigates both risks; or the parent
+requirement implements the mitigation, and its children's cases roll up one
+chain (child, parent, mitigation); or the requirement is split, one per
+parent. `config.rules: {multi-parent-implements: warning}` relaxes it the way
+`multi-parent-refines` is relaxed.
+
 **One requirement may satisfy several user needs.** Each of those needs'
 VALIDATION is then derived from it, and that is allowed. User needs are
 validated, not verified: VALIDATED says that the requirements written for a
@@ -137,10 +152,12 @@ it is ordinary traceability (one capability serving several needs), and
 forbidding it would force a project to duplicate requirements and their
 tests, which is the opposite of what the rule is for. A need that also claims
 cases of its own (`validated_by`) owns those cases like any other entity.
-Mitigations derive from the requirements that implement them the same way,
-and 0.3 does not limit how many mitigations one requirement implements: the
-requirement is verified once, from one set, and each mitigation's verdict
-reads that one verdict.
+The same holds one level up the risk file: a risk reads MITIGATED from its
+mitigations, a judgement about risk control rather than a verification, so
+one mitigation may mitigate several risks. Test methods and modules also roll up requirements,
+but they are views that group requirements by how they are verified and
+where they are implemented: they claim no cases, have no verification set,
+and are not entities a test case could verify.
 
 ## Quarantine: ambiguity fails closed
 

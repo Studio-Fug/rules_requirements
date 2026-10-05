@@ -123,11 +123,17 @@ DEFAULT_RULES = {
     # A requirement that refines two or more parents: refines must form a tree,
     # so each test case's evidence rolls up one chain of requirements.
     "multi-parent-refines": "error",
+    # A requirement that implements a mitigation and has another parent (a
+    # second mitigation, or a requirement it refines): each test case's
+    # evidence would roll up two chains.
+    "multi-parent-implements": "error",
     # A requirement with refining children also claims cases of its own.
     "parent-with-claims": "warning",
     # `rr scan`: a verifies annotation naming several ids. Error by default from 0.4.
     "multi-verifies-annotation": "warning",
-    # A lock entry that no claim of its owner matches (model mode).
+    # A lock entry that no claim of its owner matches (model mode), or the
+    # entry of an absent suite:/record: pseudo-target whose case now runs
+    # under another target.
     "lock-stale": "error",
 }
 RULE_SEVERITIES = ("error", "warning", "off")

@@ -164,7 +164,10 @@ _FAMILY = {
         ("shape", "unknown-field", "bad-id", "bad-enum", "bad-status", "bad-level", "missing-level", "duplicate-id"),
         "shape",
     ),
-    **dict.fromkeys(("bad-reference", "dangling-reference", "refines-cycle", "multi-parent-refines"), "references"),
+    **dict.fromkeys(
+        ("bad-reference", "dangling-reference", "refines-cycle", "multi-parent-refines", "multi-parent-implements"),
+        "references",
+    ),
     **dict.fromkeys(
         (
             "shared-case",
@@ -1273,7 +1276,8 @@ def cmd_sets(args: argparse.Namespace) -> int:
     if plan.removed and not args.allow_removals:
         print(
             f"rr sets lock: {len(plan.removed)} entr(y/ies) would be removed (a case missing from a target that ran, "
-            "or no claim selects it): kept; pass --allow-removals after checking the run was complete",
+            "a case no claim selects, or a suite:/record: entry whose case now runs under another target): kept; "
+            "pass --allow-removals after checking the run was complete",
             file=sys.stderr,
         )
     if text != old_text or not os.path.exists(out):
@@ -1754,8 +1758,8 @@ def build_parser() -> argparse.ArgumentParser:
             sp.add_argument(
                 "--allow-removals",
                 action="store_true",
-                help="drop entries the evidence no longer has (default: keep them, so a crashed or filtered run "
-                "never shrinks a set silently)",
+                help="drop entries the evidence no longer has, including those of a suite:/record: pseudo-target "
+                "it does not hold (default: keep them, so a crashed or filtered run never shrinks a set silently)",
             )
             sp.add_argument(
                 "--out", default="", metavar="PATH", help="write here instead (relative: to the workspace root)"

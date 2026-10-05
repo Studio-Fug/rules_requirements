@@ -27,9 +27,14 @@ one case to verify two. Semantic release: verdicts change on purpose.
   tree, so each test case's evidence rolls up one chain of requirements;
   raised by `rr validate`, `<model>_test`, `rr report` (exit 2) and the
   editor's save guard (409).
+- `multi-parent-implements` (error by default, configurable): a requirement
+  that implements a mitigation has no other parent (a second mitigation, or a
+  requirement it refines); raised where `multi-parent-refines` is.
 - Attribution (`attribution.attribute()`, the one place a case gets an
   owner), verification sets, and the INVALID and INCOMPLETE statuses.
 - The verification-set lock (`verification.rrlock`; `rr sets lock|check|show`).
+  A `suite:`/`record:` entry whose case moved to another target is
+  `lock-stale`; `--allow-removals` drops it.
 - Report v2 (`cases`, `attribution`, sets and members); `rr report` exit 3,
   `--on-attribution-error`, lanes; `rr attribution`; `rr check-report`;
   `rr migrate apply --stage model`; `rr graph --cases`.
@@ -49,6 +54,9 @@ one case to verify two. Semantic release: verdicts change on purpose.
   cases each owns.
 - A requirement refining two or more parents is a `multi-parent-refines`
   error. Keep one parent and split the child per parent.
+- A requirement implementing a mitigation and having another parent is a
+  `multi-parent-implements` error. Merge the mitigations, or let the parent
+  requirement implement it.
 - Retries are merged per case (a pass after a failure is flaky:
   UNDER-VERIFIED by default); suite-level ids are no longer inherited;
   Bazel's synthetic results are `[target]`, selected only by `whole: true`.

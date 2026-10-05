@@ -304,3 +304,127 @@ def test_a_lock_case_path_ending_with_a_name_tag_is_invalid():
         rr_lock.parse_lock(text)
     tagged_class = f"schema: {rr_lock.SCHEMA}\ncases:\n  //p:t:\n    'm [rr:REQ-2]::a': REQ-1\n"
     assert len(rr_lock.parse_lock(tagged_class)) == 1  # a classname keeps its tags
+
+
+# --------------------------------------------------------------------------- #
+# A suite:/record: pseudo-target that is gone                                 #
+# --------------------------------------------------------------------------- #
+
+HYBRID = """
+config: {attribution: hybrid, sets_lock: verification.rrlock}
+user_needs: [{id: UN-1, title: n}]
+requirements:
+  - {id: REQ-1, title: a, satisfies: [UN-1]}
+  - {id: REQ-2, title: b, satisfies: [UN-1]}
+"""
+
+
+def hybrid_model(tmp_path):
+    model, _ = read_model(write(tmp_path, "req/m.yaml", HYBRID))
+    assert not model.parse_errors
+    return model
+
+
+@pytest.mark.parametrize("pseudo", ["suite:pytest", "record:checks"])
+def test_plan_lock_a_pseudo_target_entry_whose_case_moved_is_a_removal(tmp_path, pseudo):
+    """The JUnit moved into a testlogs tree: the case now runs as //tests:m
+    for the same owner. The old pseudo-target entry is listed as a removal
+    (kept until --allow-removals), and attribution flags it lock-stale on the
+    key that ran, so `rr sets check` sees it."""
+    model = hybrid_model(tmp_path)
+    previous = Lock((LockEntry(pseudo, "tests.test_m::test_a", "REQ-1"),))
+    moved = ev(TestCase("test_a", "passed", "tests.test_m", declared=("REQ-1",), target="//tests:m"))
+    att = attribute(model, moved, lock=previous)
+    (issue,) = [i for i in att.issues if i.code == "lock-stale"]
+    assert issue.severity == "error" and str(issue.key) == "//tests:m#tests.test_m::test_a"
+    assert f"{pseudo}#tests.test_m::test_a is locked to REQ-1" in issue.message and "--allow-removals" in issue.message
+    plan = plan_lock(model, att, previous)
+    assert [e.case for e in plan.removed] == [f"{pseudo}#tests.test_m::test_a"]
+    assert entries(plan.lock) == [
+        ("//tests:m", "tests.test_m::test_a", "REQ-1"),
+        (pseudo, "tests.test_m::test_a", "REQ-1"),  # kept until --allow-removals
+    ]
+    allowed = plan_lock(model, att, previous, allow_removals=True)
+    assert entries(allowed.lock) == [("//tests:m", "tests.test_m::test_a", "REQ-1")]
+    relocked = attribute(model, moved, lock=allowed.lock)
+    assert not [i for i in relocked.issues if i.code.startswith("lock-")]
+    assert [m.state for m in relocked.members_of("REQ-1")] == ["passed"]
+
+
+def test_plan_lock_an_absent_pseudo_target_is_kept_unless_removals_are_allowed(tmp_path):
+    """No case moved (another lane's JUnit, say): the entry stays, silently,
+    without --allow-removals; with it, it is dropped, since a pseudo-target's
+    absence cannot be told from a rename. A build target's tag-owned entry is
+    kept either way (its lane may simply not have run)."""
+    model = hybrid_model(tmp_path)
+    previous = Lock(
+        (
+            LockEntry("//hil:e2e", "s::x", "REQ-2"),
+            LockEntry("suite:hil", "s::x", "REQ-2"),
+            LockEntry("suite:other", "c::b", "REQ-1"),  # its path runs, but for another owner
+        )
+    )
+    evidence = ev(TestCase("b", "passed", "c", declared=("REQ-2",), target="//c:t"))
+    att = attribute(model, evidence, lock=previous)
+    assert not [i for i in att.issues if i.code == "lock-stale"]
+    plan = plan_lock(model, att, previous)
+    assert plan.removed == ()
+    assert ("suite:hil", "s::x", "REQ-2") in entries(plan.lock)
+    allowed = plan_lock(model, att, previous, allow_removals=True)
+    assert [e.case for e in allowed.removed] == ["suite:hil#s::x", "suite:other#c::b"]
+    assert entries(allowed.lock) == [("//c:t", "c::b", "REQ-2"), ("//hil:e2e", "s::x", "REQ-2")]
+
+
+def test_plan_lock_a_claimed_pseudo_target_entry_is_kept(tmp_path):
+    """A claim of its owner still selects the entry: the claim, not the lock,
+    must change first (model and hybrid alike)."""
+    text = HYBRID.replace(
+        "{id: REQ-1, title: a, satisfies: [UN-1]}",
+        "{id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: 'suite:pytest', cases: ['t::a']}]}",
+    )
+    model, _ = read_model(write(tmp_path, "req/c.yaml", text))
+    previous = Lock((LockEntry("suite:pytest", "t::a", "REQ-1"),))
+    att = attribute(model, ev(TestCase("a", "passed", "t", target="//t:a")), lock=previous)
+    for allow in (False, True):
+        plan = plan_lock(model, att, previous, allow_removals=allow)
+        assert ("suite:pytest", "t::a", "REQ-1") in entries(plan.lock) and plan.removed == ()
+
+
+def test_moving_unscoped_junit_after_locking_then_relocking_with_allow_removals(tmp_path, monkeypatch, capsys):
+    """The 0.2 upgrade flow in the documented order (lock, then fix
+    unscoped-evidence): `rr sets check` and the report name the stale
+    suite: entry as lock-stale, and `rr sets lock --write --allow-removals`
+    clears it, so `--fail-on gaps` passes."""
+    from rules_requirements import cli
+
+    monkeypatch.chdir(tmp_path)
+    for var in ("BUILD_WORKSPACE_DIRECTORY", "BUILD_WORKING_DIRECTORY", "XML_OUTPUT_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    write(tmp_path, "req/p.yaml", HYBRID.replace("  - {id: REQ-2, title: b, satisfies: [UN-1]}\n", ""))
+    xml = (
+        '<testsuites><testsuite name="pytest"><testcase classname="tests.test_m" name="test_a"><properties>'
+        '<property name="requirement" value="REQ-1"/></properties></testcase></testsuite></testsuites>'
+    )
+    write(tmp_path, "junit.xml", xml)
+
+    def rr(*argv):
+        rc = cli.main(list(argv))
+        return rc, capsys.readouterr().err
+
+    assert rr("sets", "lock", "--model", "req", "--evidence", "junit.xml", "--write")[0] == 0
+    rc, err = rr("report", "--model", "req", "--evidence", "junit.xml", "--fail-on", "gaps", "--out", "r.json")
+    assert rc == 1 and "unscoped-evidence" in err
+    os.remove(tmp_path / "junit.xml")
+    write(tmp_path, "testlogs/tests/m/test.xml", xml)  # the table's Do
+    rc, err = rr("sets", "check", "--model", "req", "--evidence", "testlogs")
+    assert rc == 1 and "[lock-stale] suite:pytest#tests.test_m::test_a is locked to REQ-1" in err
+    rc, err = rr("report", "--model", "req", "--evidence", "testlogs", "--fail-on", "gaps", "--out", "r.json")
+    assert rc == 1 and "ATTRIBUTION ERROR: [lock-stale]" in err
+    rc, err = rr("sets", "lock", "--model", "req", "--evidence", "testlogs", "--write")
+    assert rc == 0 and "- suite:pytest#tests.test_m::test_a: REQ-1 (kept: pass --allow-removals" in err
+    rc, err = rr("sets", "lock", "--model", "req", "--evidence", "testlogs", "--write", "--allow-removals")
+    assert rc == 0 and "- suite:pytest#tests.test_m::test_a: REQ-1" in err
+    assert "suite:" not in (tmp_path / "req/verification.rrlock").read_text()
+    assert rr("sets", "check", "--model", "req", "--evidence", "testlogs")[0] == 0
+    rc, err = rr("report", "--model", "req", "--evidence", "testlogs", "--fail-on", "gaps", "--out", "r.json")
+    assert rc == 0 and "gaps: 0" in err

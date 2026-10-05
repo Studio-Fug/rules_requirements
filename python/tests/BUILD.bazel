@@ -32,6 +32,7 @@ rr_py_test(
         "//:CHANGELOG.md",
         "//:docs/concepts.md",
         "//:docs/guides/migrating-to-per-case.md",
+        "//:docs/guides/model.md",
         "//:docs/guides/outputs.md",
         "//:docs/release-notes.md",
         # test_docs_build.py: the docs build step.

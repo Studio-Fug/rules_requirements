@@ -647,7 +647,13 @@ bump fixes the shared targets, which 0.2 cannot express per case.
    `multi-parent-refines` error (refines must form a tree, so each case's
    evidence rolls up one chain of requirements: {ref}`derived-verdicts`):
    keep one parent and split the child into one requirement per parent, or
-   set `config.rules: {multi-parent-refines: warning}` until you do.
+   set `config.rules: {multi-parent-refines: warning}` until you do. A
+   requirement that implements a mitigation and has another parent (a
+   second mitigation, or a requirement it refines) is a
+   `multi-parent-implements` error for the same reason: merge the
+   mitigations into one that mitigates every risk, let the parent
+   requirement implement the mitigation, or split the requirement; or set
+   `config.rules: {multi-parent-implements: warning}` until you do.
 2. Replace each shared whole-target reference with the cases each entity
    owns, as the worksheet decided them. `rr cases --evidence bazel-testlogs
    --target //web:clocksync_test` lists the exact case paths:
@@ -691,12 +697,15 @@ bump fixes the shared targets, which 0.2 cannot express per case.
    `coarse-claim`, `tag-mismatch`, `unclaimed-tag`, `misdirected-evidence`,
    `unknown-id`, `same-path-multiple-owners`, `ambiguous-source`,
    `level-mismatch`, `unlocked-member`, `lock-stale`, `lock-owner-changed`,
-   `lock-invalid` and `multi-verifies-annotation` (under `--scan`). Lock for
-   the four lock findings; resolve the rest ({ref}`gap-issues` says how for
-   each; `unscoped-evidence`, which no rule configures, means JUnit outside a
-   testlogs tree: write it to `testlogs/<pkg>/<name>/test.xml`); or set a
-   configurable rule `off` under `config.rules`; or stop gating on gaps
-   until step 8.
+   `lock-invalid` and `multi-verifies-annotation` (under `--scan`). Move
+   JUnit written outside a testlogs tree into one first
+   (`unscoped-evidence`, which no rule configures: write it to
+   `testlogs/<pkg>/<name>/test.xml`), since that changes its case keys;
+   then lock for the four lock findings (a lock written before the move
+   keeps the old `suite:` entries as `lock-stale` until
+   `rr sets lock --write --allow-removals` drops them); resolve the rest
+   ({ref}`gap-issues` says how for each); or set a configurable rule `off`
+   under `config.rules`; or stop gating on gaps until step 8.
 3. Keep `attribution: hybrid`, the 0.3 default: a single-id tag still owns
    a case that no claim covers, so every module whose tags you rewrote keeps
    its owners. Set `config.main_repo` if other modules refer to your

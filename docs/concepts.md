@@ -34,7 +34,7 @@ so each trace has exactly one source of truth:
 | `method` | requirement → test method *or* level | The verification rigor the requirement demands. |
 | `verified_by` | requirement, mitigation → test cases | The cases that verify it ({ref}`claims <claims>`, see {ref}`below <evidence>`); a user need's are `validated_by`. |
 | `mitigates` | mitigation → risk | The control acts on this risk. |
-| `implemented_by` | mitigation → requirement | The requirements that realise the control. |
+| `implemented_by` | mitigation → requirement | The requirements that realise the control. A requirement that implements a mitigation has no other parent (`multi-parent-implements`). |
 | `mitigated_by` | risk → mitigation | *Optional* back-reference; if given it must agree with `mitigates`. |
 
 The reverse views ("which requirements satisfy UN-1?", "which risks does

@@ -48,6 +48,8 @@ shows the end state.
   `same-path-multiple-owners`, `parent-with-claims`,
   `multi-verifies-annotation` (raised by `rr scan`, `rr check-annotations`
   and `rr report --scan`; `rr scan --strict` escalates it), `lock-stale`.
+  Under `$XML_OUTPUT_FILE` (or `--junit`), `rr validate` writes one JUnit
+  case per check family, so `rr_model`'s `<name>_test` is per-case evidence.
 - **`multi-parent-refines`** ({ref}`rules`), an error by default: a
   requirement refines at most one parent, so `refines` forms a tree and each
   test case's evidence rolls up one chain of requirements. Two parents would
@@ -55,9 +57,15 @@ shows the end state.
   derived rollups ({ref}`derived-verdicts`). `rr validate`, `<model>_test`,
   `rr report` (exit 2) and the editor's save guard (409) raise it;
   `config.rules: {multi-parent-refines: warning}` (or `off`) relaxes it.
-  Under `$XML_OUTPUT_FILE` (or
-  `--junit`), `rr validate` writes one JUnit case per check family, so
-  `rr_model`'s `<name>_test` is per-case evidence.
+- **`multi-parent-implements`** ({ref}`rules`), an error by default: a
+  requirement that implements a mitigation has no other parent, neither a
+  second mitigation nor a requirement it refines. A mitigation's VERIFIED is
+  derived from the requirements that implement it, so either would make one
+  case the whole basis of two VERIFIED verdicts that are not on one chain.
+  Raised where `multi-parent-refines` is; `config.rules:
+  {multi-parent-implements: warning}` (or `off`) relaxes it. One mitigation
+  may still mitigate several risks, and one requirement may still satisfy
+  several user needs.
 - **Attribution** ({py:mod}`rules_requirements.attribution`): the owner map,
   quarantine codes `multi-tag`, `attribution-conflict` and
   `same-code-multiple-owners` (the same source file and case path, or a
@@ -79,7 +87,10 @@ shows the end state.
   `verification.rrlock` maps each case to one id and pins the sets; it adds
   expected members and never creates ownership.
   `rr sets lock [--write] [--allow-removals]`, `rr sets check`,
-  `rr sets show ID`; {py:mod}`rules_requirements.lock`.
+  `rr sets show ID`; {py:mod}`rules_requirements.lock`. An entry of a
+  `suite:`/`record:` pseudo-target whose case now runs under another target
+  (JUnit moved into a testlogs tree) is `lock-stale`, and
+  `rr sets lock --allow-removals` drops it.
 - **Report v2** ({doc}`guides/outputs`): schema
   `rules_requirements/report/v2` (`schema/report.v2.schema.json`); the inverse
   matrix `cases` (every case with one owner or `null`), `attribution` (mode,
@@ -153,6 +164,14 @@ These are the intended semantic breaks. Each says what a consumer must do.
   requirements' verdicts. *Do:* keep one parent and split the child into one
   requirement per parent, each with its own cases; or set
   `config.rules: {multi-parent-refines: warning}` while you restructure.
+- **A requirement that implements a mitigation and has another parent is an
+  error** (`multi-parent-implements`, raised where `multi-parent-refines`
+  is): one requirement implementing two mitigations, or implementing one and
+  refining a requirement, made each of its cases the basis of two VERIFIED
+  verdicts. *Do:* merge the mitigations into one that `mitigates` every risk
+  they covered; or let the parent requirement implement the mitigation (its
+  children's cases then roll up one chain); or split the requirement; or set
+  `config.rules: {multi-parent-implements: warning}` while you restructure.
 - **A 0.3 model fails loudly on 0.2.** The new keys (`cases`, `whole`,
   `reason`, `validated_by`, `verified_by` on mitigations, the six `config`
   keys, the new rule names) are unknown fields or keys to 0.2. *Do:* bump
@@ -256,12 +275,16 @@ These are the intended semantic breaks. Each says what a consumer must do.
   `unknown-id`, `same-path-multiple-owners`, `ambiguous-source`,
   `level-mismatch`, `unlocked-member`, `lock-stale`, `lock-owner-changed`,
   `lock-invalid` and `multi-verifies-annotation` (under `--scan`);
-  {ref}`gap-issues` gives each one's fix. *Do:* lock (`unpinned-sets` and
-  the lock findings: set `config.sets_lock` and run `rr sets lock --write`,
-  which works in hybrid mode); resolve (`unscoped-evidence`, which no rule
-  configures: write the JUnit under a testlogs tree such as
-  `testlogs/<pkg>/<name>/test.xml`; `multi-verifies-annotation`: one id per
-  annotation; the rest as the table says); or configure the rule
+  {ref}`gap-issues` gives each one's fix. *Do:* first move JUnit written
+  outside a testlogs tree into one (`unscoped-evidence`, which no rule
+  configures: write it to `testlogs/<pkg>/<name>/test.xml`), because that
+  changes its case keys from `suite:<name>#...` to the build target's; then
+  lock (`unpinned-sets` and the lock findings: set `config.sets_lock` and run
+  `rr sets lock --write`, which works in hybrid mode; a lock written before
+  the move keeps the old `suite:` entries, which read as `lock-stale`
+  until `rr sets lock --write --allow-removals` drops them); resolve the
+  rest (`multi-verifies-annotation`: one id per annotation; the others as
+  the table says); or configure the rule
   (`config.rules: {<rule>: off}` drops the issue and its gap; `warning`
   keeps the gap); or stop gating on gaps.
 - `unattributed-failure` replaces `untraced-failure`, which is still emitted

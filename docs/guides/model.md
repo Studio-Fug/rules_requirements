@@ -137,7 +137,7 @@ uses the residual fields, falling back to the initial ones.
 | ----- | ---- | ----- |
 | `type` | enum | `inherent` (safety by design), `protective` (protective measure), `information` (information for safety) — the ISO 14971 §7.1 options. |
 | `mitigates` | list of RISK ids | **Required** (at least one). |
-| `implemented_by` | list of REQ ids | The requirements that realise the control. |
+| `implemented_by` | list of REQ ids | The requirements that realise the control. A requirement implements at most one mitigation, and one that does refines nothing (`multi-parent-implements`). |
 | `verified_by` | list of claims | Effectiveness evidence of the control (ISO 14971 §7.2): see [claims](#claims). |
 
 ## Test methods
@@ -332,7 +332,15 @@ $ rr sets show PR-13 --model requirements/ --evidence bazel-testlogs       # one
 `rr sets lock` refuses while a case is quarantined (exit 3) and keeps every
 entry the evidence no longer holds unless `--allow-removals` is given (it
 lists them), so a crashed or filtered run never shrinks a set silently; owner
-changes are listed and allowed. `rr sets check` exits 1, restricted to the
+changes are listed and allowed. A target absent from the evidence (the lane
+that did not run) keeps an entry even with `--allow-removals` while a claim
+of its owner selects it, and, in hybrid mode, while its owner claims nothing
+on that target and no other claim selects it (a tag may own it there). That
+last rule does not hold for a `suite:`/`record:` pseudo-target, which names
+no build target, so its absence cannot be told from a move:
+`--allow-removals` drops such an entry, and one whose case now runs under
+another target for the same owner (JUnit moved into a testlogs tree) is
+listed as a removal and reads `lock-stale` until it is dropped. `rr sets check` exits 1, restricted to the
 targets present in the evidence, on a missing case, an unlocked member, an
 owner change or a stale entry. `--sets-lock PATH` reads (and writes) another
 lock than `config.sets_lock`. In Bazel, `rr_model(lock = ...)` checks the lock
@@ -468,8 +476,9 @@ error, and so is naming a report-time quarantine (`multi-tag`,
 | `glob-selector` | off | A selector with a `*` (turn on to require literal case lists). |
 | `redundant-selector` | warning | Two selectors of one entity on one target overlap. |
 | `multi-parent-refines` | error | A requirement refines two or more parents. Refines must form a tree, so each test case's evidence rolls up one chain of requirements ({ref}`derived-verdicts`); `rr report` exits 2 and the web editor refuses the save. |
+| `multi-parent-implements` | error | A requirement that implements a mitigation has another parent: a second mitigation, or a requirement it refines. A mitigation's VERIFIED is derived from its implementing requirements, so each case would roll up two chains ({ref}`derived-verdicts`); `rr report` exits 2 and the web editor refuses the save. |
 | `parent-with-claims` | warning | A requirement refined by others also claims cases of its own. |
-| `lock-stale` | error | `attribution: model`: no claim of a lock entry's owner selects it. |
+| `lock-stale` | error | `attribution: model`: no claim of a lock entry's owner selects it. Either mode: an entry of a `suite:`/`record:` pseudo-target the evidence does not hold, whose owner now owns its case path under a target that ran (re-lock with `--allow-removals`). |
 
 The 0.3 rules `coarse-claim`, `tag-mismatch`, `unclaimed-tag`,
 `suite-level-requirement`, `duplicate-case`, `level-mismatch`,

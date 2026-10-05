@@ -59,8 +59,11 @@ model the save would write and runs the same checks as `rr validate` and
 witnesses of the claims (the very pairs `rr validate` reports, also before the
 targets have run), the edited entity's selectors and targets (`bad-selector`,
 `bad-target`) and whole-target claims (`whole-target-reference`: one needs a
-reason), a second `refines` parent (`multi-parent-refines`, while that rule
-is an error: two parents would rest on one child's cases), the
+reason), a second parent (`multi-parent-refines` for a second `refines`
+parent, `multi-parent-implements` for a mitigation the requirement
+implements plus another parent, while those rules are errors: two parents
+would rest on one child's cases; a requirement that already has several
+may drop them but not gain one), the
 verification-set lock (`lock-owner-changed`, and `lock-invalid`
 for an entry whose owner the save would remove), and attribution over the
 loaded evidence (a new `attribution-conflict`, or one source file owned twice).

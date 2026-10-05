@@ -67,7 +67,7 @@ id. *Configurable* means `config.rules` can set the rule to `warning` or `off`
 | Issue | Severity | Configurable | Do |
 | ----- | -------- | ------------ | -- |
 | `duplicate-case` | warning | yes | Resolve: rename one of the two tests reported under one case key. |
-| `unscoped-evidence` | warning | no | Resolve: write the JUnit under a testlogs tree (`bazel-testlogs/<pkg>/<name>/test.xml`, or `testlogs/<pkg>/<name>/test.xml` outside Bazel), so its cases have a build target; otherwise stop gating on gaps. |
+| `unscoped-evidence` | warning | no | Resolve: write the JUnit under a testlogs tree (`bazel-testlogs/<pkg>/<name>/test.xml`, or `testlogs/<pkg>/<name>/test.xml` outside Bazel), so its cases have a build target, and do it before locking: a lock written earlier keeps the old `suite:` entries (`lock-stale`) until `rr sets lock --write --allow-removals` drops them. Otherwise stop gating on gaps. |
 | `suite-level-requirement` | warning | yes | Resolve: move the `requirement` property from the `<testsuite>` to its test cases, or claim the cases in the model and drop the property. |
 | `coarse-claim` | warning | yes | Resolve: claim the target's cases with `cases:` instead of `whole: true`. |
 | `tag-mismatch` | warning | yes | Resolve: make the test's tag name its owner, or drop the tag. |
