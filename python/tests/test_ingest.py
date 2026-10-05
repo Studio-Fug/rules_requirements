@@ -989,8 +989,7 @@ def test_producer_googletest_with_rr_gtest(tmp_path):
     assert [(i.code, i.scope, i.ids) for i in ev.issues] == [("suite-level-requirement", "SuiteLevel", ("REQ-3",))]
 
 
-_FAKE_LIBTEST = """#!/usr/bin/env python3
-import json, os, sys
+_FAKE_LIBTEST = """import json, os, sys
 trace = open(os.environ["RR_TRACE_FILE"], "a")
 mode = sys.argv[1] if len(sys.argv) > 1 else ""
 if mode == "silent":
@@ -1027,7 +1026,9 @@ sys.exit(3 if mode == "leak" else 0)
 
 def _wrap(tmp_path, monkeypatch, mode, label="//rust:parse_test"):
     fake = tmp_path / "fake_libtest"
-    fake.write_text(_FAKE_LIBTEST)
+    # This interpreter, not `env python3`: under Bazel the test's environment
+    # points at the hermetic Python's stdlib, which another python3 cannot load.
+    fake.write_text("#!" + sys.executable + "\n" + _FAKE_LIBTEST)
     fake.chmod(0o755)
     monkeypatch.setenv("TEST_TMPDIR", str(tmp_path / f"tmp_{mode or 'ok'}"))
     (tmp_path / f"tmp_{mode or 'ok'}").mkdir()
