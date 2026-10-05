@@ -277,3 +277,22 @@ def test_validate_writes_one_junit_case_per_check_family(capsys, project, monkey
     other = project / "j.xml"
     rc, _, _ = run(capsys, "validate", "req", "--junit", other)
     assert rc == 1 and os.path.exists(other)
+
+
+def test_fail_on_failed_counts_an_invalid_requirement_that_rolls_up_into_no_failure(capsys, project):
+    """REQ-2 is INVALID (its case declares REQ-2 and an unknown id: multi-tag)
+    and satisfies no need (requirement-orphan made a warning), so nothing
+    else reads FAILED: --fail-on failed exits 1 for the INVALID alone,
+    --fail-on none exits 0."""
+    write(project, "req/requirements.yaml", "config: {rules: {requirement-orphan: warning}}\n" + MODEL.replace(
+        "{id: REQ-2, title: b, satisfies: [UN-1], ", "{id: REQ-2, title: b, "))  # fmt: skip
+    junit(project / "bazel-testlogs", "p/t/test.xml",
+          [("a1", "passed", [], ""), ("b", "passed", ["REQ-2", "REQ-404"], "")])  # fmt: skip
+    out = project / "r.json"
+    common = ["report", "--model", "req", *evidence(project), "--on-attribution-error", "warn"]
+    rc, _, err = run(capsys, *common, "--json", out, "--fail-on", "none")
+    assert rc == 0, err
+    statuses = {e["id"]: e["status"] for s in ("user_needs", "requirements") for e in json.loads(out.read_text())[s]}
+    assert statuses["REQ-2"] == "INVALID" and "FAILED" not in statuses.values(), statuses
+    rc, _, _ = run(capsys, *common, "--fail-on", "failed")
+    assert rc == 1

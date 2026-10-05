@@ -264,3 +264,33 @@ def test_lanes_label_out_of_lane_members_and_never_change_a_verdict(tmp_path):
     assert "set 1/2 passed · 1 not run (out of lane)" in md and "lane: software" in md
     # Without --lane-targets nothing is labelled.
     assert report.out_of_lane_gaps(plain, report.Lane("software")) == []
+
+
+def test_a_gap_stays_in_the_queue_unless_every_open_member_is_out_of_lane(tmp_path):
+    """REQ-1 has one not-run member of an out-of-lane target and one missing
+    member of a target that ran: its gap is the lane's own work, so
+    --queue-out keeps it. A missing member is never labelled out of lane,
+    even on a target the lane does not list (it ran without the case)."""
+    from conftest import write
+
+    from rules_requirements.model import load_model
+
+    text = (
+        "user_needs: [{id: UN-1, title: n}]\n"
+        "requirements:\n"
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //sw:t, cases: ['c::a', 'c::m']},"
+        " {target: //hitl:t, cases: ['c::h']}]}\n"
+    )
+    model = load_model(write(tmp_path, "m.yaml", text))
+    ev = ingest.Evidence()
+    ev.add(ingest.TestCase("a", "passed", classname="c", target="//sw:t"))
+    plain = build_matrix(model, ev)
+    states = {(m.target, m.state) for m in plain.attribution.members_of("REQ-1")}
+    assert states == {("//sw:t", "passed"), ("//sw:t", "missing"), ("//hitl:t", "not-run")}
+    assert plain.status("REQ-1") == "INCOMPLETE"
+    for lane_targets in ({"//sw:t"}, {"//other:t"}):
+        lane = report.Lane("software", frozenset(lane_targets))
+        assert report.out_of_lane_gaps(plain, lane) == [], lane_targets
+        (req1,) = report.to_dict(plain, lane=lane)["requirements"]
+        hinted = {mb["state"] for mb in req1["members"] if mb.get("lane_hint")}
+        assert hinted == {"not-run"}, lane_targets
