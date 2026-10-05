@@ -18,10 +18,11 @@ paths resolve against the directory Bazel was invoked from.
 | `check-report` | Re-prove from a JSON report alone that no test case is owned by two entities. | {doc}`../guides/outputs` |
 | `migrate plan` | Write the attribution worksheet: evidence that counts toward two or more entities. | {doc}`../guides/migrating-to-per-case` |
 | `migrate apply` | `--stage tags`: rewrite multi-id Python test tags to the owners decided on a worksheet; `--stage model`: write an explicit selector for every current owner into the model. | {doc}`../guides/migrating-to-per-case` |
+| `migrate verify` | Check test evidence from after `migrate apply` against the worksheet (and a baseline). | {doc}`../guides/migrating-to-per-case` |
 | `wrap` | Run a test binary and convert its output to traceability JUnit. | {doc}`../guides/hooks` |
 | `case` | Append one test case to a JUnit file (shell and ad-hoc harnesses). | {doc}`../guides/hooks` |
 
-`rr --version` prints the installed version (`rr 0.2.0`).
+`rr --version` prints the installed version (`rr 0.2.1`).
 
 Exit status: `0` on success; `1` when validation fails, `scan` finds undefined
 ids, or a `report --fail-on` / `--pyramid-policy error` condition holds, or
@@ -44,9 +45,22 @@ with the evidence, or the new claims fail `check_claims`. `cases`,
 `--evidence` paths hold no evidence at all. `migrate apply` exits `1`, and writes
 nothing unless given `--partial`, when it refused a file or could not find a
 decided case's test in the module it names, and `2` when the worksheet is
-unreadable or an owner is not one of the ids its case counts toward. `wrap`
+unreadable or an owner is not one of the ids its case counts toward.
+`migrate verify` exits `1` when a decided case does not declare exactly its
+owner or has no result, or, with `--baseline`, an undecided case's ids
+changed or a case disappeared (`--allow-missing` excuses a missing case only
+when its target has no result file at all: a `test.xml` with no testcase
+means the target ran), and `2` when the worksheet is
+unreadable or invalid, the evidence or baseline holds none, or it names no
+build target while the worksheet's cases belong to build targets. `wrap`
 exits with the wrapped command's status; `case` exits `2` when it cannot record
 the case (no output file, more than one id, a malformed id or `--artifact`).
+
+`migrate apply` judges the code only an `if __name__ == "__main__":` block
+runs like any other code unless given `--trust-main-guard`. That opt-in
+exclusion is best-effort: only use it together with a definitive check (the
+collection check, or `migrate verify` against fresh test evidence before
+merging).
 
 The reference below is generated from the command's own argument parser.
 

@@ -41,7 +41,7 @@ from typing import Iterable, Mapping, Optional
 
 import rules_requirements
 from rules_requirements.case_keys import CaseKey, nodeid_to_case_path
-from rules_requirements.migrate import NONE, OPEN
+from rules_requirements.migrate import OPEN, owner_ids
 
 # Directories never copied into the scratch tree: version control, build and
 # tool caches, vendored trees. Bazel's convenience symlinks (``bazel-*``) and
@@ -368,7 +368,7 @@ def _decided_paths(decided: Mapping[CaseKey, str]) -> dict[str, list[str]]:
     for key, owner in decided.items():
         if owner == OPEN:
             continue  # undecided: handled as an "every other item" case
-        out[key.path] = [] if owner == NONE else [owner]
+        out[key.path] = owner_ids(owner)
     return out
 
 

@@ -43,7 +43,7 @@ from rules_requirements.ingest import (
     split_ids,
     workspace_relative,
 )
-from rules_requirements.ingest.junit import ATTEMPT, SHARD_RUN
+from rules_requirements.ingest.junit import ATTEMPT, SHARD_RUN, target_from_path
 from rules_requirements.util import dedupe, natural_key
 
 __all__ = [
@@ -68,6 +68,7 @@ __all__ = [
     "normalize_target",
     "pseudo_target",
     "run_dims_from_path",
+    "run_targets",
     "target_of",
     "workspace_relative",
 ]
@@ -308,6 +309,22 @@ class CaseRow:
 
 def _worst(statuses: Iterable[str]) -> str:
     return max(statuses, key=lambda s: STATUS_ORDER.get(s, 0))
+
+
+def run_targets(evidence: Evidence) -> set[str]:
+    """Every target ``evidence`` has a result file for: the target of each
+    case :func:`index_cases` files (a synthetic whole-run result included),
+    and that of each ingested report that holds no case at all (a
+    ``test.xml`` with an empty ``<testsuite>``: pytest collected nothing).
+    Such a report's target comes from its path (``bazel-testlogs/<pkg>/
+    <name>/test.xml``), else it is keyed like a case of it with no suite
+    name (``suite:`` / ``record:`` + the file stem). A target here has run."""
+    out = {key.target for key in index_cases(evidence)}
+    with_cases = {case.source for case in evidence.cases}
+    for path in evidence.files:
+        if path not in with_cases:
+            out.add(target_from_path(path) or target_of(TestCase(name="", status="passed", source=path)))
+    return out
 
 
 def index_cases(evidence: Evidence | Iterable[TestCase], *, main_repo: str | None = None) -> dict[CaseKey, CaseRow]:

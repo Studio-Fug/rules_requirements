@@ -880,3 +880,47 @@ def test_collection_time_skips_are_reported(capsys, tmp_path):
     rc, _, err = _apply(capsys, tmp_path)
     assert rc == 0, err
     assert "skipped at collection time" in err and "pkg/test_hw.py" in err
+
+
+# --------------------------------------------------------------------------- #
+# --trust-main-guard: the __main__ exclusion is opt-in.                        #
+# --------------------------------------------------------------------------- #
+
+# splanc's improv_codec_test.py shape: an import call in a function only
+# main() calls, main() called only under the __main__ guard.
+_SCRIPT = (
+    "import importlib.util\nimport pathlib\nimport sys\n\n"
+    "HERE = pathlib.Path(__file__).resolve().parent\n\n\n"
+    "def _load_onboard():\n"
+    '    spec = importlib.util.spec_from_file_location("onboard", HERE / "onboard.py")\n'
+    "    mod = importlib.util.module_from_spec(spec)\n"
+    "    spec.loader.exec_module(mod)\n"
+    "    return mod\n\n\n"
+    "def main():\n    _load_onboard()\n    return 0\n\n\n"
+    'if __name__ == "__main__":\n    sys.exit(main())\n'
+)
+
+
+def _script_tree(tmp_path):
+    _tree(tmp_path, {"pkg/__init__.py": "", "pkg/test_g.py": _H, "pkg/codec_test.py": _SCRIPT})
+    _ws(tmp_path / "ws.rrplan", [("pkg.test_g::test_a", "A")])
+
+
+def test_main_only_import_call_refuses_by_default(capsys, tmp_path):
+    _script_tree(tmp_path)
+    before = (tmp_path / "pkg/test_g.py").read_bytes()
+    rc, _, err = _apply(capsys, tmp_path, "--no-collect-check")
+    assert rc == 1, err
+    assert "pkg/codec_test.py" in err and "spec_from_file_location" in err, err
+    assert "--trust-main-guard" not in err
+    assert (tmp_path / "pkg/test_g.py").read_bytes() == before
+
+
+@pytest.mark.parametrize("collect", [False, True], ids=["no-collect-check", "collect-check"])
+def test_main_only_import_call_applies_with_trust_main_guard(capsys, tmp_path, collect):
+    _script_tree(tmp_path)
+    rc, _, err = _apply(capsys, tmp_path, "--trust-main-guard", *([] if collect else ["--no-collect-check"]))
+    assert rc == 0, err
+    assert "--trust-main-guard" in err and "best-effort" in err and "rr migrate verify" in err, err
+    text = (tmp_path / "pkg/test_g.py").read_text(encoding="utf-8")
+    assert 'pytest.mark.rr("A")' in text and '"B"' not in text

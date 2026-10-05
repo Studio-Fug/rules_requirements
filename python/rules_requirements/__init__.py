@@ -26,7 +26,7 @@ from rules_requirements.model import (
 from rules_requirements.trace import Matrix, build_matrix
 from rules_requirements.validate import Issue, ValidationError, validate
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "Issue",

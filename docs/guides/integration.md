@@ -8,7 +8,7 @@ rules_requirements into such a repository without a flag day.
 
 ```starlark
 # MODULE.bazel
-bazel_dep(name = "rules_requirements", version = "0.2.0")
+bazel_dep(name = "rules_requirements", version = "0.2.1")
 git_override(
     module_name = "rules_requirements",
     remote = "https://github.com/Studio-Fug/rules_requirements.git",
