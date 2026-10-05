@@ -35,7 +35,8 @@ case (after writing the reports; `--on-attribution-error=warn` keeps the
 status) and when `sets lock` refuses to lock one. `attribution --check` and
 `sets check` exit `1` on a quarantine, a missing case, lock drift or an
 error-level attribution issue; `check-report` exits `1` when the report breaks
-the one-owner partition or its counts disagree, `2` when it is no v2 report.
+the one-owner partition, its counts disagree, or it names a JSON key twice in
+one object, `2` when it is no v2 report.
 `migrate apply --stage model` exits `1`, writing nothing, when the owner table
 would change, the evidence holds a quarantine, a worksheet decision disagrees
 with the evidence, or the new claims fail `check_claims`. `cases`,

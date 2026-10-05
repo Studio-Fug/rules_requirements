@@ -94,7 +94,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: to_dict, render_json, render_markdown, render_html, Lane, out_of_lane_gaps, case_rows, attribution_dict, set_summary
 
 .. automodule:: rules_requirements.checkreport
-   :members: check_report, load_report, summarize, ReportError
+   :members: check_report, load_report, summarize, ReportError, AmbiguousReportError
 
 .. automodule:: rules_requirements.graph
    :members: Node, Edge, build, to_dot, to_mermaid, to_json, to_svg, layout

@@ -508,7 +508,8 @@
         "target",
         "selector",
         "via",
-        "state"
+        "state",
+        "owned"
       ],
       "properties": {
         "case": {
@@ -543,6 +544,10 @@
             "moved",
             "quarantined"
           ]
+        },
+        "owned": {
+          "type": "boolean",
+          "description": "Whether the entity owns this case (it counts as the entity's evidence). An owned member is a row of cases[] owned by this entity; no case key is an owned member of two entities. A member that is not owned is a pseudo-member (missing, not-run, moved, quarantined, or an error for a case the evidence lacks)."
         },
         "level": {
           "type": "string"

@@ -1150,6 +1150,9 @@ def cmd_check_report(args: argparse.Namespace) -> int:
 
     try:
         doc = checkreport.load_report(_path(args.report))
+    except checkreport.AmbiguousReportError as exc:
+        print(f"CHECK-REPORT: {exc}", file=sys.stderr)
+        return 1
     except checkreport.ReportError as exc:
         print(f"rr check-report: {exc}", file=sys.stderr)
         return 2

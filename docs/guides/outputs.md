@@ -71,12 +71,20 @@ lanes' evidence, can read VERIFIED.
 ### Checking a published report
 
 `rr check-report report.json` re-proves the one-owner partition from the JSON
-alone, independently of the code that wrote it. It exits `1` if a case
-appears under two entities, if an owner is not a scalar id, if a quarantined
-case is owned, if an entity a quarantine names does not read INVALID, or if
-the counts (summary, sets, per-target counts, granularity) disagree with the
-rows they count; `2` if the file is not a `rules_requirements/report/v2`
-report. In Bazel, `rr_report(check = True)` adds it as `<name>_check_test`.
+alone, independently of the code that wrote it. It exits `1` if a case key is
+an owned member (`owned: true`) of two entities — whether or not `cases`
+lists it —, if an owned member is no row of `cases` owned by its entity, if
+an owner is not a scalar id, if a quarantined case is owned, if the entities
+holding a quarantined case are not exactly the ones its quarantine names (a
+list of ids that follows from its code), if one of them does not read
+INVALID, if an entity's `evidence` is not exactly the view of its owned
+members, if the counts (summary, sets, per-target counts, granularity)
+disagree with the rows they count, or if the file names a key twice in one
+object (a duplicate `owner` reads differently to different parsers); `2` if
+the file is not a `rules_requirements/report/v2` report. An `error` member
+that is not owned is a pseudo-member: it names no case of the report, on a
+tainted or synthetic-only target. In Bazel, `rr_report` adds it as
+`<name>_check_test` whenever it builds the JSON report.
 
 ## JSON (`rules_requirements/report/v2`)
 
@@ -108,9 +116,13 @@ entities' verdicts — listed in `derived_from` — or both), plus `description`
 requirements and mitigations also carry their {ref}`verification set
 <evidence>`: `set` counts its members (`complete`, `members`, `passed`,
 `failed`, `error`, `skipped`, `missing`, `not_run`, `moved`, `quarantined`)
-and `members` lists them — `{case, target, selector, via, state}` plus
+and `members` lists them — `{case, target, selector, via, state, owned}` plus
 `level`, `stale`, `flaky`, `reason` and `lane_hint` when they apply (`case` is
-`null` for a glob or whole claim that matched nothing).
+`null` for a glob or whole claim that matched nothing). `owned` says whether
+the entity owns the case (it counts as its evidence): an owned member is a row
+of `cases` owned by that entity, and no case key is an owned member of two
+entities. The others are pseudo-members (`missing`, `not-run`, `moved`,
+`quarantined`, and an `error` for a case a tainted target did not report).
 
 `evidence` is the 0.2 view of the owned members, kept for 0.3.x readers: each
 entry is `{name, status, level}` — the case path, its member state, its level —

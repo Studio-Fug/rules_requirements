@@ -233,12 +233,19 @@ def test_check_report_cli(capsys, project):
     doc = json.loads(out.read_text())
     req2 = next(r for r in doc["requirements"] if r["id"] == "REQ-2")
     req2["members"].append({"case": "//p:t#suite::a1", "target": "//p:t", "selector": "*", "via": "model",
-                            "state": "passed"})  # fmt: skip
+                            "state": "passed", "owned": True})  # fmt: skip
     req2["set"]["members"] += 1
     req2["set"]["passed"] += 1
     out.write_text(json.dumps(doc))
     rc, _, err = run(capsys, "check-report", out)
     assert rc == 1 and "//p:t#suite::a1 appears under 2 entities (REQ-1, REQ-2)" in err
+    # A duplicate object key could name two owners for one case: exit 1.
+    run(capsys, "report", "--model", "req", *evidence(project), "--json", out)
+    text = out.read_text()
+    at = text.index('"owner": "REQ-1"')
+    out.write_text(text[:at] + '"owner": "REQ-2", ' + text[at:])
+    rc, _, err = run(capsys, "check-report", out)
+    assert rc == 1 and "'owner' appears twice" in err
     out.write_text(json.dumps({"schema": "rules_requirements/report/v1"}))
     rc, _, err = run(capsys, "check-report", out)
     assert rc == 2 and "report/v2" in err

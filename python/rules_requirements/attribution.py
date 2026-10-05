@@ -260,6 +260,7 @@ class Member:
             "selector": self.selector,
             "via": self.via,
             "state": self.state,
+            "owned": self.owned,
         }
         if self.level:
             out["level"] = self.level

@@ -1558,6 +1558,7 @@ def test_attribution_reads(tmp_path):
         "selector": "*",
         "via": "model",
         "state": "passed",
+        "owned": True,
         "level": "simulation",
     }
     assert att.cases[key].to_dict()["case"] == "//w:t#c::a"

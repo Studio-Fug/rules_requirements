@@ -7,14 +7,23 @@ checks it in process. This module is the independent audit (layer L6): it
 reads nothing but the JSON a report wrote (``rules_requirements/report/v2``)
 and checks that
 
+* the file names every object key once (a duplicate key could name two
+  owners for one case: :func:`load_report` refuses it);
 * every case is listed once, and its ``owner`` is one id or ``null`` (a scalar,
   never a list) naming a user need, requirement or mitigation of the report;
-* no case appears as an owned member (``passed`` / ``failed`` / ``error`` /
-  ``skipped``) of two entities, each owned member's entity is the case's
-  owner, and every owned case is a member of its owner (the members partition
-  the owned cases);
-* no quarantined case is owned, and every entity a quarantine names reads
-  INVALID and holds the case as a ``quarantined`` member;
+* every member says whether its entity owns it (``owned``); no case key is an
+  owned member of two entities, each owned member is a row of ``cases`` whose
+  owner is that entity, and every owned case is a member of its owner (the
+  owned members partition the owned cases). A member that is not owned is a
+  pseudo-member: an ``error`` one names no case of the report and sits on a
+  tainted or synthetic-only target;
+* the ``evidence[]`` compatibility view of each entity is exactly the view of
+  its owned members, so a 0.3.x reader of ``evidence[]`` sees the same
+  partition;
+* no quarantined case is owned; a quarantine's ``entities`` is a list of ids,
+  the entities holding the case as a ``quarantined`` member are exactly the
+  verifiable ones it names, each of them reads INVALID, and the ids it names
+  follow from its code (the declared ids and the claims);
 * the counts agree: the summary, every entity's ``set``, the per-target
   counts and the granularity against the rows they count.
 
@@ -46,11 +55,29 @@ class ReportError(ValueError):
     """The file is no v2 report at all (unreadable, not JSON, another schema)."""
 
 
+class AmbiguousReportError(ReportError):
+    """The file names an object key twice, so readers may disagree on its
+    content (one owner to a last-wins parser, another to a first-wins one):
+    the partition cannot be proven from it. ``rr check-report`` exits 1."""
+
+
+def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise AmbiguousReportError(f"the key {key!r} appears twice in one object")
+        seen[key] = value
+    return seen
+
+
 def load_report(path: str) -> dict[str, Any]:
-    """Read a JSON report; raises :class:`ReportError` when it is no v2 report."""
+    """Read a JSON report; raises :class:`ReportError` when it is no v2 report,
+    and :class:`AmbiguousReportError` when an object names a key twice."""
     try:
         with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
+            doc = json.load(fh, object_pairs_hook=_unique_keys)
+    except AmbiguousReportError as exc:
+        raise AmbiguousReportError(f"{path}: {exc}; a duplicate key can name two owners for one case") from None
     except (OSError, ValueError) as exc:
         raise ReportError(f"{path}: cannot read the report: {exc}") from None
     if not isinstance(doc, dict):
@@ -123,9 +150,20 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
             quarantine_code[key] = row["quarantine"]
         by_target.setdefault(str(row.get("target")), []).append(row)
 
-    # Members: the owned members partition the owned cases.
+    att = doc.get("attribution")
+    if not isinstance(att, dict):
+        problems.append("attribution: missing")
+        att = {}
+    raw_targets = att.get("targets")
+    targets: dict[str, Any] = raw_targets if isinstance(raw_targets, dict) else {}
+
+    # Members: the owned members partition the owned cases. Ownership is the
+    # member's ``owned`` flag (the report writes Member.owned), never guessed
+    # from the state: an ``error`` pseudo-member (a selector or lock entry
+    # whose case is absent from a tainted target) is in an owned state too.
     member_of: dict[str, list[str]] = {}
     quarantined_members: set[tuple[str, str]] = set()
+    owned_view: dict[str, list[tuple[str, str, str, bool]]] = {}
     for section in VERIFIABLE_SECTIONS:
         for ent in _list(doc, section, problems):
             if not isinstance(ent, dict) or not isinstance(ent.get("id"), str):
@@ -136,11 +174,12 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                 problems.append(f"{eid}: members missing or not a list")
                 continue
             counted = {state: 0 for state in _STATES}
+            view = owned_view.setdefault(eid, [])
             for mb in members:
                 if not isinstance(mb, dict):
                     problems.append(f"{eid}: a member that is not an object")
                     continue
-                state, case = mb.get("state"), mb.get("case")
+                state, case, is_owned = mb.get("state"), mb.get("case"), mb.get("owned")
                 if state not in counted:
                     problems.append(f"{eid}: member {case!r} has an unknown state {state!r}")
                     continue
@@ -148,12 +187,34 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                 if case is not None and not isinstance(case, str):
                     problems.append(f"{eid}: member case {case!r} is not one case key")
                     continue
-                if state in OWNED_STATES and case is not None and case in owner:
+                if not isinstance(is_owned, bool):
+                    problems.append(f"{eid}: member {case!r} does not say whether it is owned ({is_owned!r})")
+                    continue
+                if is_owned:
+                    if state not in OWNED_STATES or case is None:
+                        problems.append(f"{eid}: an owned member must be a case in an owned state ({case!r}, {state})")
+                        continue
+                    # Every owned key counts, whether or not cases[] lists it.
                     member_of.setdefault(case, []).append(eid)
-                    if owner[case] != eid:
+                    view.append((case, state, str(mb.get("level") or ""), mb.get("stale") is True))
+                    if case not in owner:
+                        problems.append(f"{case} is an owned ({state}) member of {eid} but no case of this report")
+                    elif owner[case] != eid:
                         problems.append(f"{case} is an owned ({state}) member of {eid} but owned by {owner[case]}")
-                elif state in OWNED_STATES and state != "error":
-                    problems.append(f"{eid}: owned ({state}) member {case!r} is not a case of this report")
+                elif state in OWNED_STATES:
+                    # A pseudo-member in an owned state: only an error for a
+                    # case the evidence lacks, on a target that ran tainted or
+                    # with a failed whole-target result only.
+                    trow = targets.get(str(mb.get("target")))
+                    if state != "error":
+                        problems.append(f"{eid}: member {case!r} is {state} but not owned")
+                    elif case is not None and case in owner:
+                        problems.append(f"{eid}: {case} is a case of this report, so an error member of it is owned")
+                    elif not isinstance(trow, dict) or not (trow.get("tainted") or trow.get("synthetic")):
+                        problems.append(
+                            f"{eid}: error member {case!r} of {mb.get('target')!r} is not owned, but that target "
+                            "is neither tainted nor synthetic-only"
+                        )
                 elif state == "quarantined":
                     if case is None:
                         problems.append(f"{eid}: a quarantined member without a case")
@@ -171,45 +232,111 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                         problems.append(f"{eid}: set.{field} is {summary.get(field)}, its members say {n}")
             else:
                 problems.append(f"{eid}: no set summary")
+    # The 0.3.x evidence[] view: exactly the owned members, nothing else.
+    for section in (*VERIFIABLE_SECTIONS, *OTHER_SECTIONS):
+        for ent in _list(doc, section, problems):
+            if not isinstance(ent, dict) or not isinstance(ent.get("id"), str):
+                continue
+            eid = ent["id"]
+            evidence = ent.get("evidence") or []
+            if not isinstance(evidence, list):
+                problems.append(f"{eid}: evidence is not a list")
+                continue
+            listed = []
+            for ev in evidence:
+                if not isinstance(ev, dict) or not isinstance(ev.get("name"), str):
+                    problems.append(f"{eid}: an evidence entry without a name: {ev!r}")
+                    continue
+                listed.append(
+                    (
+                        f"{ev.get('target')}#{ev['name']}",
+                        str(ev.get("status")),
+                        str(ev.get("level") or ""),
+                        ev.get("stale") is True,
+                    )
+                )
+            derived = owned_view.get(eid, [])
+            if sorted(listed) != sorted(derived):
+                extra = sorted({g[0] for g in listed} - {w[0] for w in derived})
+                problems.append(
+                    f"{eid}: evidence[] is not the view of its owned members"
+                    + (f" (it lists {', '.join(extra)}, which {eid} does not own)" if extra else "")
+                )
     for case, ents in sorted(member_of.items()):
         if len(ents) > 1:
             problems.append(
                 f"{case} appears under {len(ents)} entities ({', '.join(ents)}); a test case verifies at most one"
             )
     for case, who in sorted(owner.items()):
-        if who is not None and case not in member_of:
+        if who is not None and who not in member_of.get(case, ()):
             problems.append(f"{case} is owned by {who} but is no member of it")
 
-    # Quarantines: owned by nobody; every entity named reads INVALID.
-    att = doc.get("attribution")
-    if not isinstance(att, dict):
-        problems.append("attribution: missing")
-        att = {}
+    # Quarantines: owned by nobody; the entities holding the case as a
+    # quarantined member are exactly the verifiable ones named, each INVALID.
     quarantined = _list(att, "quarantined", problems)
+    rows_by_key = {r["case"]: r for r in rows if isinstance(r, dict) and isinstance(r.get("case"), str)}
+    holders: dict[str, set[str]] = {}
+    for eid, key in quarantined_members:
+        holders.setdefault(key, set()).add(eid)
     seen_q: set[str] = set()
     for q in quarantined:
         if not isinstance(q, dict) or not isinstance(q.get("case"), str):
             problems.append(f"attribution.quarantined: an entry without a case: {q!r}")
             continue
         key = q["case"]
+        code = q.get("code")
         if key in seen_q:
             problems.append(f"{key} is quarantined twice")
         seen_q.add(key)
         if key not in owner:
             problems.append(f"{key} is quarantined but no case of this report")
         elif owner[key] is not None:
-            problems.append(f"{key} is quarantined ({q.get('code')}) and owned by {owner[key]}")
+            problems.append(f"{key} is quarantined ({code}) and owned by {owner[key]}")
         if key in member_of:
             problems.append(f"{key} is quarantined and an owned member of {', '.join(member_of[key])}")
-        if quarantine_code.get(key) != q.get("code"):
-            problems.append(f"{key}: cases says quarantine {quarantine_code.get(key)!r}, attribution {q.get('code')!r}")
-        for eid in q.get("entities") or []:
+        if quarantine_code.get(key) != code:
+            problems.append(f"{key}: cases says quarantine {quarantine_code.get(key)!r}, attribution {code!r}")
+        named = q.get("entities")
+        if not isinstance(named, list) or not all(isinstance(e, str) for e in named):
+            problems.append(f"{key} ({code}): entities {named!r} is not a list of ids")
+            continue
+        for eid in named:
             if eid not in status:
                 continue  # an id the model does not define: nothing to read INVALID
             if status[eid] != "INVALID":
-                problems.append(f"{key} ({q.get('code')}) names {eid}, which reads {status[eid]}, not INVALID")
-            if eid in verifiable and (eid, key) not in quarantined_members:
-                problems.append(f"{key} ({q.get('code')}) names {eid}, which holds no quarantined member for it")
+                problems.append(f"{key} ({code}) names {eid}, which reads {status[eid]}, not INVALID")
+        named_here = {e for e in named if e in verifiable}
+        have = holders.get(key, set())
+        for eid in sorted(named_here - have):
+            problems.append(f"{key} ({code}) names {eid}, which holds no quarantined member for it")
+        for eid in sorted(have - named_here):
+            problems.append(f"{eid} holds {key} as quarantined, but its quarantine ({code}) does not name {eid}")
+        # Who a quarantine names follows from its code.
+        claimed = {str(c.get("entity")) for c in q.get("claims") or [] if isinstance(c, dict)}
+        declared = q.get("declared")
+        if not isinstance(declared, list):
+            problems.append(f"{key} ({code}): declared {declared!r} is not a list")
+            declared = []
+        row = rows_by_key.get(key)
+        if row is not None and sorted(map(str, row.get("declared") or [])) != sorted(map(str, declared)):
+            problems.append(f"{key}: cases says declared {row.get('declared')!r}, its quarantine {declared!r}")
+        if code == "multi-tag":
+            follows = {str(d) for d in declared if d in verifiable} | claimed
+            if len(declared) < 2:
+                problems.append(f"{key} (multi-tag) declares {declared!r}, fewer than two ids")
+        elif code == "attribution-conflict":
+            follows = claimed
+            if len(claimed) < 2:
+                problems.append(f"{key} (attribution-conflict) has claims of {len(claimed)} entities, not two or more")
+        elif code == "same-code-multiple-owners":
+            follows = set(named) if len(named) == 1 else set()
+            if len(named) != 1:
+                problems.append(f"{key} (same-code-multiple-owners) names {named!r}, not the one owner it had")
+        else:
+            problems.append(f"{key}: unknown quarantine code {code!r}")
+            continue
+        if follows != set(named):
+            problems.append(f"{key} ({code}) names {sorted(named)}, its declared ids and claims give {sorted(follows)}")
     for key in sorted(set(quarantine_code) - seen_q):
         problems.append(f"{key}: cases marks it quarantined, attribution.quarantined does not list it")
     for eid, key in sorted(quarantined_members):
@@ -233,8 +360,6 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
     for field, n in expected.items():
         if s.get(field) != n:
             problems.append(f"summary.{field} is {s.get(field)}, the report lists {n}")
-    raw_targets = att.get("targets")
-    targets: dict[str, Any] = raw_targets if isinstance(raw_targets, dict) else {}
     for target, trow in targets.items():
         mine = by_target.get(target, [])
         if not isinstance(trow, dict):
