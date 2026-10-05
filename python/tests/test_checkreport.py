@@ -473,7 +473,7 @@ def _small_report(tmp_path, *, mode="model", config="", cases=None):
     model = model_at(tmp_path, reqs, config="{attribution: " + mode + (", " + config if config else "") + "}")
     cases = cases or [
         tc("t1", classname="m", target="//a:t", declared=("REQ-1",), properties={"rr.file": "f.py"}),
-        tc("café", classname="m", target="//a:t", declared=("REQ-1",)),
+        tc("\u00e9t\u00e9", classname="m", target="//a:t", declared=("REQ-1",)),
         tc("z", classname="k", target="//c:t", declared=("REQ-2",)),
     ]
     from rules_requirements.lock import NO_LOCK
@@ -515,7 +515,7 @@ def _forge(doc, src_key, target, path, owner, *, file=None):
 
 
 _T1 = "//a:t#m::t1"
-_CAFE = "//a:t#m::café"
+_ETE = "//a:t#m::\u00e9t\u00e9"
 
 
 @pytest.mark.parametrize(
@@ -528,7 +528,7 @@ _CAFE = "//a:t#m::café"
         ("//a:t", "m::t1 ", "", "is not canonical"),
         ("//a:t", " m::t1", "", "is not canonical"),
         ("//a:t", "m::t1 [rr:REQ-2]", "", "name tag"),
-        ("//a:t", "m::café", "", "is not canonical"),  # NFD
+        ("//a:t", "m::e\u0301te\u0301", "", "is not canonical"),  # NFD
     ],
     ids=["at", "atat", "at-main-repo", "short-label", "trailing-blank", "leading-blank", "name-tag", "nfd"],
 )
@@ -540,7 +540,7 @@ def test_check_report_rejects_a_case_owned_twice_under_another_spelling_of_its_k
     blank, an [rr:ID] tag, NFD...): by the tool's own definition one case with
     two owners. The identical spelling was always rejected (the control)."""
     doc = _small_report(tmp_path, config=config)
-    src = _CAFE if "caf" in path else _T1
+    src = _T1 if "t1" in path else _ETE
     assert checkreport.check_report(_forge(doc, src, "//a:t", src.partition("#")[2], "REQ-2"))  # the control
     forged = _forge(doc, src, target, path, "REQ-2")
     problems = checkreport.check_report(forged)
