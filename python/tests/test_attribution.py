@@ -1394,6 +1394,29 @@ def test_check_invariant_catches_a_hand_built_attribution(tmp_path):
             broken.check_invariant()
 
 
+@pytest.mark.parametrize("state", ["passed", "failed", "skipped", "error"])
+@pytest.mark.parametrize("with_result", [False, True])
+def test_check_invariant_reads_ownership_from_the_state(tmp_path, state, with_result):
+    """A forged member that counts toward REQ-2 (by its state) for a case REQ-1
+    owns breaks the invariant, with or without a result: verdict_from_members
+    reads only the state, so REQ-2 would read VERIFIED (or FAILED) by it."""
+    reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //p:t, cases: ['c::a']}]}\n"
+    model = model_at(tmp_path, reqs)
+    att = attribute(model, evidence(tc("a")))
+    key = CaseKey("//p:t", "c::a")
+    result = att.cases[key] if with_result else None
+    forged = Member("REQ-2", key, "c::a", "model", state, "simulation", target="//p:t", result=result)
+    broken = dataclasses.replace(att, members=MappingProxyType({**att.members, "REQ-2": (forged,)}))
+    with pytest.raises(AttributionInvariantError, match="is a member of REQ-2 but owned by REQ-1"):
+        broken.check_invariant()
+    if not with_result:
+        with pytest.raises(AttributionInvariantError, match=r"owned \(\w+\) member of REQ-2 without its result"):
+            broken.check_invariant()
+    # Pseudo-members of an absent case stay exempt.
+    absent = Member("REQ-2", CaseKey("//p:t", "c::gone"), "c::gone", "model", "error", target="//p:t")
+    dataclasses.replace(att, members=MappingProxyType({**att.members, "REQ-2": (absent,)})).check_invariant()
+
+
 def test_attribution_reads(tmp_path):
     reqs = "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //w:t, cases: ['*']}]}\n"
     att = build_matrix(model_at(tmp_path, reqs), evidence(tc("a", target="//w:t"))).attribution

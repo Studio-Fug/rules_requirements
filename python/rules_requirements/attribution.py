@@ -373,8 +373,10 @@ class Attribution:
         """Assert the one-owner invariant; raises :class:`AttributionInvariantError`.
 
         * ``owner`` is a function from case keys to one entity id each;
-        * the owned members (states passed/failed/error/skipped) partition
-          the owned keys: each owned key is a member of exactly its owner;
+        * the owned members (states passed/failed/skipped, and error for a
+          case in the evidence — by state, whatever result they carry)
+          partition the owned keys: each owned key is a member of exactly
+          its owner, with that key's result;
         * no key is both owned and quarantined;
         * every entity a quarantine names holds that key as a
           ``quarantined`` member.
@@ -399,10 +401,20 @@ class Attribution:
                     problems.append(f"a member of {ent} names {m.entity}")
                 if m.state not in MEMBER_STATES:
                     problems.append(f"{m.name}: unknown member state {m.state!r}")
-                if m.owned:
+                # Owned is a matter of state, not of the result it carries: a
+                # passed/failed/skipped member, or an error member of a case
+                # in this evidence, counts toward its entity, so it must be
+                # one of the entity's owned keys (with that key's result).
+                # Only the pseudo-members (missing, not-run, moved,
+                # quarantined, and an error for an absent case) are exempt.
+                if m.state in (PASSED, FAILED, SKIPPED) or (
+                    m.state == ERROR and m.key is not None and m.key in self.cases
+                ):
                     if m.key is None:
                         problems.append(f"{ent}: an owned member without a case key")
                         continue
+                    if m.result is None or m.result.key != m.key:
+                        problems.append(f"{m.key} is an owned ({m.state}) member of {ent} without its result")
                     if self.owner.get(m.key) != ent:
                         problems.append(f"{m.key} is a member of {ent} but owned by {self.owner.get(m.key)}")
                     if m.key in seen:
