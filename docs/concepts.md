@@ -111,7 +111,10 @@ test code — the same source file and case path, or targets declared in
 `./x.py`, `a/../x.py` and the absolute path a harness started outside the
 workspace records are one file). Equal case paths with different owners whose
 source is unknown or recorded differently get the `same-path-multiple-owners`
-warning. A quarantined case owns nothing, and every
+warning — or, when one of them is an absolute path outside the workspace that
+ends with two recorded relative paths (it may be either file), the
+`ambiguous-source` error: whether two owners share test code is then unknown,
+so it fails closed. A quarantined case owns nothing, and every
 entity it names reads INVALID until it has one owner. A tag naming a risk or a
 test method is `misdirected-evidence` and one naming an undefined id
 `unknown-id`; neither owns anything.
@@ -287,7 +290,7 @@ writes as a machine-readable work queue:
 | `tag-mismatch`, `unclaimed-tag` | a tag that disagrees with the claim owning its case, or (`attribution: model`) a tag on a case no claim selects | autonomous |
 | `duplicate-case`, `coarse-claim` | one case key reported twice in a run; a whole-target claim on a target with per-case results | autonomous |
 | `unlocked-member`, `lock-owner-changed`, `lock-stale`, `lock-invalid` | the lock disagrees with the attribution ({ref}`verification-lock`) | autonomous |
-| `same-path-multiple-owners`, `level-mismatch`, `unscoped-evidence`, `suite-level-requirement` | equal case paths in two targets with different owners and no common recorded source; a case level that differs from its claim's; JUnit outside a testlogs tree; a suite-level requirement property (not inherited) | autonomous |
+| `same-path-multiple-owners`, `ambiguous-source`, `level-mismatch`, `unscoped-evidence`, `suite-level-requirement` | equal case paths in two targets with different owners and no common recorded source (`ambiguous-source`, always an error: one recorded source may be either of two files); a case level that differs from its claim's; JUnit outside a testlogs tree; a suite-level requirement property (not inherited) | autonomous |
 | `unpinned-sets` | no lock: the entities whose sets have glob, whole-target or tag-owned members | autonomous |
 | `high-risk-open` | a high-severity risk that is not MITIGATED | human-gate |
 | `unknown-id` | evidence tagged with an id the model does not define | autonomous |

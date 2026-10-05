@@ -1,5 +1,5 @@
 {
-  "schema": "rules_requirements/report/v1",
+  "schema": "rules_requirements/report/v2",
   "title": "rules_requirements hook integration",
   "project": {
     "name": "rules_requirements hook integration"
@@ -20,8 +20,271 @@
     "mitigations": 1,
     "mitigations_verified": 0,
     "test_cases": 13,
+    "test_cases_owned": 6,
+    "test_cases_unowned": 5,
+    "test_cases_quarantined": 2,
     "gaps": 11
   },
+  "attribution": {
+    "mode": "hybrid",
+    "lock": null,
+    "lane": null,
+    "targets": {
+      "//tests/integration:gtest_hook_test": {
+        "cases": 5,
+        "owned": 1,
+        "quarantined": 1,
+        "owners": [
+          "REQ-3"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//tests/integration:pytest_hook_test": {
+        "cases": 2,
+        "owned": 2,
+        "quarantined": 0,
+        "owners": [
+          "REQ-1",
+          "REQ-6"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//tests/integration:rust_hook_test": {
+        "cases": 4,
+        "owned": 1,
+        "quarantined": 1,
+        "owners": [
+          "REQ-4"
+        ],
+        "synthetic": false,
+        "ran": true
+      },
+      "//tests/integration:unittest_hook_test": {
+        "cases": 2,
+        "owned": 2,
+        "quarantined": 0,
+        "owners": [
+          "REQ-2",
+          "REQ-5"
+        ],
+        "synthetic": false,
+        "ran": true
+      }
+    },
+    "quarantined": [
+      {
+        "case": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls",
+        "code": "multi-tag",
+        "entities": [
+          "REQ-1",
+          "REQ-3"
+        ],
+        "declared": [
+          "REQ-3",
+          "REQ-1"
+        ],
+        "claims": [],
+        "detail": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls declares REQ-3, REQ-1; a test case verifies at most one requirement, so it verifies none of them until its evidence names one"
+      },
+      {
+        "case": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids",
+        "code": "multi-tag",
+        "entities": [
+          "REQ-1",
+          "REQ-4"
+        ],
+        "declared": [
+          "REQ-4",
+          "REQ-1"
+        ],
+        "claims": [],
+        "detail": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids declares REQ-4, REQ-1; a test case verifies at most one requirement, so it verifies none of them until its evidence names one"
+      }
+    ],
+    "issues": [
+      {
+        "code": "suite-level-requirement",
+        "severity": "warning",
+        "message": "suite SuiteLevel (or a parent case in it) names REQ-3 above its test cases; suite-level requirements are not inherited by the cases (each test case declares its own one id)",
+        "declared": [
+          "REQ-3"
+        ],
+        "target": "//tests/integration:gtest_hook_test"
+      },
+      {
+        "code": "suite-level-requirement",
+        "severity": "warning",
+        "message": "suite NextSuite (or a parent case in it) names REQ-1 above its test cases; suite-level requirements are not inherited by the cases (each test case declares its own one id)",
+        "declared": [
+          "REQ-1"
+        ],
+        "target": "//tests/integration:gtest_hook_test"
+      }
+    ],
+    "granularity": {
+      "owned_by_literal": 0,
+      "owned_by_pattern": 0,
+      "owned_by_whole": 0,
+      "owned_by_tag": 6,
+      "coarse_claims": 0
+    }
+  },
+  "cases": [
+    {
+      "case": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls",
+      "target": "//tests/integration:gtest_hook_test",
+      "path": "GtestHook::IdsAccumulateAcrossCalls",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [
+        "REQ-3",
+        "REQ-1"
+      ],
+      "quarantine": "multi-tag",
+      "file": "tests/integration/gtest_hook_test.cc"
+    },
+    {
+      "case": "//tests/integration:gtest_hook_test#GtestHook::UntracedTestHasNoIds",
+      "target": "//tests/integration:gtest_hook_test",
+      "path": "GtestHook::UntracedTestHasNoIds",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [],
+      "file": "tests/integration/gtest_hook_test.cc"
+    },
+    {
+      "case": "//tests/integration:gtest_hook_test#GtestHook::VerifiesIsTraced",
+      "target": "//tests/integration:gtest_hook_test",
+      "path": "GtestHook::VerifiesIsTraced",
+      "owner": "REQ-3",
+      "via": "tag",
+      "status": "passed",
+      "level": "sil",
+      "declared": [
+        "REQ-3"
+      ],
+      "file": "tests/integration/gtest_hook_test.cc"
+    },
+    {
+      "case": "//tests/integration:gtest_hook_test#NextSuite::OnlyItsOwnSuiteIds",
+      "target": "//tests/integration:gtest_hook_test",
+      "path": "NextSuite::OnlyItsOwnSuiteIds",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [],
+      "file": "tests/integration/gtest_hook_test.cc"
+    },
+    {
+      "case": "//tests/integration:gtest_hook_test#SuiteLevel::DoesNotInheritSuiteIds",
+      "target": "//tests/integration:gtest_hook_test",
+      "path": "SuiteLevel::DoesNotInheritSuiteIds",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [],
+      "file": "tests/integration/gtest_hook_test.cc"
+    },
+    {
+      "case": "//tests/integration:pytest_hook_test#tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation",
+      "target": "//tests/integration:pytest_hook_test",
+      "path": "tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation",
+      "owner": "REQ-6",
+      "via": "tag",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-6"
+      ],
+      "file": "tests/integration/test_pytest_hook.py"
+    },
+    {
+      "case": "//tests/integration:pytest_hook_test#tests.integration.test_pytest_hook::test_marker_is_traced",
+      "target": "//tests/integration:pytest_hook_test",
+      "path": "tests.integration.test_pytest_hook::test_marker_is_traced",
+      "owner": "REQ-1",
+      "via": "tag",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-1"
+      ],
+      "file": "tests/integration/test_pytest_hook.py"
+    },
+    {
+      "case": "//tests/integration:rust_hook_test#rust_hook_test::ignored_test",
+      "target": "//tests/integration:rust_hook_test",
+      "path": "rust_hook_test::ignored_test",
+      "owner": null,
+      "via": null,
+      "status": "skipped",
+      "declared": []
+    },
+    {
+      "case": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids",
+      "target": "//tests/integration:rust_hook_test",
+      "path": "rust_hook_test::multiple_ids",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [
+        "REQ-4",
+        "REQ-1"
+      ],
+      "quarantine": "multi-tag"
+    },
+    {
+      "case": "//tests/integration:rust_hook_test#rust_hook_test::trace_line_is_json",
+      "target": "//tests/integration:rust_hook_test",
+      "path": "rust_hook_test::trace_line_is_json",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": []
+    },
+    {
+      "case": "//tests/integration:rust_hook_test#rust_hook_test::verifies_is_traced",
+      "target": "//tests/integration:rust_hook_test",
+      "path": "rust_hook_test::verifies_is_traced",
+      "owner": "REQ-4",
+      "via": "tag",
+      "status": "passed",
+      "level": "sil",
+      "declared": [
+        "REQ-4"
+      ]
+    },
+    {
+      "case": "//tests/integration:unittest_hook_test#unittest_hook_test.UnittestHook::test_decorator_is_traced",
+      "target": "//tests/integration:unittest_hook_test",
+      "path": "unittest_hook_test.UnittestHook::test_decorator_is_traced",
+      "owner": "REQ-2",
+      "via": "tag",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-2"
+      ],
+      "file": "tests/integration/unittest_hook_test.py"
+    },
+    {
+      "case": "//tests/integration:unittest_hook_test#unittest_hook_test.UnittestHook::test_failure_is_recorded",
+      "target": "//tests/integration:unittest_hook_test",
+      "path": "unittest_hook_test.UnittestHook::test_failure_is_recorded",
+      "owner": "REQ-5",
+      "via": "tag",
+      "status": "failed",
+      "level": "simulation",
+      "declared": [
+        "REQ-5"
+      ],
+      "file": "tests/integration/unittest_hook_test.py"
+    }
+  ],
   "levels": [
     {
       "name": "analysis",
@@ -53,6 +316,28 @@
       "id": "UN-1",
       "title": "Trace tests in every supported framework",
       "status": "FAILED",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3",
+        "REQ-4",
+        "REQ-5",
+        "REQ-6"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "requirements": [
         "REQ-1",
         "REQ-2",
@@ -68,6 +353,50 @@
       "id": "REQ-1",
       "title": "pytest markers are traced",
       "status": "INVALID",
+      "basis": "own",
+      "set": {
+        "complete": false,
+        "members": 3,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 2
+      },
+      "members": [
+        {
+          "case": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls",
+          "target": "//tests/integration:gtest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "quarantined",
+          "owned": false,
+          "level": "simulation",
+          "reason": "multi-tag"
+        },
+        {
+          "case": "//tests/integration:pytest_hook_test#tests.integration.test_pytest_hook::test_marker_is_traced",
+          "target": "//tests/integration:pytest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        },
+        {
+          "case": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids",
+          "target": "//tests/integration:rust_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "quarantined",
+          "owned": false,
+          "level": "simulation",
+          "reason": "multi-tag"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.integration.test_pytest_hook::test_marker_is_traced",
@@ -90,6 +419,30 @@
       "id": "REQ-2",
       "title": "unittest decorators are traced",
       "status": "VERIFIED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:unittest_hook_test#unittest_hook_test.UnittestHook::test_decorator_is_traced",
+          "target": "//tests/integration:unittest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "unittest_hook_test.UnittestHook::test_decorator_is_traced",
@@ -112,6 +465,40 @@
       "id": "REQ-3",
       "title": "googletest RR_VERIFIES is traced",
       "status": "INVALID",
+      "basis": "own",
+      "set": {
+        "complete": false,
+        "members": 2,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 1
+      },
+      "members": [
+        {
+          "case": "//tests/integration:gtest_hook_test#GtestHook::IdsAccumulateAcrossCalls",
+          "target": "//tests/integration:gtest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "quarantined",
+          "owned": false,
+          "level": "simulation",
+          "reason": "multi-tag"
+        },
+        {
+          "case": "//tests/integration:gtest_hook_test#GtestHook::VerifiesIsTraced",
+          "target": "//tests/integration:gtest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "sil"
+        }
+      ],
       "evidence": [
         {
           "name": "GtestHook::VerifiesIsTraced",
@@ -135,6 +522,40 @@
       "id": "REQ-4",
       "title": "Rust rr::verifies! is traced",
       "status": "INVALID",
+      "basis": "own",
+      "set": {
+        "complete": false,
+        "members": 2,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 1
+      },
+      "members": [
+        {
+          "case": "//tests/integration:rust_hook_test#rust_hook_test::multiple_ids",
+          "target": "//tests/integration:rust_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "quarantined",
+          "owned": false,
+          "level": "simulation",
+          "reason": "multi-tag"
+        },
+        {
+          "case": "//tests/integration:rust_hook_test#rust_hook_test::verifies_is_traced",
+          "target": "//tests/integration:rust_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "sil"
+        }
+      ],
       "evidence": [
         {
           "name": "rust_hook_test::verifies_is_traced",
@@ -158,6 +579,30 @@
       "id": "REQ-5",
       "title": "A failing test marks its requirement FAILED",
       "status": "FAILED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 0,
+        "failed": 1,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:unittest_hook_test#unittest_hook_test.UnittestHook::test_failure_is_recorded",
+          "target": "//tests/integration:unittest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "failed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "unittest_hook_test.UnittestHook::test_failure_is_recorded",
@@ -179,6 +624,30 @@
       "id": "REQ-6",
       "title": "Hardware-only requirement stays under-verified without a bench",
       "status": "UNDER-VERIFIED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:pytest_hook_test#tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation",
+          "target": "//tests/integration:pytest_hook_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "tests.integration.test_pytest_hook::test_hardware_requirement_in_simulation",
@@ -202,6 +671,26 @@
       "id": "MIT-1",
       "title": "Golden report over all hooks",
       "status": "FAILED",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3",
+        "REQ-4"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "type": "protective",
       "mitigates": [
         "RISK-1"
@@ -219,6 +708,10 @@
       "id": "RISK-1",
       "title": "A hook silently drops traces, so the report over-claims coverage",
       "status": "FAILED",
+      "basis": "derived",
+      "derived_from": [
+        "MIT-1"
+      ],
       "severity": "high",
       "likelihood": "possible",
       "residual_severity": null,
@@ -234,6 +727,10 @@
       "id": "TM-1",
       "title": "Bench run on real hardware",
       "status": "PARTIAL",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-6"
+      ],
       "level": "hil",
       "used_by": [
         "REQ-6"

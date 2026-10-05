@@ -435,11 +435,36 @@ def test_declared_is_a_field_and_requirements_a_deprecated_alias():
     with pytest.warns(DeprecationWarning):
         legacy = TestCase("n", "passed", requirements=["R-4"])
     assert legacy.declared == ("R-4",)
-    with pytest.warns(DeprecationWarning):  # the alias wins (dataclasses.replace passes both)
-        assert TestCase("n", "passed", declared=("R-1",), requirements=("R-2",)).declared == ("R-2",)
+    # Both explicitly: two sets of ids for one case, refused (the alias may
+    # not silently drop an explicit declared id).
+    with pytest.raises(TypeError, match="not both"):
+        TestCase("n", "passed", declared=("R-1",), requirements=("R-2",))
+    with pytest.raises(TypeError, match="not both"):
+        TestCase("n", "passed", declared=["R-1"], requirements=["R-1"])
+    with pytest.raises(TypeError, match="not both"):  # an explicit empty declared= is still a second set
+        TestCase("n", "passed", declared=(), requirements=("R-2",))
+    # Another case's declared beside the alias: refused, not silently overridden
+    # (it used to read as replace()'s own declared, dropping R-1).
+    a = TestCase("x", "passed", declared=("R-1",))
+    with pytest.raises(TypeError, match="not both"):
+        TestCase("y", "passed", declared=a.declared, requirements=["R-2"])
+    with pytest.raises(TypeError, match="not both"):  # replace() with both given explicitly
+        dataclasses.replace(a, declared=("R-3",), requirements=["R-2"])
     with pytest.warns(DeprecationWarning, match="use TestCase.declared"):
         replaced = dataclasses.replace(legacy, requirements=("R-6", "R-7"))
     assert replaced.declared == ("R-6", "R-7") and legacy.declared == ("R-4",)
+    # replace() of a case declaring another id: the alias replaces it (0.2 semantics).
+    tagged = TestCase("n", "passed", declared=("R-1",))
+    with pytest.warns(DeprecationWarning):
+        assert dataclasses.replace(tagged, requirements=["R-9"]).declared == ("R-9",)
+    # declared stays a plain tuple to every reader, copy and pickle included.
+    import copy
+    import pickle
+
+    assert tagged.declared == ("R-1",) and isinstance(tagged.declared, tuple)
+    assert copy.deepcopy(tagged).declared == ("R-1",)
+    assert pickle.loads(pickle.dumps(tagged)).declared == ("R-1",)
+    assert dataclasses.asdict(tagged)["declared"] == ("R-1",)
     assert dataclasses.replace(legacy, level="hil").declared == ("R-4",)
     # A bare string is one id, not its characters.
     assert TestCase("n", "passed", declared="R-5").declared == ("R-5",)

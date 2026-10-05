@@ -235,3 +235,47 @@ def test_lock_schema_rejects_padded_case_paths():
     validator.validate(yaml.safe_load(LOCK))
     with pytest.raises(jsonschema.ValidationError):
         validator.validate(yaml.safe_load(LOCK.replace('"[target]"', '" [target]"')))
+
+
+def _report_schema():
+    for base in (_ROOT, os.environ.get("TEST_SRCDIR", "") + "/_main"):
+        path = os.path.join(base, "schema", "report.v2.schema.json")
+        if os.path.exists(path):
+            with open(path) as fh:
+                return json.load(fh)
+    pytest.skip("schema not available")
+
+
+def test_report_schema_accepts_generated_reports_and_rejects_a_list_owner():
+    """Every report the attribution fuzz generates fits schema/report.v2; a
+    case whose owner is a list (two owners) does not."""
+    from test_checkreport import _fuzz_reports
+
+    validator = jsonschema.Draft202012Validator(_report_schema())
+    doc = None
+    for _, doc in _fuzz_reports(300, 99):
+        validator.validate(doc)
+    owned = next(r for _, d in _fuzz_reports(300, 98) for r in d["cases"] if r["owner"]) if doc else None
+    bad = {**doc, "cases": [{**owned, "owner": [owned["owner"], "REQ-2"]}]}
+    with pytest.raises(jsonschema.ValidationError):
+        validator.validate(bad)
+
+
+@pytest.mark.parametrize(
+    "golden",
+    [
+        "tests/integration/report.golden.json",
+        "tests/integration/rr_case_report.golden.json",
+        "examples/thermostat/report.golden.json",
+    ],
+)
+def test_report_schema_accepts_the_checked_in_goldens(golden):
+    from rules_requirements import checkreport
+
+    path = os.path.join(_ROOT, golden)
+    if not os.path.exists(path):
+        pytest.skip(f"{golden} not available")
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    jsonschema.Draft202012Validator(_report_schema()).validate(doc)
+    assert checkreport.check_report(doc) == []

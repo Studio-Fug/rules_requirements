@@ -56,11 +56,13 @@ kept in ``TestCase.suite_declared`` and reported as
 
 from __future__ import annotations
 
+import dataclasses
 import glob
 import importlib
 import os
 import posixpath
 import re
+import sys
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Mapping
@@ -153,6 +155,33 @@ def _ids(value: Any) -> tuple[str, ...]:
 
 _ID_FIELDS = frozenset(("declared", "suite_declared"))
 
+
+class _Unset(tuple):  # type: ignore[type-arg]
+    """The default of ``TestCase(declared=...)``: no ids, and not passed."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "()"
+
+
+_UNSET: Any = _Unset()
+
+
+def _replacing(declared: Any) -> bool:
+    """Whether the ``TestCase(...)`` being run was called by
+    :func:`dataclasses.replace` (or :func:`copy.replace`) with the source
+    case's own ``declared``: the one call that passes ``declared=`` without
+    the caller writing it. Frames: 0 here, 1 ``TestCase.__init__``, 2 its
+    caller (``replace(obj, ...)`` up to 3.12, ``_replace(self, ...)`` from
+    3.13)."""
+    caller = sys._getframe(2)
+    if caller.f_code.co_filename != dataclasses.__file__ or caller.f_code.co_name not in ("replace", "_replace"):
+        return False
+    source = caller.f_locals.get("obj", caller.f_locals.get("self"))
+    return isinstance(source, TestCase) and source.declared is declared
+
+
 _FOR_ID_WARNING = (
     "Evidence.for_id is deprecated: it returns the cases that declare an id (tags), which is not the set "
     "of cases the entity owns; use build_matrix(...).attribution.members_of(entity_id)"
@@ -172,8 +201,10 @@ class TestCase:
     — tags, in order, without duplicates. It is plain data: nothing here
     says which requirement the case verifies (see :mod:`rules_requirements.ingest`).
     ``requirements`` is a deprecated read/write alias of it (and a
-    deprecated keyword of the constructor, which wins over ``declared=``,
-    so ``dataclasses.replace(case, requirements=...)`` works as in 0.2;
+    deprecated keyword of the constructor: ``dataclasses.replace(case,
+    requirements=...)`` works as in 0.2, while passing both ``declared=``
+    and ``requirements=`` explicitly is a TypeError, whatever ``declared``
+    holds (``()``, or another case's ``declared``);
     :func:`dataclasses.asdict` names the field ``declared``).
     """
 
@@ -202,7 +233,7 @@ class TestCase:
         name: str,
         status: str,
         classname: str = "",
-        declared: Iterable[str] = (),
+        declared: Iterable[str] = _UNSET,
         level: str = "",
         artifact: Mapping[str, str] | None = None,
         message: str = "",
@@ -218,8 +249,15 @@ class TestCase:
         requirements: Iterable[str] | None = None,
     ) -> None:
         if requirements is not None:
-            # The deprecated alias wins over declared=: dataclasses.replace(case,
-            # requirements=...) passes the case's current declared= as well.
+            # dataclasses.replace(case, requirements=...) passes the case's
+            # own declared= as well: there the alias replaces it. Any other
+            # declared= beside the alias (even (), even another case's
+            # declared) is two sets of ids for one case; neither may win.
+            if declared is not _UNSET and not _replacing(declared):
+                raise TypeError(
+                    "TestCase: pass declared= or the deprecated requirements=, not both "
+                    f"(declared={_ids(declared)!r}, requirements={_ids(requirements)!r})"
+                )
             warnings.warn(_ALIAS_WARNING, DeprecationWarning, stacklevel=2)
             declared = requirements
         self.name = name

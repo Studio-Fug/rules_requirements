@@ -488,9 +488,24 @@ that was VERIFIED only through a shared test now shows what it really has.
 In v0.3.0 a requirement's `verified_by` can name individual cases of a target
 (`{target: //web:clocksync_test, cases: ["clocksync::*"]}`). The model then
 rejects any case claimed by two entities, and evidence that still names two
-ids for one case counts for nobody. `rr migrate apply --stage model` will write
-those selectors from the decided ownership. In v0.4.0 a multi-id tag becomes a
-collection, import or compile error.
+ids for one case counts for nobody. Once the tags carry one id each and fresh
+evidence shows the decided owners, `rr migrate apply PLAN.rrplan --stage model
+[--compress] [--dry-run]` writes those selectors: one per case each entity
+owns through a tag today (with `--compress`, a `*` glob where it selects
+exactly that entity's cases, none of them skipped, and overlaps no other
+claim; a synthetic-only target gets `whole: true` with a reason). Before
+writing, it proves that the owner table over the evidence given is unchanged
+under `attribution: model` and that `check_claims` passes; it refuses a
+quarantine and any worksheet decision the evidence contradicts. A case the
+worksheet decided but the evidence given does not hold (another lane's test,
+say) keeps the worksheet's owner: it gets a literal selector of that entity,
+and the stage is refused unless exactly that entity's claims select it (no
+claim, for `none`); a `--compress` glob never reaches such a case of another
+owner. Cases in neither the evidence nor the worksheet are not seen: pass
+every lane's evidence, or re-run `rr attribution --check` over it afterwards.
+Then set `config: {attribution: model, sets_lock: verification.rrlock}` and
+run `rr sets lock --write`. In
+v0.4.0 a multi-id tag becomes a collection, import or compile error.
 
 Smaller v0.3.0 changes a script reading the reports or the Python API may
 notice:
@@ -502,4 +517,7 @@ notice:
   roots merged; target-scope results not counted), not raw results.
 - `TestCase.requirements` is a deprecated alias of `TestCase.declared`; it
   still reads, writes and works in `dataclasses.replace(case,
-  requirements=...)`, but `dataclasses.asdict()` names the field `declared`.
+  requirements=...)`, but `dataclasses.asdict()` names the field `declared`,
+  and passing both `declared=` and `requirements=` to the constructor is a
+  `TypeError` (two sets of ids for one case: neither may silently win), even
+  `declared=()` or another case's `declared`.

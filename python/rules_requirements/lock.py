@@ -83,9 +83,14 @@ class Lock:
 
     entries: tuple[LockEntry, ...] = ()
     path: str = ""
+    # "No lock" (:data:`NO_LOCK`): read none, whatever ``config.sets_lock``
+    # names. A field, not an identity, so it survives copy and pickle.
+    none: bool = False
     _index: Mapping[tuple[str, str], LockEntry] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.none and self.entries:
+            raise LockError(["a 'no lock' (NO_LOCK) cannot hold entries"])
         index: dict[tuple[str, str], LockEntry] = {}
         for entry in self.entries:
             if (entry.target, entry.path) in index:
@@ -211,13 +216,19 @@ def load_lock(path: str, main_repo: str = "", shown: str = "") -> Lock:
     return parse_lock(text, where, main_repo)
 
 
-NO_LOCK = Lock(path="<no lock>")
+NO_LOCK = Lock(path="<no lock>", none=True)
 """Pass as ``lock=`` to :func:`~rules_requirements.trace.build_matrix` (or
 :func:`~rules_requirements.attribution.attribute`) for "no lock", whatever
 ``config.sets_lock`` names (``rr report --no-lock``): the sets are not
 pinned (an ``unpinned-sets`` gap), as without a configured lock. ``None``
 reads the configured lock; an empty :class:`Lock` pins every set to nothing.
-Compared by identity."""
+Recognized by its ``none`` flag (:func:`is_no_lock`), so a copy or a pickled
+round trip of it still means "no lock"."""
+
+
+def is_no_lock(lock: Lock | None) -> bool:
+    """Whether ``lock`` is :data:`NO_LOCK` (or a copy of it): read no lock at all."""
+    return lock is not None and bool(getattr(lock, "none", False))
 
 
 def configured_lock(model: Model) -> Lock | None:

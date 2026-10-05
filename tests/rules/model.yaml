@@ -1,0 +1,16 @@
+# Fixture of the rule analysis tests (rules_test.bzl): one requirement that
+# claims the one case of evidence.xml, pinned by verification.rrlock.
+project:
+  name: rules_requirements rule fixture
+config:
+  sets_lock: verification.rrlock
+user_needs:
+  - id: UN-1
+    title: Pin a verification set
+requirements:
+  - id: REQ-1
+    title: The fixture case verifies this requirement
+    satisfies: [UN-1]
+    verified_by:
+      - target: "suite:fixture"
+        cases: ["c::ok"]

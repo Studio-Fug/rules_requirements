@@ -27,53 +27,110 @@ The command prints a one-line summary to standard error and exits with:
 
 | Exit | When |
 | ---- | ---- |
-| `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds, and no attribution issue is an error. |
-| `1` | An attribution issue is an error (a hard error such as `lock-owner-changed`, a rule set to `error` under `config.rules`, or any attribution warning under `--strict`); `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
+| `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds, no attribution issue is an error, and no test case is quarantined (or `--on-attribution-error=warn`). |
+| `1` | An attribution issue is an error (a hard error such as `lock-owner-changed`, a rule set to `error` under `config.rules`, or — with `--strict` — **any attribution warning**, e.g. `coarse-claim` or `same-path-multiple-owners`); `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
 | `2` | The model is invalid, or an `--out` extension is unknown. |
+| `3` | A test case is quarantined (unless `--on-attribution-error=warn`). The reports and the queue are written first; `3` wins over `1`. |
 
 `--fail-on` defaults to `none`: the report describes the state of the product,
 and whether that state should fail a pipeline is a separate decision.
 
 Each quarantined test case — one whose evidence names several ids, that two
 entities claim, or whose test code two entities own — prints one
-`ATTRIBUTION ERROR: <code>: <detail>` line to standard error, and every entity
-it names reads INVALID ({ref}`evidence`).
+`ATTRIBUTION ERROR: <code>: <detail>` line to standard error, every entity it
+names reads INVALID ({ref}`evidence`), and `rr report` exits 3.
+`--on-attribution-error=warn` keeps the exit status; it never changes a
+verdict (the case still counts for nobody).
 
 Every other attribution issue (`same-path-multiple-owners`, `unscoped-evidence`,
 `level-mismatch`, `suite-level-requirement`, the lock findings, ...) is a gap
 in the report. One at error severity also prints an
 `ATTRIBUTION ERROR: [<code>] <message>` line and makes `rr report` exit 1;
 the warnings are counted on one `attribution: N warning(s) (...)` line.
+`--strict` escalates every attribution warning (not only the model's) to an
+error.
 
-## JSON (`rules_requirements/report/v1`)
+`--sets-lock PATH` reads that verification-set lock instead of
+`config.sets_lock`; `--no-lock` reads none (the sets are then not pinned: an
+`unpinned-sets` gap).
+
+### Lanes
+
+A requirement's set may span lanes — software tests in one pipeline, HITL
+tests in another. `--lane NAME` stamps the report with its lane, and
+`--lane-targets FILE` (labels, one per line, e.g. `bazel query
+'tests(//...)'`) lists the targets that lane runs. A not-run member of any
+other target is labelled `lane_hint: "out of lane"` (expected elsewhere), and
+the `unverified` / `incomplete` gaps such members alone cause stay out of
+`--queue-out` (they are another lane's work; the report still lists them).
+Not-run members of in-lane targets stay ordinary `not-run` gaps. **Verdicts
+are identical with or without these flags**: a set spanning both lanes reads
+INCOMPLETE in each lane's report, and only the combined report, over both
+lanes' evidence, can read VERIFIED.
+
+### Checking a published report
+
+`rr check-report report.json` re-proves the one-owner partition from the JSON
+alone, independently of the code that wrote it. It exits `1` if a case key is
+an owned member (`owned: true`) of two entities — whether or not `cases`
+lists it —, if an owned member is no row of `cases` owned by its entity, if
+an owner is not a scalar id, if a quarantined case is owned, if the entities
+holding a quarantined case are not exactly the ones its quarantine names (a
+list of ids that follows from its code), if one of them does not read
+INVALID, if an entity's `evidence` is not exactly the view of its owned
+members, if the counts (summary, sets, per-target counts, granularity)
+disagree with the rows they count, or if the file names a key twice in one
+object (a duplicate `owner` reads differently to different parsers); `2` if
+the file is not a `rules_requirements/report/v2` report. An `error` member
+that is not owned is a pseudo-member: it names no case of the report, on a
+tainted or synthetic-only target. In Bazel, `rr_report` adds it as
+`<name>_check_test` whenever it builds the JSON report.
+
+## JSON (`rules_requirements/report/v2`)
 
 The JSON report is deterministic — entities sorted by id (`REQ-2` before
 `REQ-10`), no timestamps, no machine-specific paths — so it can be checked in as
-a golden file and reviewed as a diff. Top-level keys:
+a golden file and reviewed as a diff. Its JSON Schema is
+`schema/report.v2.schema.json`. Top-level keys:
 
 | Key | Content |
 | --- | ------- |
-| `schema` | `"rules_requirements/report/v1"` |
+| `schema` | `"rules_requirements/report/v2"` (`v1` before 0.3) |
 | `title` | `--title`, else the project's `name`, else `"Requirements traceability"` |
 | `project` | The model's `project:` metadata |
-| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases` (one per case key: retries, runs, shards and evidence roots merged, target-scope results not counted), `gaps` |
+| `summary` | Counts: `user_needs`, `user_needs_validated`, `requirements`, `requirements_verified`, `requirements_under_verified`, `requirements_partial`, `requirements_failed`, `requirements_unverified`, `requirements_incomplete`, `requirements_invalid`, `risks`, `risks_mitigated`, `mitigations`, `mitigations_verified`, `test_cases` (one per case key: retries, runs, shards and evidence roots merged, target-scope results not counted), `test_cases_owned`, `test_cases_unowned`, `test_cases_quarantined`, `gaps` |
+| `attribution` | `mode` (`hybrid` / `model`), `lock` (its path, or `null`), `lane` (or `null`), `targets` (per target: `cases`, `owned`, `quarantined`, `owners`, `synthetic`, `ran`; `tainted` and `in_lane` when they apply), `quarantined` (each `{case, code, entities, declared, claims: [{entity, selector, location}], detail}`), `issues` (`{code, severity, message, case, entities, declared, target}`), `granularity` (`owned_by_literal`, `owned_by_pattern`, `owned_by_whole`, `owned_by_tag`, `coarse_claims`) |
+| `cases` | The inverse matrix: every case key with **one owner or `null`** — `{case, target, path, owner, via, status, level, declared, quarantine, file, synthetic, flaky, duplicate}` (the last five when they apply). The input of `rr check-report`. |
 | `levels` | The configured levels: `{name, rank}` (`rank` is `null` for unordered levels) |
 | `user_needs`, `requirements`, `mitigations`, `risks`, `test_methods` | One object per entity (below) |
 | `modules` | `{module: status}` rollup |
 | `high_open_risks` | Ids of high-severity risks that are not MITIGATED |
 | `pyramid_violations` | Ids of requirements violating the cost pyramid |
 | `unknown_evidence` | `{id: [case key, ...]}` for evidence naming undefined ids; each case as its key `<target>#<path>` (0.2 wrote `<target> <classname>::<name>`) |
-| `gaps` | The gap queue (below) |
+| `gaps` | The gap queue (below); a gap only out-of-lane members cause carries `lane_hint: "out of lane"` |
 
-Every entity object has `id`, `title` and `status`, plus `description`,
-`open_notes` (`[{kind, text}]`) and `evidence` when present. `evidence` lists the
-cases the entity owns (the owned members of its
-{ref}`verification set <evidence>`): each entry is
-`{name, status, level}` — the case path, its member state, its level — with,
-when applicable, `target` (the build label or pseudo-target), `stale: true`,
-and `message` (the first line, at most 300 characters, of a failure). Since 0.3
-a whole-target claim lists the target's cases, so `kind: "target"` entries no
-longer occur, and a quarantined case is listed for no entity.
+Every entity object has `id`, `title`, `status` and `basis` (`own`, `derived`
+or `own+derived`: whether its verdict rests on its own set, on other
+entities' verdicts — listed in `derived_from` — or both), plus `description`,
+`open_notes` (`[{kind, text}]`) and `evidence` when present. User needs,
+requirements and mitigations also carry their {ref}`verification set
+<evidence>`: `set` counts its members (`complete`, `members`, `passed`,
+`failed`, `error`, `skipped`, `missing`, `not_run`, `moved`, `quarantined`)
+and `members` lists them — `{case, target, selector, via, state, owned}` plus
+`level`, `stale`, `flaky`, `reason` and `lane_hint` when they apply (`case` is
+`null` for a glob or whole claim that matched nothing). `owned` says whether
+the entity owns the case (it counts as its evidence): an owned member is a row
+of `cases` owned by that entity, and no case key is an owned member of two
+entities. The others are pseudo-members (`missing`, `not-run`, `moved`,
+`quarantined`, and an `error` for a case a tainted target did not report).
+
+`evidence` is the 0.2 view of the owned members, kept for 0.3.x readers: each
+entry is `{name, status, level}` — the case path, its member state, its level —
+with, when applicable, `target` (the build label or pseudo-target),
+`stale: true`, and `message` (the first line, at most 300 characters, of a
+failure). Since 0.3 a whole-target claim lists the target's cases, so
+`kind: "target"` entries no longer occur, and a quarantined case is listed for
+no entity.
 
 | Section | Additional keys |
 | ------- | --------------- |
@@ -110,22 +167,32 @@ evidence.
 
 ## Markdown
 
-A compact rendering for pull-request comments and wikis: the summary line, a
-banner for high-severity risks that are not mitigated, then tables for user
-needs, requirements (with their evidence and demanded level), risks,
+A compact rendering for pull-request comments and wikis: the summary line
+(with the owned, unowned and quarantined case counts), the attribution mode,
+lock and lane, a red banner listing every quarantined case with its code and
+every claim's origin, a banner for high-severity risks that are not mitigated,
+then tables for user needs, requirements (each row's evidence cell starts with
+its set line, e.g. `set 17/23 passed · 6 not run (out of lane)`), risks,
 mitigations, test methods, source implementation links (when sources were
-scanned), modules and gaps. The {doc}`tutorial <../tutorial>` shows the complete
-Markdown report of the example project.
+scanned) and modules; then "Verification sets" (one member table per entity:
+case, state, level, via, selector, lane hint), "Case attribution" (per target:
+cases, owned, quarantined, unowned, owners — and the unowned cases, the
+granularity backlog), "Lock drift" and "Coarse claims" when they have entries,
+and the gaps. The {doc}`tutorial <../tutorial>` shows the complete Markdown
+report of the example project.
 
 ## HTML
 
 A single self-contained page (no external assets; light and dark themes) with
-progress tiles, alerts for unmitigated high-severity risks, cost-pyramid
-violations and evidence that names undefined ids, the trace graph, and a table
-per entity kind. Requirement rows show their traces, evidence (with levels,
-staleness and failure messages), demanded and best-provided level, source
-links and open notes; every id is an anchor, so `report.html#REQ-5` links
-straight to a row.
+progress tiles, a quarantine banner (each case, its code and every claim's
+origin), alerts for unmitigated high-severity risks, cost-pyramid violations
+and evidence that names undefined ids, the trace graph, and a table per entity
+kind. Requirement rows show their traces, their set line — expanding to the
+member table — evidence (with levels, staleness and failure messages),
+demanded and best-provided level, the basis of a derived verdict, source links
+and open notes; the "Case attribution", "Lock drift" and "Coarse claims"
+sections follow. Every id is an anchor, so `report.html#REQ-5` links straight
+to a row.
 
 ## Graph exports
 

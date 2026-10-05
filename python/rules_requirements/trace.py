@@ -455,7 +455,7 @@ def build_matrix(
     """
     c = model.config
     problem = ""
-    if lock is rr_lock.NO_LOCK:
+    if rr_lock.is_no_lock(lock):
         lock = None  # explicitly none: not even the configured one
     elif lock is None:
         try:

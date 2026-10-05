@@ -1,5 +1,5 @@
 {
-  "schema": "rules_requirements/report/v1",
+  "schema": "rules_requirements/report/v2",
   "title": "rules_requirements rr_case.h integration",
   "project": {
     "name": "rules_requirements rr_case.h integration"
@@ -20,8 +20,90 @@
     "mitigations": 0,
     "mitigations_verified": 0,
     "test_cases": 4,
-    "gaps": 2
+    "test_cases_owned": 3,
+    "test_cases_unowned": 1,
+    "test_cases_quarantined": 0,
+    "gaps": 1
   },
+  "attribution": {
+    "mode": "hybrid",
+    "lock": "tests/integration/rr_case.rrlock",
+    "lane": null,
+    "targets": {
+      "//tests/integration:rr_case_test": {
+        "cases": 4,
+        "owned": 3,
+        "quarantined": 0,
+        "owners": [
+          "REQ-1",
+          "REQ-2",
+          "REQ-3"
+        ],
+        "synthetic": false,
+        "ran": true
+      }
+    },
+    "quarantined": [],
+    "issues": [],
+    "granularity": {
+      "owned_by_literal": 0,
+      "owned_by_pattern": 0,
+      "owned_by_whole": 0,
+      "owned_by_tag": 3,
+      "coarse_claims": 0
+    }
+  },
+  "cases": [
+    {
+      "case": "//tests/integration:rr_case_test#plain_assert_codec::cases_after_a_failure_still_run",
+      "target": "//tests/integration:rr_case_test",
+      "path": "plain_assert_codec::cases_after_a_failure_still_run",
+      "owner": "REQ-3",
+      "via": "tag",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-3"
+      ],
+      "file": "tests/integration/rr_case_test.cc"
+    },
+    {
+      "case": "//tests/integration:rr_case_test#plain_assert_codec::failing_case_fails_its_own_requirement",
+      "target": "//tests/integration:rr_case_test",
+      "path": "plain_assert_codec::failing_case_fails_its_own_requirement",
+      "owner": "REQ-2",
+      "via": "tag",
+      "status": "failed",
+      "level": "simulation",
+      "declared": [
+        "REQ-2"
+      ],
+      "file": "tests/integration/rr_case_test.cc"
+    },
+    {
+      "case": "//tests/integration:rr_case_test#plain_assert_codec::tagged_case_is_traced",
+      "target": "//tests/integration:rr_case_test",
+      "path": "plain_assert_codec::tagged_case_is_traced",
+      "owner": "REQ-1",
+      "via": "tag",
+      "status": "passed",
+      "level": "simulation",
+      "declared": [
+        "REQ-1"
+      ],
+      "file": "tests/integration/rr_case_test.cc"
+    },
+    {
+      "case": "//tests/integration:rr_case_test#plain_assert_codec::untagged_case_is_evidence_for_nothing",
+      "target": "//tests/integration:rr_case_test",
+      "path": "plain_assert_codec::untagged_case_is_evidence_for_nothing",
+      "owner": null,
+      "via": null,
+      "status": "passed",
+      "declared": [],
+      "file": "tests/integration/rr_case_test.cc"
+    }
+  ],
   "levels": [
     {
       "name": "analysis",
@@ -53,6 +135,25 @@
       "id": "UN-1",
       "title": "Trace plain-assert C++ tests case by case",
       "status": "FAILED",
+      "basis": "derived",
+      "derived_from": [
+        "REQ-1",
+        "REQ-2",
+        "REQ-3"
+      ],
+      "set": {
+        "complete": false,
+        "members": 0,
+        "passed": 0,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [],
       "requirements": [
         "REQ-1",
         "REQ-2",
@@ -65,6 +166,30 @@
       "id": "REQ-1",
       "title": "A passing case verifies the one requirement it names",
       "status": "VERIFIED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:rr_case_test#plain_assert_codec::tagged_case_is_traced",
+          "target": "//tests/integration:rr_case_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "plain_assert_codec::tagged_case_is_traced",
@@ -85,6 +210,30 @@
       "id": "REQ-2",
       "title": "A failing case fails its own requirement",
       "status": "FAILED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 0,
+        "failed": 1,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:rr_case_test#plain_assert_codec::failing_case_fails_its_own_requirement",
+          "target": "//tests/integration:rr_case_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "failed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "plain_assert_codec::failing_case_fails_its_own_requirement",
@@ -106,6 +255,30 @@
       "id": "REQ-3",
       "title": "The cases after a failing one still run and count",
       "status": "VERIFIED",
+      "basis": "own",
+      "set": {
+        "complete": true,
+        "members": 1,
+        "passed": 1,
+        "failed": 0,
+        "error": 0,
+        "skipped": 0,
+        "missing": 0,
+        "not_run": 0,
+        "moved": 0,
+        "quarantined": 0
+      },
+      "members": [
+        {
+          "case": "//tests/integration:rr_case_test#plain_assert_codec::cases_after_a_failure_still_run",
+          "target": "//tests/integration:rr_case_test",
+          "selector": "tag",
+          "via": "tag",
+          "state": "passed",
+          "owned": true,
+          "level": "simulation"
+        }
+      ],
       "evidence": [
         {
           "name": "plain_assert_codec::cases_after_a_failure_still_run",
@@ -137,12 +310,6 @@
       "message": "failing evidence: plain_assert_codec::failing_case_fails_its_own_requirement",
       "route": "autonomous",
       "demanded_level": "simulation"
-    },
-    {
-      "kind": "unpinned-sets",
-      "entity": "",
-      "message": "membership not pinned (no config.sets_lock): a deleted test would go unnoticed in the sets of REQ-1, REQ-2, REQ-3; lock them with `rr sets lock --write`",
-      "route": "autonomous"
     }
   ]
 }

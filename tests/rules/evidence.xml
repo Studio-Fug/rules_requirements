@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="fixture">
+    <testcase classname="c" name="ok"/>
+  </testsuite>
+</testsuites>

@@ -42,7 +42,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: normalize_label, try_normalize, is_pseudo, read_known_targets, BadTarget
 
 .. automodule:: rules_requirements.lock
-   :members: Lock, LockEntry, LockError, LockPlan, parse_lock, load_lock, configured_lock, render_lock, write_lock, plan_lock
+   :members: Lock, LockEntry, LockError, LockPlan, parse_lock, load_lock, configured_lock, render_lock, write_lock, plan_lock, is_no_lock
 ```
 
 ## Evidence
@@ -68,7 +68,7 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
 
 ```{eval-rst}
 .. automodule:: rules_requirements.migrate
-   :members: census, worksheet, decisions, model_edits, check_worksheet, load_worksheet, render_yaml, render_json, render_markdown, Plan, Unit, WorksheetError
+   :members: census, worksheet, decisions, model_edits, check_worksheet, load_worksheet, render_yaml, render_json, render_markdown, Plan, Unit, WorksheetError, model_stage, check_model_stage, ModelStage
 
 .. automodule:: rules_requirements.tag_codemod
    :members: apply_tags, rewrite, TestFile, ApplyResult, FileResult, Unsupported
@@ -91,7 +91,10 @@ nothing else. `Evidence.for_id` (the cases that *declare* an id) is deprecated.
    :members: Reference, extract, scan, candidate_files, unknown_references, is_test_path
 
 .. automodule:: rules_requirements.report
-   :members: to_dict, render_json, render_markdown, render_html
+   :members: to_dict, render_json, render_markdown, render_html, Lane, out_of_lane_gaps, case_rows, attribution_dict, set_summary
+
+.. automodule:: rules_requirements.checkreport
+   :members: check_report, load_report, summarize, ReportError, AmbiguousReportError
 
 .. automodule:: rules_requirements.graph
    :members: Node, Edge, build, to_dot, to_mermaid, to_json, to_svg, layout

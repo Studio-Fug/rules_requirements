@@ -18,6 +18,7 @@ Contributions are welcome through pull requests on
 | `schema/` | JSON Schema for model files. |
 | `tests/integration/` | Every hook → evidence → report, pinned by goldens. |
 | `tests/node/` | `rr_node_test` fixtures for each node:test behaviour, pinned by a golden of the ingested cases. |
+| `tests/rules/` | Analysis tests of `rr_model(lock)`, `rr_report(check, lane, on_attribution_error)` and `rr_sets_lock_test`, over a one-case fixture. |
 | `examples/thermostat/` | The {doc}`tutorial` project (a separate Bazel module). |
 | `docs/` | This site. |
 
@@ -58,6 +59,7 @@ $ bazel run //tests/integration:report_md_golden_test.update
 $ bazel run //tests/node:cases_golden_test.update
 $ bazel run //tests/integration:rr_case_report_json_golden_test.update
 $ bazel run //tests/integration:rr_case_report_md_golden_test.update
+$ bazel run //tests/integration:rr_case_lock_test.update
 ```
 
 (and the same targets in `examples/thermostat`).
