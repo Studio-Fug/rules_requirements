@@ -16,7 +16,7 @@ is checked against the claims too.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Collection
+from typing import Collection, Iterator
 
 from rules_requirements import case_selectors, labels
 from rules_requirements import config as cfg
@@ -316,23 +316,11 @@ class _Validator:
                         "the same-code check would silently skip it",
                     )
 
-        by_target: dict[str, list[Claim]] = {}
-        for claim in self.m.claims():
-            if claim.pattern is not None and not _selector_ok(claim.pattern):
-                continue  # reported as bad-selector; it cannot be compared
-            by_target.setdefault(claim.target, []).append(claim)
-        for target in sorted(by_target, key=natural_key):
-            claims = by_target[target]
-            for i, a in enumerate(claims):
-                for b in claims[i + 1 :]:
-                    self.compare(a, b)
-        for group in self.c.variant_groups():
-            for i, t1 in enumerate(group):
-                for t2 in group[i + 1 :]:
-                    for a in by_target.get(t1, ()):
-                        for b in by_target.get(t2, ()):
-                            if a.entity != b.entity:
-                                self.compare_variants(a, b)
+        for code, a, b, example in overlapping_claims(self.m):
+            if code == "same-code-multiple-owners":
+                self.compare_variants(a, b, example)
+            else:
+                self.compare(a, b, example)
 
     def check_item(self, ent: Entity, index: int, vb: VerifiedBy) -> None:
         rel = "validated_by" if ent.kind == cfg.USER_NEED else "verified_by"
@@ -383,12 +371,9 @@ class _Validator:
                 loc,
             )
 
-    def compare(self, a: Claim, b: Claim) -> None:
-        """Two claims on one target: an error across entities, a redundancy
-        within one."""
-        overlap, example = _overlap(a, b)
-        if not overlap:
-            return
+    def compare(self, a: Claim, b: Claim, example: str | None) -> None:
+        """Two claims on one target that can select one case: an error across
+        entities, a redundancy within one."""
         first, second = _ordered(a, b)
         if a.entity == b.entity:
             self.rule_at(
@@ -407,11 +392,9 @@ class _Validator:
             second.location,
         )
 
-    def compare_variants(self, a: Claim, b: Claim) -> None:
-        """Claims of two entities on two targets that run the same test code."""
-        overlap, example = _overlap(a, b)
-        if not overlap:
-            return
+    def compare_variants(self, a: Claim, b: Claim, example: str | None) -> None:
+        """Claims of two entities on two targets that run the same test code
+        and can select one case."""
         first, second = _ordered(a, b)
         self.add_at(
             "same-code-multiple-owners",
@@ -565,35 +548,53 @@ class ClaimConflict:
         return (self.first.entity, self.second.entity)
 
 
-def claim_conflicts(model: Model) -> list[ClaimConflict]:
-    """Every pair of claims of two entities that can select one case — the
-    witnesses :func:`validate` reports as ``shared-case`` and
-    ``same-code-multiple-owners`` errors. Claims with a
-    bad selector are skipped (they are a ``bad-selector`` error of their own)."""
+REDUNDANT = "redundant-selector"
+
+
+def overlapping_claims(model: Model) -> Iterator[tuple[str, Claim, Claim, str | None]]:
+    """Every pair of claims that can select one test case, as ``(code, a, b,
+    example)``: ``shared-case`` (two entities, one target),
+    ``same-code-multiple-owners`` (two entities, two targets of one
+    ``config.variants`` group) or ``redundant-selector`` (one entity, one
+    target). ``example`` is a case path both select ("" when any case will
+    do; None for two whole-target claims).
+
+    The one implementation of the pairing: :func:`validate` reports these
+    pairs and :func:`claim_conflicts` hands them to the editor's save guard,
+    so the two can never disagree. Claims with a bad selector are skipped
+    (they are a ``bad-selector`` error of their own)."""
     by_target: dict[str, list[Claim]] = {}
     for claim in model.claims():
         if claim.pattern is not None and not _selector_ok(claim.pattern):
             continue
         by_target.setdefault(claim.target, []).append(claim)
-    out: list[ClaimConflict] = []
-
-    def pair(code: str, a: Claim, b: Claim) -> None:
-        if a.entity == b.entity:
-            return
-        overlap, example = _overlap(a, b)
-        if overlap:
-            first, second = _ordered(a, b)
-            out.append(ClaimConflict(code, first, second, example))
-
     for target in sorted(by_target, key=natural_key):
         claims = by_target[target]
         for i, a in enumerate(claims):
             for b in claims[i + 1 :]:
-                pair("shared-case", a, b)
+                overlap, example = _overlap(a, b)
+                if overlap:
+                    yield (REDUNDANT if a.entity == b.entity else "shared-case"), a, b, example
     for group in model.config.variant_groups():
         for i, t1 in enumerate(group):
             for t2 in group[i + 1 :]:
                 for a in by_target.get(t1, ()):
                     for b in by_target.get(t2, ()):
-                        pair("same-code-multiple-owners", a, b)
+                        if a.entity == b.entity:
+                            continue  # one entity may claim the same code in each variant
+                        overlap, example = _overlap(a, b)
+                        if overlap:
+                            yield "same-code-multiple-owners", a, b, example
+
+
+def claim_conflicts(model: Model) -> list[ClaimConflict]:
+    """Every pair of claims of two entities that can select one case — exactly
+    the witnesses :func:`validate` reports as ``shared-case`` and
+    ``same-code-multiple-owners`` errors (both read
+    :func:`overlapping_claims`)."""
+    out: list[ClaimConflict] = []
+    for code, a, b, example in overlapping_claims(model):
+        if code != REDUNDANT:
+            first, second = _ordered(a, b)
+            out.append(ClaimConflict(code, first, second, example))
     return out
