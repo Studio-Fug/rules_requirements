@@ -546,3 +546,53 @@ def _advice(a: Claim, b: Claim) -> str:
     if a.pattern is None or b.pattern is None:
         return "replace the whole-target claim with selectors that leave the other's cases out"
     return "narrow one selector"
+
+
+@dataclass(frozen=True)
+class ClaimConflict:
+    """Two claims of two entities that can select one test case: the pair a
+    ``shared-case`` (one target) or ``same-code-multiple-owners`` (targets of
+    one ``config.variants`` group) error reports, as data for tools that must
+    name the case (the web editor's save guard)."""
+
+    code: str  # shared-case | same-code-multiple-owners
+    first: Claim  # the earlier written
+    second: Claim
+    example: str | None  # a case path both select; None: a whole target vs a whole target; "": any case
+
+    @property
+    def entities(self) -> tuple[str, str]:
+        return (self.first.entity, self.second.entity)
+
+
+def claim_conflicts(model: Model) -> list[ClaimConflict]:
+    """Every pair of claims of two entities that can select one case — the
+    witnesses :meth:`_Validator.check_claims` reports as errors. Claims with a
+    bad selector are skipped (they are a ``bad-selector`` error of their own)."""
+    by_target: dict[str, list[Claim]] = {}
+    for claim in model.claims():
+        if claim.pattern is not None and not _selector_ok(claim.pattern):
+            continue
+        by_target.setdefault(claim.target, []).append(claim)
+    out: list[ClaimConflict] = []
+
+    def pair(code: str, a: Claim, b: Claim) -> None:
+        if a.entity == b.entity:
+            return
+        overlap, example = _overlap(a, b)
+        if overlap:
+            first, second = _ordered(a, b)
+            out.append(ClaimConflict(code, first, second, example))
+
+    for target in sorted(by_target, key=natural_key):
+        claims = by_target[target]
+        for i, a in enumerate(claims):
+            for b in claims[i + 1 :]:
+                pair("shared-case", a, b)
+    for group in model.config.variant_groups():
+        for i, t1 in enumerate(group):
+            for t2 in group[i + 1 :]:
+                for a in by_target.get(t1, ()):
+                    for b in by_target.get(t2, ()):
+                        pair("same-code-multiple-owners", a, b)
+    return out
