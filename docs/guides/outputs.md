@@ -83,7 +83,9 @@ disagree with the rows they count, or if the file names a key twice in one
 object (a duplicate `owner` reads differently to different parsers); `2` if
 the file is not a `rules_requirements/report/v2` report. An `error` member
 that is not owned is a pseudo-member: it names no case of the report, on a
-tainted or synthetic-only target. In Bazel, `rr_report` adds it as
+tainted or synthetic-only target. A `missing` or `not-run` member never names
+a case of the report either (only a `moved` or `quarantined` member may), so
+no case sits in two verification sets. In Bazel, `rr_report` adds it as
 `<name>_check_test` whenever it builds the JSON report.
 
 ## JSON (`rules_requirements/report/v2`)

@@ -16,7 +16,8 @@ and checks that
   owner is that entity, and every owned case is a member of its owner (the
   owned members partition the owned cases). A member that is not owned is a
   pseudo-member: an ``error`` one names no case of the report and sits on a
-  tainted or synthetic-only target;
+  tainted or synthetic-only target, and a ``missing`` or ``not-run`` one names
+  no case of the report (only a ``moved`` or ``quarantined`` member may);
 * the ``evidence[]`` compatibility view of each entity is exactly the view of
   its owned members, so a 0.3.x reader of ``evidence[]`` sees the same
   partition;
@@ -214,6 +215,16 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                         problems.append(
                             f"{eid}: error member {case!r} of {mb.get('target')!r} is not owned, but that target "
                             "is neither tainted nor synthetic-only"
+                        )
+                elif state in ("missing", "not-run"):
+                    # An expected member whose case the evidence lacks: never
+                    # a case of this report (only a moved or quarantined
+                    # member may name one), or one case would sit in two sets.
+                    if case is not None and case in owner:
+                        held = f"owned by {owner[case]}" if owner[case] else "owned by nobody"
+                        problems.append(
+                            f"{eid}: member {case} is {state}, but it is a case of this report ({held}); only a "
+                            "moved or quarantined member may name a case the evidence holds"
                         )
                 elif state == "quarantined":
                     if case is None:

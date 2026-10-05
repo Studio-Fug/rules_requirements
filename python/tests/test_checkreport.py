@@ -329,6 +329,34 @@ def test_a_quarantined_member_under_an_entity_the_quarantine_does_not_name_is_re
     assert any(f"{other['id']} holds {q['case']} as quarantined, but its quarantine" in p for p in problems), problems
 
 
+@pytest.mark.parametrize("state", ["missing", "not-run"])
+def test_a_missing_or_not_run_pseudo_member_cannot_name_a_case_of_the_report(state):
+    """V12: a not-owned missing/not-run member of REQ-1 whose key is a case
+    row another entity owns would put one case in two verification sets.
+    attribute() writes those states only for keys the evidence lacks (a
+    present case it does not own is ``moved``), so check-report rejects it;
+    the same member naming an absent key is still accepted."""
+    doc = _sample(where=_plain_owned_row)
+    row = _plain_owned_row(doc)
+    other = next(e for e in _verifiable(doc) if e["id"] != row["owner"])
+    pseudo = {"case": row["case"], "target": row["target"], "selector": "*", "via": "model", "state": state,
+              "owned": False}  # fmt: skip
+    bad = copy.deepcopy(doc)
+    _add_member(_entity(bad, other["id"]), dict(pseudo))
+    problems = checkreport.check_report(bad)
+    assert any(
+        f"{other['id']}: member {row['case']} is {state}, but it is a case of this report (owned by {row['owner']})"
+        in p
+        for p in problems
+    ), problems
+    absent = copy.deepcopy(doc)
+    _add_member(_entity(absent, other["id"]), {**pseudo, "case": row["target"] + "#no::such_case"})
+    assert checkreport.check_report(absent) == []
+    moved = copy.deepcopy(doc)
+    _add_member(_entity(moved, other["id"]), {**pseudo, "state": "moved", "via": "lock"})
+    assert checkreport.check_report(moved) == []
+
+
 def test_the_evidence_view_is_exactly_the_owned_members():
     """A1: an owned case appended to a second requirement's evidence[] (the
     0.3.x compatibility view) is rejected, as is a dropped one."""
