@@ -101,14 +101,114 @@
             },
             "rules": {
               "type": "object",
-              "additionalProperties": {
-                "enum": [
-                  "error",
-                  "warning",
-                  "off",
-                  false
-                ]
+              "properties": {
+                "need-unsatisfied": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A user need no requirement satisfies can never be validated."
+                },
+                "requirement-orphan": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A requirement that neither satisfies a need, refines another requirement, nor implements a mitigation is untraceable (\"gold plating\" or a lost link)."
+                },
+                "risk-unmitigated": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A risk with no mitigation (and no recorded acceptance) is uncontrolled."
+                },
+                "mitigation-unimplemented": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A mitigation that no requirement implements is a promise, not a control."
+                },
+                "risk-unacceptable": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "Residual risk above the acceptability threshold."
+                },
+                "unknown-field": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "Unknown keys usually mean a typo that silently drops a trace."
+                },
+                "bare-target-reference": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "A legacy verified_by item (a bare label, {target} or {target, level}): it claims the whole target. Error by default from 0.4."
+                },
+                "whole-target-reference": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "A `whole: true` claim without a `reason`."
+                },
+                "coarse-claim": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "`whole: true` on a target that reports per-case results (report time)."
+                },
+                "glob-selector": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "off",
+                  "description": "Any selector with a '*' (opt in to require literal case lists)."
+                },
+                "redundant-selector": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "Two selectors of one entity on one target can select the same case."
+                },
+                "tag-mismatch": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "A case's single tag names another entity than the one whose claim owns it."
+                },
+                "unclaimed-tag": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "Model mode: a single-id tag on a case no claim covers."
+                },
+                "suite-level-requirement": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "A requirement property on a JUnit testsuite (no longer inherited by its cases)."
+                },
+                "duplicate-case": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "The same case key twice in one run."
+                },
+                "level-mismatch": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "The case's own level differs from the level of the claim that owns it."
+                },
+                "same-path-multiple-owners": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "Equal case paths in different targets with different owners and no source file to tell whether they are the same test code."
+                },
+                "multi-parent-refines": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A requirement that refines two or more parents: refines must form a tree, so each test case's evidence rolls up one chain of requirements."
+                },
+                "parent-with-claims": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "A requirement with refining children also claims cases of its own."
+                },
+                "multi-verifies-annotation": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "warning",
+                  "description": "`rr scan`: a verifies annotation naming several ids. Error by default from 0.4."
+                },
+                "lock-stale": {
+                  "$ref": "#/$defs/ruleSeverity",
+                  "default": "error",
+                  "description": "A lock entry that no claim of its owner matches (model mode)."
+                }
               },
+              "additionalProperties": false,
               "propertyNames": {
                 "not": {
                   "enum": [
@@ -123,7 +223,7 @@
                     "unknown-target"
                   ]
                 },
-                "description": "Hard errors and report-time quarantines are not rules and cannot be configured."
+                "description": "Hard errors and report-time quarantines are not rules and cannot be configured; any other name that is not a rule is an unknown rule."
               }
             },
             "annotation_patterns": {
@@ -1535,6 +1635,14 @@
           },
           "deprecated": true
         }
+      ]
+    },
+    "ruleSeverity": {
+      "enum": [
+        "error",
+        "warning",
+        "off",
+        false
       ]
     }
   }

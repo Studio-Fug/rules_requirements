@@ -222,7 +222,7 @@ include only model files, and the server is local-only by default (see the
 pip install -e ".[test]" && coverage run -m pytest && coverage report   # unit tests + coverage
 bazel test //...                              # everything, including the hook integration goldens
 pre-commit run --all-files                    # lints (ruff, mypy, buildifier, codespell, SPDX headers)
-pip install -r docs/requirements.txt && python -m sphinx -W -n -b html docs docs/_build/html  # docs
+pip install -r docs/requirements.txt && python tools/docs_build.py -W -n --keep-going -b html docs docs/_build/html  # docs
 ```
 
 ## License

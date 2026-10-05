@@ -643,7 +643,11 @@ bump fixes the shared targets, which 0.2 cannot express per case.
 1. Bump the pin (`bazel_dep(name = "rules_requirements", version = "0.3.0")`
    and its override) and run `rr validate requirements/`. Every
    `shared-case` error names the two entities, both selectors and an example
-   case.
+   case. A requirement that `refines` two or more parents is a
+   `multi-parent-refines` error (refines must form a tree, so each case's
+   evidence rolls up one chain of requirements: {ref}`derived-verdicts`):
+   keep one parent and split the child into one requirement per parent, or
+   set `config.rules: {multi-parent-refines: warning}` until you do.
 2. Replace each shared whole-target reference with the cases each entity
    owns, as the worksheet decided them. `rr cases --evidence bazel-testlogs
    --target //web:clocksync_test` lists the exact case paths:
@@ -678,10 +682,21 @@ bump fixes the shared targets, which 0.2 cannot express per case.
    results in this evidence (another lane's HIL target, say) is now an
    expected not-run member, so its entity reads INCOMPLETE and `--fail-on
    unverified` fails (pass that lane's evidence too, or report it with
-   `--lane`/`--lane-targets`); and without `config.sets_lock` the report
-   carries an `unpinned-sets` gap, so `--fail-on gaps` fails until the sets
-   are locked (set `sets_lock` and run `rr sets lock --write`, which works in
-   hybrid mode).
+   `--lane`/`--lane-targets`); and `--fail-on gaps` fails on more gaps.
+   Without `config.sets_lock` the report carries an `unpinned-sets` gap (set
+   `sets_lock` and run `rr sets lock --write`, which works in hybrid mode),
+   and every attribution issue is a gap, warnings included, so locking alone
+   may not make `--fail-on gaps` pass. The attribution issues that are gaps:
+   `duplicate-case`, `unscoped-evidence`, `suite-level-requirement`,
+   `coarse-claim`, `tag-mismatch`, `unclaimed-tag`, `misdirected-evidence`,
+   `unknown-id`, `same-path-multiple-owners`, `ambiguous-source`,
+   `level-mismatch`, `unlocked-member`, `lock-stale`, `lock-owner-changed`,
+   `lock-invalid` and `multi-verifies-annotation` (under `--scan`). Lock for
+   the four lock findings; resolve the rest ({ref}`gap-issues` says how for
+   each; `unscoped-evidence`, which no rule configures, means JUnit outside a
+   testlogs tree: write it to `testlogs/<pkg>/<name>/test.xml`); or set a
+   configurable rule `off` under `config.rules`; or stop gating on gaps
+   until step 8.
 3. Keep `attribution: hybrid`, the 0.3 default: a single-id tag still owns
    a case that no claim covers, so every module whose tags you rewrote keeps
    its owners. Set `config.main_repo` if other modules refer to your

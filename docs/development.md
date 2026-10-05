@@ -108,10 +108,13 @@ measures coverage for the badge and publishes the site to GitHub Pages.
 
 ```console
 $ pip install -r docs/requirements.txt -e .
-$ python -m sphinx -W -n -b html docs docs/_build/html
+$ python tools/docs_build.py -W -n --keep-going -b html docs docs/_build/html
 ```
 
-The pages are MyST Markdown. The CLI reference is generated from the argument
+`tools/docs_build.py` runs Sphinx and also fails on any docutils `WARNING/`
+line or rendered problematic node, which `-W` misses when docutils prints
+them outside Sphinx's logger (a `--help` text that is not clean
+reStructuredText, say). The pages are MyST Markdown. The CLI reference is generated from the argument
 parser and the API reference from docstrings; the trace graphs are drawn at
 build time by the toolkit itself.
 

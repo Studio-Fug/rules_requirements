@@ -820,7 +820,31 @@ def _issue_entity(issue: AttributionIssue) -> str:
     return issue.target
 
 
-# Attribution issues gathered into one gap per entity instead of one per issue.
+# Every code an attribution issue can carry: the ones attribute() raises, plus
+# lock-invalid (an unreadable configured lock) and multi-verifies-annotation
+# (`rr report --scan`), which build_matrix adds. find_gaps makes every one of
+# them a gap, so `--fail-on gaps` fails on any of them; the table "Attribution
+# issues are gaps" in docs/guides/outputs.md lists exactly these codes, and
+# test_gap_issues.py keeps the two (and the emitters) in step.
+ATTRIBUTION_ISSUE_CODES = (
+    "duplicate-case",
+    "unscoped-evidence",
+    "suite-level-requirement",
+    "coarse-claim",
+    "tag-mismatch",
+    "unclaimed-tag",
+    "misdirected-evidence",
+    "unknown-id",
+    "same-path-multiple-owners",
+    "ambiguous-source",
+    "level-mismatch",
+    "unlocked-member",
+    "lock-stale",
+    "lock-owner-changed",
+    "lock-invalid",
+    MULTI_VERIFIES,
+)
+# Attribution issues gathered into one gap per id instead of one per issue.
 _AGGREGATED_ISSUES = ("misdirected-evidence", "unknown-id")
 
 

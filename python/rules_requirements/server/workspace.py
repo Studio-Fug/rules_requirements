@@ -13,7 +13,8 @@ before anything is written. An edit that would let one test case verify two
 entities (``shared-case``, ``same-code-multiple-owners``, a new
 ``attribution-conflict``), break a selector or a target (``bad-selector``,
 ``bad-target``), claim a whole target without a reason
-(``whole-target-reference``) or contradict the verification-set lock
+(``whole-target-reference``), give a requirement two ``refines`` parents
+(``multi-parent-refines``, while that rule is an error) or contradict the verification-set lock
 (``lock-owner-changed``, ``lock-invalid``) is refused with a 409 that names
 the case and its current owner (:class:`Conflict`). Which entity owns a case
 is read from the :class:`~rules_requirements.attribution.Attribution` alone;
@@ -85,8 +86,10 @@ class WorkspaceError(Exception):
         self.data = dict(data or {})
 
 
-# Problems a save may not introduce (refused with 409). Hard errors of the
-# one-owner rule: none of them can be configured off. Every conflict
+# Problems a save may not introduce (refused with 409): the hard errors of
+# the one-owner rule, which cannot be configured off, plus an unreasoned
+# whole-target claim and a requirement with two refines parents
+# (``multi-parent-refines``, while the rule is an error). Every conflict
 # Workspace.check builds names one of these codes (it refuses the save as a
 # guard error otherwise), so this tuple is the guard's whole vocabulary.
 GUARDED = (
@@ -96,6 +99,7 @@ GUARDED = (
     "bad-selector",
     "bad-target",
     "whole-target-reference",
+    "multi-parent-refines",
     "lock-owner-changed",
     "lock-invalid",
 )
@@ -519,6 +523,13 @@ class Workspace:
                 continue
             conflicts.append(Conflict(i.code, i.message, entities=(i.entity,)))
         conflicts += self._unreasoned_whole_claims(candidate, snap.model, edited, old)
+        # Refines must form a tree (multi-parent-refines, an error unless
+        # configured): two parents would make each of the requirement's
+        # cases the basis of both parents' derived verdicts.
+        had_tree = {i.entity for i in snap.issues if i.code == "multi-parent-refines" and i.severity == "error"}
+        for i in issues:
+            if i.code == "multi-parent-refines" and i.severity == "error" and old(i.entity) not in had_tree:
+                conflicts.append(Conflict(i.code, i.message, entities=(i.entity,)))
         # The lock: a locked case another entity's claims would select, or
         # an entry whose owner the save removes.
         if lock == "configured":

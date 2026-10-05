@@ -101,7 +101,7 @@ Open notes are listed with their entity in the reports.
 | `rationale` | string | Why the requirement exists. |
 | `category` | string | Free-form (`functional`, `safety`, `performance`, ...). |
 | `satisfies` | list of UN ids | The needs this requirement helps meet. |
-| `refines` | list of REQ ids | Parent requirements this one decomposes. Cycles are errors. |
+| `refines` | list of REQ ids | The parent requirement this one decomposes: one id, so `refines` forms a tree (`multi-parent-refines`). Cycles are errors. |
 | `method` | TM id or level | The verification rigor demanded. Default: `config.default_level`. |
 | `verified_by` | list of claims | The test cases that verify it: see [claims](#claims). |
 | `modules` | list of strings | Implementing modules (documentation aid; drives the per-module rollup). |
@@ -467,6 +467,7 @@ error, and so is naming a report-time quarantine (`multi-tag`,
 | `whole-target-reference` | warning | A `whole: true` claim without a `reason`. |
 | `glob-selector` | off | A selector with a `*` (turn on to require literal case lists). |
 | `redundant-selector` | warning | Two selectors of one entity on one target overlap. |
+| `multi-parent-refines` | error | A requirement refines two or more parents. Refines must form a tree, so each test case's evidence rolls up one chain of requirements ({ref}`derived-verdicts`); `rr report` exits 2 and the web editor refuses the save. |
 | `parent-with-claims` | warning | A requirement refined by others also claims cases of its own. |
 | `lock-stale` | error | `attribution: model`: no claim of a lock entry's owner selects it. |
 

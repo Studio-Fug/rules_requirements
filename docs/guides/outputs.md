@@ -28,7 +28,7 @@ The command prints a one-line summary to standard error and exits with:
 | Exit | When |
 | ---- | ---- |
 | `0` | The report was written and no `--fail-on` / `--pyramid-policy error` condition holds, no attribution issue is an error, and no test case is quarantined (or `--on-attribution-error=warn`). |
-| `1` | An attribution issue is an error (a hard error such as `lock-owner-changed`, a rule set to `error` under `config.rules`, or — with `--strict` — **any attribution warning**, e.g. `coarse-claim` or `same-path-multiple-owners`); `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap; or `--pyramid-policy error` and there is a cost-pyramid violation. |
+| `1` | An attribution issue is an error (a hard error such as `lock-owner-changed`, a rule set to `error` under `config.rules`, or — with `--strict` — **any attribution warning**, e.g. `coarse-claim` or `same-path-multiple-owners`); `--fail-on failed` and an entity is FAILED or INVALID; `--fail-on unverified` and, in addition, a requirement is UNVERIFIED or INCOMPLETE; `--fail-on gaps` and there is any gap (every attribution issue is one, warnings included: {ref}`gap-issues`); or `--pyramid-policy error` and there is a cost-pyramid violation. |
 | `2` | The model is invalid, or an `--out` extension is unknown. |
 | `3` | A test case is quarantined (unless `--on-attribution-error=warn`). The reports and the queue are written first; `3` wins over `1`. |
 
@@ -44,7 +44,7 @@ verdict (the case still counts for nobody).
 
 Every other attribution issue (`same-path-multiple-owners`, `unscoped-evidence`,
 `level-mismatch`, `suite-level-requirement`, the lock findings, ...) is a gap
-in the report. One at error severity also prints an
+in the report ({ref}`gap-issues` lists them all). One at error severity also prints an
 `ATTRIBUTION ERROR: [<code>] <message>` line and makes `rr report` exit 1;
 the warnings are counted on one `attribution: N warning(s) (...)` line.
 `--strict` escalates every attribution warning (not only the model's) to an
@@ -53,6 +53,39 @@ error.
 `--sets-lock PATH` reads that verification-set lock instead of
 `config.sets_lock`; `--no-lock` reads none (the sets are then not pinned: an
 `unpinned-sets` gap).
+
+(gap-issues)=
+### Attribution issues are gaps
+
+Every attribution issue is a gap, warnings included, so `--fail-on gaps`
+exits 1 on any of them even when every verdict is VERIFIED. Locking the sets
+removes only the `unpinned-sets` gap. Each issue below is one gap, except
+`misdirected-evidence` and `unknown-id`, which are gathered into one gap per
+id. *Configurable* means `config.rules` can set the rule to `warning` or `off`
+(`off` removes the issue and its gap; `warning` keeps the gap).
+
+| Issue | Severity | Configurable | Do |
+| ----- | -------- | ------------ | -- |
+| `duplicate-case` | warning | yes | Resolve: rename one of the two tests reported under one case key. |
+| `unscoped-evidence` | warning | no | Resolve: write the JUnit under a testlogs tree (`bazel-testlogs/<pkg>/<name>/test.xml`, or `testlogs/<pkg>/<name>/test.xml` outside Bazel), so its cases have a build target; otherwise stop gating on gaps. |
+| `suite-level-requirement` | warning | yes | Resolve: move the `requirement` property from the `<testsuite>` to its test cases, or claim the cases in the model and drop the property. |
+| `coarse-claim` | warning | yes | Resolve: claim the target's cases with `cases:` instead of `whole: true`. |
+| `tag-mismatch` | warning | yes | Resolve: make the test's tag name its owner, or drop the tag. |
+| `unclaimed-tag` | warning | yes | Resolve (`attribution: model`): claim the case in the model, or drop the tag. |
+| `misdirected-evidence` | warning | no | Resolve: tag the requirement, not the risk or test method. |
+| `unknown-id` | warning | no | Resolve: define the id in the model, or fix the tag. |
+| `same-path-multiple-owners` | warning | yes | Resolve: record each case's source file (the hooks do), or give the two tests different names. |
+| `ambiguous-source` | error | no | Resolve: record source files inside the workspace root, so the two files can be told apart. |
+| `level-mismatch` | warning | yes | Resolve: make the claim's `level` and the case's level agree. |
+| `unlocked-member` | warning | no | Lock: `rr sets lock --write`, and review the lock diff. |
+| `lock-stale` | error | yes | Lock: `rr sets lock --write --allow-removals`, or restore the claim that selected the entry. |
+| `lock-owner-changed` | error | no | Lock: `rr sets lock --write`, after checking that the case's new owner is right. |
+| `lock-invalid` | error | no | Lock: fix `config.sets_lock` or rewrite the lock with `rr sets lock --write`. |
+| `multi-verifies-annotation` | warning | yes | Resolve (only with `--scan`): name one id per *verifies* annotation. |
+
+Besides these, `--fail-on gaps` fails on every other gap kind of
+{ref}`the gap queue <gaps>`: `unpinned-sets` (lock: set `config.sets_lock`
+and run `rr sets lock --write`), the verdict gaps and the open notes.
 
 ### The gates at a glance
 
@@ -108,12 +141,15 @@ case name. One test's code may have one owner: two owned rows with the same
 `record:` pseudo-target and a `file` is missing, are rejected when their owners
 differ. A row declaring two ids must be quarantined `multi-tag`; an owner via
 `tag` must be the row's one declared id, in a `hybrid` report. An owned
-member's state is its row's `status` (or `error` on a tainted target); an
-entity that reads VERIFIED, UNDER-VERIFIED or VALIDATED on its own set
-(`basis` `own` or `own+derived`) needs a passed member and no failed, error,
-skipped, missing, not-run, moved or quarantined one; INVALID needs a
-quarantined member; and `derived_from` names only the entity's children
-(`refines`, `satisfies`, `method`, `mitigates`, `implemented_by`).
+member's state is its row's `status` (or `error` on a tainted target). The
+`basis` follows the set: an entity with members has `basis` `own` or
+`own+derived` (only one without members may read `derived`), so relabelling
+the basis cannot hide a set. An entity with members (or `basis` `own`) that
+reads VERIFIED, UNDER-VERIFIED or VALIDATED needs a passed member and no
+failed, error, skipped, missing, not-run, moved or quarantined one; a passing
+verdict derived from no entity is rejected; INVALID needs a quarantined
+member; and `derived_from` names only the entity's children (`refines`,
+`satisfies`, `method`, `mitigates`, `implemented_by`).
 
 An `error` member
 that is not owned is a pseudo-member: it names no case of the report, on a

@@ -23,6 +23,10 @@ one case to verify two. Semantic release: verdicts change on purpose.
 - `rr validate`: `shared-case` with an example case, `same-code-multiple-owners`,
   `bad-selector`, `bad-target`, lock checks, `--known-targets`; hard errors
   no configuration turns off.
+- `multi-parent-refines` (error by default, configurable): refines must form a
+  tree, so each test case's evidence rolls up one chain of requirements;
+  raised by `rr validate`, `<model>_test`, `rr report` (exit 2) and the
+  editor's save guard (409).
 - Attribution (`attribution.attribute()`, the one place a case gets an
   owner), verification sets, and the INVALID and INCOMPLETE statuses.
 - The verification-set lock (`verification.rrlock`; `rr sets lock|check|show`).
@@ -43,6 +47,8 @@ one case to verify two. Semantic release: verdicts change on purpose.
   Give each test one id.
 - Two entities naming one target is a `shared-case` model error. Claim the
   cases each owns.
+- A requirement refining two or more parents is a `multi-parent-refines`
+  error. Keep one parent and split the child per parent.
 - Retries are merged per case (a pass after a failure is flaky:
   UNDER-VERIFIED by default); suite-level ids are no longer inherited;
   Bazel's synthetic results are `[target]`, selected only by `whole: true`.
@@ -54,8 +60,14 @@ one case to verify two. Semantic release: verdicts change on purpose.
   tags declare ids, a whole-target claim of a target without results reads
   INCOMPLETE, one stale member under-verifies the set, a skipped-only set
   reads INCOMPLETE, and `--fail-on gaps` fails on `unpinned-sets` without a
-  lock. `--strict` (and `strict = True` in Bazel) also fails on the new 0.3
-  warnings, such as `bare-target-reference`.
+  lock and on every attribution issue, warnings included: `duplicate-case`,
+  `unscoped-evidence`, `suite-level-requirement`, `coarse-claim`,
+  `tag-mismatch`, `unclaimed-tag`, `misdirected-evidence`, `unknown-id`,
+  `same-path-multiple-owners`, `ambiguous-source`, `level-mismatch`,
+  `unlocked-member`, `lock-stale`, `lock-owner-changed`, `lock-invalid`,
+  `multi-verifies-annotation` (lock, resolve, or configure the rule: see the
+  release notes). `--strict` (and `strict = True` in Bazel) also fails on
+  the new 0.3 warnings, such as `bare-target-reference`.
 - One case path owned twice where one target is a `suite:`/`record:`
   pseudo-target and a source file is unknown is quarantined.
 

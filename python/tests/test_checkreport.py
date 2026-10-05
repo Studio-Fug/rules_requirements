@@ -9,6 +9,7 @@ quarantined case, a named entity that is not INVALID, counts that disagree).
 
 import copy
 import json
+import os
 import random
 
 import pytest
@@ -683,6 +684,77 @@ def test_check_report_rejects_a_rollup_from_an_entity_that_is_not_a_child(tmp_pa
     own = _entity(doc, "REQ-2")
     own["derived_from"] = ["REQ-1"]
     assert any("REQ-2: basis own, but derived from REQ-1" in p for p in checkreport.check_report(doc))
+
+
+_THERMOSTAT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "examples",
+    "thermostat",
+    "report.golden.json",
+)
+
+
+def _relabel_derived(doc, eid):
+    ent = _entity(doc, eid)
+    ent["basis"], ent["derived_from"] = "derived", []
+    return ent
+
+
+def test_an_entity_with_members_cannot_relabel_its_basis_derived_to_skip_its_own_set(tmp_path):
+    """Release gate (low): basis 'derived' with owned members skipped the
+    own-set check. The basis follows the set, and the set is re-checked
+    whenever it has members."""
+    doc = _small_report(tmp_path)
+    assert checkreport.check_report(doc) == []
+    honest = copy.deepcopy(doc)
+    _relabel_derived(honest, "REQ-1")  # a passing set, only the label forged
+    assert any("REQ-1 has 2 member(s) but claims basis 'derived'" in p for p in checkreport.check_report(honest))
+    moved = copy.deepcopy(doc)
+    _add_member(_entity(moved, "REQ-2"), {"case": "//c:t#k::gone", "target": "//c:t", "selector": "lock",
+                                          "via": "lock", "state": "moved", "owned": False})  # fmt: skip
+    _relabel_derived(moved, "REQ-2")
+    problems = checkreport.check_report(moved)
+    assert any("REQ-2 reads VERIFIED on its own set, which holds 1 moved" in p for p in problems), problems
+    # Without members an entity may read derived, but a pass derived from nothing is forged.
+    empty = copy.deepcopy(doc)
+    _relabel_derived(empty, "REQ-3")
+    assert checkreport.check_report(empty) == []  # UNVERIFIED, derived from nothing: consistent
+    _entity(empty, "REQ-3")["status"] = "VERIFIED"
+    empty["summary"]["requirements_verified"] += 1
+    empty["summary"]["requirements_unverified"] -= 1
+    assert any("REQ-3 reads VERIFIED derived from no entity" in p for p in checkreport.check_report(empty))
+    both = copy.deepcopy(doc)
+    _entity(both, "REQ-3")["basis"] = "own+derived"
+    assert any("REQ-3 claims basis own+derived but has no members" in p for p in checkreport.check_report(both))
+
+
+def test_the_gate_forge_relabelling_a_failed_set_derived_is_rejected():
+    """The release gate's forge on the thermostat golden: REQ-1's owned
+    member and its row failed, REQ-1 still VERIFIED, basis relabelled
+    'derived' with derived_from []. The control (basis 'own') fails too."""
+    if not os.path.exists(_THERMOSTAT):
+        pytest.skip("examples/thermostat/report.golden.json not available")
+    with open(_THERMOSTAT, encoding="utf-8") as fh:
+        golden = json.load(fh)
+    assert checkreport.check_report(golden) == []
+    forged = copy.deepcopy(golden)
+    ent = _entity(forged, "REQ-1")
+    assert ent["status"] == "VERIFIED" and ent["basis"] == "own" and ent["members"]
+    member = ent["members"][0]
+    member["state"] = "failed"
+    ent["set"]["passed"] -= 1
+    ent["set"]["failed"] += 1
+    for ev in ent["evidence"]:
+        if f"{ev['target']}#{ev['name']}" == member["case"]:
+            ev["status"] = "failed"
+    next(r for r in forged["cases"] if r["case"] == member["case"])["status"] = "failed"
+    control = copy.deepcopy(forged)
+    assert any("REQ-1 reads VERIFIED on its own set, which holds 1 failed" in p
+               for p in checkreport.check_report(control))  # fmt: skip
+    _relabel_derived(forged, "REQ-1")
+    problems = checkreport.check_report(forged)
+    assert any("REQ-1 has" in p and "claims basis 'derived'" in p for p in problems), problems
+    assert any("REQ-1 reads VERIFIED on its own set, which holds 1 failed" in p for p in problems), problems
 
 
 def _inject_alias(doc, rnd):

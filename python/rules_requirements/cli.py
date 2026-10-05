@@ -164,7 +164,7 @@ _FAMILY = {
         ("shape", "unknown-field", "bad-id", "bad-enum", "bad-status", "bad-level", "missing-level", "duplicate-id"),
         "shape",
     ),
-    **dict.fromkeys(("bad-reference", "dangling-reference", "refines-cycle"), "references"),
+    **dict.fromkeys(("bad-reference", "dangling-reference", "refines-cycle", "multi-parent-refines"), "references"),
     **dict.fromkeys(
         (
             "shared-case",
@@ -1520,7 +1520,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list", action="store_true", help="print every annotation found")
     s.add_argument("--json", default="", help="write annotations as JSON")
     s.add_argument("--ignore-model-errors", action="store_true")
-    s.add_argument("--strict", action="store_true", help="treat annotation warnings (multi-verifies-*) as errors")
+    s.add_argument(
+        "--strict", action="store_true", help="treat annotation warnings (multi-verifies-annotation) as errors"
+    )
     s.set_defaults(func=cmd_scan)
 
     for name in ("report", "aggregate"):

@@ -26,8 +26,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r docs/requirements.txt -e ".[test]"
-      - name: Sphinx (warnings are errors)
-        run: python -m sphinx -W -n --keep-going -b html docs docs/_build/html
+      - name: Sphinx (warnings are errors, docutils messages too)
+        # -W misses docutils messages printed outside Sphinx's logger (a
+        # broken --help text in the CLI reference): docs_build.py fails on
+        # any "WARNING/" line and any rendered problematic node.
+        run: python tools/docs_build.py -W -n --keep-going -b html docs docs/_build/html
 
       - name: Coverage badge
         if: env.PUBLISH == 'true'

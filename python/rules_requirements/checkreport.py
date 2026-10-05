@@ -58,6 +58,8 @@ _REQUIREMENT_COUNTS = {
 
 
 _OWN_OK = ("VERIFIED", "UNDER-VERIFIED", "VALIDATED")
+_OWN_BASES = ("own", "own+derived")
+_ROLLUP_OK = (*_OWN_OK, "MITIGATED", "PARTIAL")
 """The verdicts an entity's own set must back (with at least one passed member, nothing open)."""
 _OPEN_STATES = ("failed", "error", "skipped", "missing", "not-run", "moved", "quarantined")
 
@@ -329,8 +331,21 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                 problems.append(f"{eid} holds a quarantined case but reads {status.get(eid)}, not INVALID")
             if not counted["quarantined"] and status.get(eid) == "INVALID":
                 problems.append(f"{eid} reads INVALID but holds no quarantined case")
-            # A verdict its own set must back: one passed member at least, nothing open.
-            if ent.get("basis") in ("own", "own+derived") and status.get(eid) in _OWN_OK:
+            # The basis follows the set: an entity with members rests on them
+            # (basis own, or own+derived with refinements); only one without
+            # members may read derived alone. So relabelling the basis cannot
+            # skip the own-set check below.
+            basis = ent.get("basis")
+            if members and basis not in _OWN_BASES:
+                problems.append(
+                    f"{eid} has {len(members)} member(s) but claims basis {basis!r}; an entity with members "
+                    "rests on its own set (basis own or own+derived)"
+                )
+            elif not members and basis == "own+derived":
+                problems.append(f"{eid} claims basis own+derived but has no members")
+            # A verdict its own set must back: one passed member at least,
+            # nothing open. Re-derived whenever it has members, whatever basis it claims.
+            if (members or basis in _OWN_BASES) and status.get(eid) in _OWN_OK:
                 open_ = [f"{counted[st]} {st}" for st in _OPEN_STATES if counted[st]]
                 if not counted["passed"] or open_:
                     problems.append(
@@ -371,6 +386,9 @@ def check_report(doc: Mapping[str, Any]) -> list[str]:
                 continue
             if ent.get("basis") == "own" and derived:
                 problems.append(f"{ent['id']}: basis own, but derived from {', '.join(map(str, derived))}")
+            if ent.get("basis") in ("derived", "own+derived") and not derived and status.get(ent["id"]) in _ROLLUP_OK:
+                # A rollup of nothing is UNVERIFIED (UNVALIDATED, OPEN), never a pass.
+                problems.append(f"{ent['id']} reads {status.get(ent['id'])} derived from no entity")
             foreign = sorted(set(map(str, derived)) - children.get(ent["id"], set()))
             if foreign:
                 problems.append(

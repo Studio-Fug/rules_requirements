@@ -207,6 +207,19 @@ def test_schema_forbids_configuring_exactly_the_hard_errors_and_quarantines():
     assert set(rules["propertyNames"]["not"]["enum"]) == set(cfg.HARD_ERRORS) | set(cfg.QUARANTINE_CODES)
 
 
+def test_schema_lists_exactly_the_configurable_rules_with_their_defaults():
+    from rules_requirements import config as cfg
+
+    schema = _schema()
+    rules = schema["oneOf"][0]["properties"]["config"]["properties"]["rules"]
+    assert {k: v["default"] for k, v in rules["properties"].items()} == dict(cfg.DEFAULT_RULES)
+    assert rules["properties"]["multi-parent-refines"]["default"] == "error"
+    validator = jsonschema.Draft202012Validator(schema)
+    assert validator.is_valid({"config": {"rules": {"multi-parent-refines": "warning"}}})
+    assert not validator.is_valid({"config": {"rules": {"multi-parent-refines": "loud"}}})
+    assert not validator.is_valid({"config": {"rules": {"no-such-rule": "off"}}})  # the loader: unknown rule
+
+
 def _label_ok(schema, label):
     doc = {"requirements": [{"id": "REQ-1", "title": "t", "verified_by": [label, {"target": label, "cases": ["x"]}]}]}
     return jsonschema.Draft202012Validator(schema).is_valid(doc)

@@ -120,6 +120,9 @@ DEFAULT_RULES = {
     # Equal case paths in different targets with different owners and no
     # source file to tell whether they are the same test code.
     "same-path-multiple-owners": "warning",
+    # A requirement that refines two or more parents: refines must form a tree,
+    # so each test case's evidence rolls up one chain of requirements.
+    "multi-parent-refines": "error",
     # A requirement with refining children also claims cases of its own.
     "parent-with-claims": "warning",
     # `rr scan`: a verifies annotation naming several ids. Error by default from 0.4.

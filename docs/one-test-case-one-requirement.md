@@ -7,6 +7,9 @@ not warned about, impossible. This page explains the rule, the structures
 that carry it, and why no path through the tool can break it. The rule
 applies to user needs and mitigations as well: requirements, user needs and
 mitigations share one namespace, so a case verifies at most one *entity*.
+Verdicts derived through `refines`, `satisfies` and `implements` are not
+ownership; {ref}`derived-verdicts` explains why they cannot make one case
+verify two requirements.
 
 ## Why the rule exists
 
@@ -88,6 +91,56 @@ Neither mode can produce a second owner. The
 [thermostat example](https://github.com/Studio-Fug/rules_requirements/tree/main/examples/thermostat)
 runs in model mode with a lock; that is the end state 0.3 asks projects to
 reach ({doc}`guides/migrating-to-per-case`).
+
+(derived-verdicts)=
+## Derived verdicts are not ownership
+
+Ownership is one entity per case: `attribute()` gives each case at most one
+owner, and only that owner's verification set holds it. Some verdicts are
+not computed from a set at all, or not only from one. They are *derived*
+from other entities' verdicts along the model's trace links:
+
+- a requirement that others **refine** rolls up its children's verdicts;
+- a user need's VALIDATED rolls up the requirements that **satisfy** it;
+- a mitigation rolls up the requirements that **implement** it, and a risk
+  rolls up its mitigations.
+
+The report marks these with `basis: derived` (or `own+derived` when the
+entity also has a set) and lists the entities in `derived_from`. A derived
+verdict is a statement about other verdicts, not about cases: no case joins
+the parent's set, no case gets a second owner, and `rr check-report` rejects
+a `derived_from` that names anything but the entity's children. Derived
+verdicts are not ownership.
+
+**Refines must form a tree.** With one parent per requirement, the
+requirements above a case form a single chain: its owner, the owner's parent,
+that parent's parent, and so on to the root. Each case then supports exactly
+one chain of requirements. A requirement that refined two parents would make
+each of its cases the whole basis of both parents' VERIFIED verdicts: two
+requirements verified by one test case through rollups. So `rr validate`
+raises `multi-parent-refines`, an error by default, and so do `rr_model`'s
+`<name>_test`, `rr report` (exit 2) and the web editor's save guard (409).
+The fix is to keep one parent and split the child into one requirement per
+parent, each with its own cases. A project restructuring an old model can set
+`config.rules: {multi-parent-refines: warning}` for a while; the report then
+shows the shared rollup honestly (`basis: derived` on both parents, each
+`derived_from` the one child), but the rule is the tool's default for a
+reason.
+
+**One requirement may satisfy several user needs.** Each of those needs'
+VALIDATION is then derived from it, and that is allowed. User needs are
+validated, not verified: VALIDATED says that the requirements written for a
+need hold, which is a judgement about requirements, not a second use of a
+test case. The case still verifies exactly one requirement, and that
+requirement's verdict is computed once, from one set. Several needs reading
+it is ordinary traceability (one capability serving several needs), and
+forbidding it would force a project to duplicate requirements and their
+tests, which is the opposite of what the rule is for. A need that also claims
+cases of its own (`validated_by`) owns those cases like any other entity.
+Mitigations derive from the requirements that implement them the same way,
+and 0.3 does not limit how many mitigations one requirement implements: the
+requirement is verified once, from one set, and each mitigation's verdict
+reads that one verdict.
 
 ## Quarantine: ambiguity fails closed
 
@@ -211,7 +264,8 @@ non-NFC path, an `[rr:ID]` name tag; `attribution.main_repo` makes
 two entities, if a case naming two ids or a tag that names another id owns
 anything, if an owner is not a single id, if a quarantined case is owned, if
 an entity a quarantine names is not INVALID, if a verdict its own set cannot
-back or a rollup from a non-child is claimed, or if the counts disagree with
+back (an entity with members may not relabel its basis `derived`) or a rollup
+from a non-child is claimed, or if the counts disagree with
 the rows they count ({doc}`guides/outputs`).
 `rr_report` adds it as `<name>_check_test` whenever it builds a JSON report.
 Property tests guard the code itself: one regression test per path by which a

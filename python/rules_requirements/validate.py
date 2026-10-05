@@ -137,6 +137,7 @@ class _Validator:
             if not tm.level:
                 self.add("missing-level", f"{tm.id}: a test method must declare its level", tm)
         self.check_refines_cycles()
+        self.check_refines_tree()
         for un in self.m.user_needs.values():
             if not self.m.requirements_for_need(un.id):
                 self.rule("need-unsatisfied", f"{un.id}: no requirement satisfies this need", un)
@@ -283,6 +284,21 @@ class _Validator:
 
         for rid in sorted(reqs, key=natural_key):
             visit(rid, [])
+
+    def check_refines_tree(self) -> None:
+        """``refines`` must form a tree: a requirement with two parents makes
+        each of its test cases the basis of both parents' derived verdicts,
+        so one case would support two chains of requirements."""
+        for req in self.m.requirements.values():
+            parents = sorted({p for p in req.refines if p != req.id}, key=natural_key)
+            if len(parents) > 1:
+                self.rule(
+                    "multi-parent-refines",
+                    f"{req.id}: refines {len(parents)} requirements ({', '.join(parents)}); refines must form "
+                    f"a tree, or every test case of {req.id} would be the basis of {' and '.join(parents)} "
+                    "through derived verdicts. Keep one parent, or split it into one requirement per parent",
+                    req,
+                )
 
     # --- claims: one owner per test case --------------------------------------
 

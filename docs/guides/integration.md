@@ -224,7 +224,8 @@ that no case has two owners.
 
 - Keep the test jobs as the pass/fail gate and let the report job describe the
   state; tighten `--fail-on` (`unverified`, `gaps`) once coverage is meant to be
-  complete.
+  complete. `gaps` also fails on every attribution issue, warnings included
+  ({ref}`gap-issues`).
 - Pass the whole `bazel-testlogs` directory rather than a `**/test.xml` glob
   if you retry tests: the earlier attempts under `test_attempts/` are merged
   with the final result, and a pass that needed a retry then reads

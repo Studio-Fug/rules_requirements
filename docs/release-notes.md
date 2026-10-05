@@ -48,6 +48,13 @@ shows the end state.
   `same-path-multiple-owners`, `parent-with-claims`,
   `multi-verifies-annotation` (raised by `rr scan`, `rr check-annotations`
   and `rr report --scan`; `rr scan --strict` escalates it), `lock-stale`.
+- **`multi-parent-refines`** ({ref}`rules`), an error by default: a
+  requirement refines at most one parent, so `refines` forms a tree and each
+  test case's evidence rolls up one chain of requirements. Two parents would
+  make one case the whole basis of two requirements' VERIFIED verdicts through
+  derived rollups ({ref}`derived-verdicts`). `rr validate`, `<model>_test`,
+  `rr report` (exit 2) and the editor's save guard (409) raise it;
+  `config.rules: {multi-parent-refines: warning}` (or `off`) relaxes it.
   Under `$XML_OUTPUT_FILE` (or
   `--junit`), `rr validate` writes one JUnit case per check family, so
   `rr_model`'s `<name>_test` is per-case evidence.
@@ -103,7 +110,8 @@ shows the end state.
   `.update`.
 - **Web editor and agents** ({doc}`guides/web-editor`): the save guard
   refuses with 409 any edit that would give a case two owners (or introduce
-  a bad selector or target, or a lock owner change), a live precheck, the
+  a bad selector or target, a second `refines` parent, or a lock owner
+  change), a live precheck, the
   verification-set widget, the case ledger (`#/cases`) with checked
   **Move…**, **Update lock…**, and the *Assign test cases* agent workflow,
   which only proposes owners into the attribution worksheet.
@@ -138,6 +146,13 @@ These are the intended semantic breaks. Each says what a consumer must do.
   *Do:* pass that lane's evidence too, report the lane with
   `--lane`/`--lane-targets`, or move the claim to the entity the lane
   reports.
+- **A requirement that refines two or more parents is an error**
+  (`multi-parent-refines`: `rr validate` and `<model>_test` fail, `rr report`
+  exits 2, the editor refuses the save). 0.2 rolled one child's verdict up
+  into every parent, so one test case could be the whole basis of several
+  requirements' verdicts. *Do:* keep one parent and split the child into one
+  requirement per parent, each with its own cases; or set
+  `config.rules: {multi-parent-refines: warning}` while you restructure.
 - **A 0.3 model fails loudly on 0.2.** The new keys (`cases`, `whole`,
   `reason`, `validated_by`, `verified_by` on mitigations, the six `config`
   keys, the new rule names) are unknown fields or keys to 0.2. *Do:* bump
@@ -229,11 +244,26 @@ These are the intended semantic breaks. Each says what a consumer must do.
 - **An entity whose only cases were skipped reads INCOMPLETE** (0.2:
   UNVERIFIED), and its user need reads PARTIAL instead of UNVALIDATED.
   *Do:* nothing, unless you gate on UNVERIFIED; make the cases runnable.
-- **`--fail-on gaps` fails without a lock.** Without `config.sets_lock`,
-  any report where a set has tag-owned, glob or whole-target members carries
-  one `unpinned-sets` gap (and a `--queue-out` item), so `--fail-on gaps`
-  exits 1 on a project 0.2 passed. *Do:* set `config.sets_lock` and run
-  `rr sets lock --write` (it works in hybrid mode), or stop gating on gaps.
+- **`--fail-on gaps` fails on more gaps.** Without `config.sets_lock`, any
+  report where a set has tag-owned, glob or whole-target members carries one
+  `unpinned-sets` gap (and a `--queue-out` item). And every 0.3 attribution
+  issue is a gap, warnings included, so `--fail-on gaps` can exit 1 on a
+  project 0.2 passed even with the sets locked and every verdict VERIFIED
+  (the plain `pytest --junitxml=junit.xml` flow outside a testlogs tree
+  raises `unscoped-evidence`, for one). The attribution issues that are gaps
+  are `duplicate-case`, `unscoped-evidence`, `suite-level-requirement`,
+  `coarse-claim`, `tag-mismatch`, `unclaimed-tag`, `misdirected-evidence`,
+  `unknown-id`, `same-path-multiple-owners`, `ambiguous-source`,
+  `level-mismatch`, `unlocked-member`, `lock-stale`, `lock-owner-changed`,
+  `lock-invalid` and `multi-verifies-annotation` (under `--scan`);
+  {ref}`gap-issues` gives each one's fix. *Do:* lock (`unpinned-sets` and
+  the lock findings: set `config.sets_lock` and run `rr sets lock --write`,
+  which works in hybrid mode); resolve (`unscoped-evidence`, which no rule
+  configures: write the JUnit under a testlogs tree such as
+  `testlogs/<pkg>/<name>/test.xml`; `multi-verifies-annotation`: one id per
+  annotation; the rest as the table says); or configure the rule
+  (`config.rules: {<rule>: off}` drops the issue and its gap; `warning`
+  keeps the gap); or stop gating on gaps.
 - `unattributed-failure` replaces `untraced-failure`, which is still emitted
   alongside it in 0.3.x. *Do:* move readers to the new kind.
 - The JSON report's `schema` is `rules_requirements/report/v2`. `evidence[]`

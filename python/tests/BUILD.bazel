@@ -28,6 +28,14 @@ rr_py_test(
         "//:schema/worksheet.schema.json",
         # test_schema.py: the verification-set lock schema.
         "//:schema/verification_lock.schema.json",
+        # test_gap_issues.py: the docs that list the attribution issues that are gaps.
+        "//:CHANGELOG.md",
+        "//:docs/concepts.md",
+        "//:docs/guides/migrating-to-per-case.md",
+        "//:docs/guides/outputs.md",
+        "//:docs/release-notes.md",
+        # test_docs_build.py: the docs build step.
+        "//:tools/docs_build.py",
     ] + glob(["fixtures/**"]),
     env = {
         "RR_CASE_FIXTURE": "$(rootpath :rr_case_fixture)",

@@ -30,7 +30,7 @@ so each trace has exactly one source of truth:
 | Field | From → to | Meaning |
 | ----- | --------- | ------- |
 | `satisfies` | requirement → user need | The requirement is (part of) how the need is met. |
-| `refines` | requirement → requirement | Decomposition, e.g. system → software requirement. |
+| `refines` | requirement → requirement | Decomposition, e.g. system → software requirement. One parent per requirement: refines forms a tree (`multi-parent-refines`). |
 | `method` | requirement → test method *or* level | The verification rigor the requirement demands. |
 | `verified_by` | requirement, mitigation → test cases | The cases that verify it ({ref}`claims <claims>`, see {ref}`below <evidence>`); a user need's are `validated_by`. |
 | `mitigates` | mitigation → risk | The control acts on this risk. |
@@ -295,7 +295,12 @@ writes as a machine-readable work queue:
 | `unpinned-sets` | no lock: the entities whose sets have glob, whole-target or tag-owned members | autonomous |
 | `high-risk-open` | a high-severity risk that is not MITIGATED | human-gate |
 | `unknown-id` | evidence tagged with an id the model does not define | autonomous |
+| `multi-verifies-annotation` | (`rr report --scan`) a source *verifies* annotation that names several ids | autonomous |
 | `note:gap`, `note:todo`, `note:question` | an open note of that kind on any entity (questions route to a human) | by demanded level |
+
+Every attribution issue is one of these gaps, warnings included, so
+`rr report --fail-on gaps` fails on any of them ({ref}`gap-issues` lists
+each one and what to do about it).
 
 **Routing** splits the work between agents and people. A gap whose
 requirement demands a level at or below `autonomous_max_level` (default `sil`)
