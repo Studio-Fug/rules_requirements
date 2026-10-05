@@ -107,7 +107,11 @@ than one id (`multi-tag`), when claims of more than one entity select it
 (`attribution-conflict`, also a static `shared-case` error), or when the same
 test code — the same source file and case path, or targets declared in
 `config.variants` — is owned by different entities in different targets
-(`same-code-multiple-owners`). A quarantined case owns nothing, and every
+(`same-code-multiple-owners`; a source file is compared in one spelling, so
+`./x.py`, `a/../x.py` and the absolute path a harness started outside the
+workspace records are one file). Equal case paths with different owners whose
+source is unknown or recorded differently get the `same-path-multiple-owners`
+warning. A quarantined case owns nothing, and every
 entity it names reads INVALID until it has one owner. A tag naming a risk or a
 test method is `misdirected-evidence` and one naming an undefined id
 `unknown-id`; neither owns anything.

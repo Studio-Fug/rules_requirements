@@ -59,6 +59,7 @@ from __future__ import annotations
 import glob
 import importlib
 import os
+import posixpath
 import re
 import warnings
 from dataclasses import dataclass, field
@@ -104,13 +105,37 @@ _BAZEL_OUT = re.compile(r"^(?:.*/)?bazel-out/[^/]+/bin/")
 
 
 def workspace_relative(path: str) -> str:
-    """Strip a ``*.runfiles/<workspace>/`` or ``bazel-out/<cfg>/bin/`` prefix."""
+    """The one spelling of a test source path (``rr.file``), so that one source
+    file is one code identity however a producer spelled it.
+
+    Backslashes become ``/``; the path is normalized (``./x``, ``x//y`` and
+    ``a/../b`` collapse, as ``posixpath.normpath`` does); a
+    ``*.runfiles/<workspace>/`` or ``bazel-out/<cfg>/bin/`` prefix is
+    stripped, else the ``$BUILD_WORKSPACE_DIRECTORY`` prefix when that is
+    set. Any other absolute path is kept (same-code detection compares it
+    with a relative spelling by suffix). ``""`` stays ``""``.
+    """
     norm = (path or "").replace("\\", "/")
+    if not norm.strip():
+        return ""
+    norm = _normpath(norm)
     for rx in (_RUNFILES, _BAZEL_OUT):
         stripped = rx.sub("", norm, count=1)
         if stripped != norm:
-            return stripped
+            return _normpath(stripped)
+    root = (os.environ.get("BUILD_WORKSPACE_DIRECTORY") or "").replace("\\", "/")
+    if root.strip():
+        root = _normpath(root).rstrip("/")
+        if root and norm.startswith(root + "/"):
+            return _normpath(norm[len(root) + 1 :])
     return norm
+
+
+def _normpath(path: str) -> str:
+    norm = posixpath.normpath(path)
+    if norm.startswith("//"):  # POSIX keeps exactly two leading slashes; one path, one spelling
+        norm = "/" + norm.lstrip("/")
+    return "" if norm == "." else norm
 
 
 def _ids(value: Any) -> tuple[str, ...]:

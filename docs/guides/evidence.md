@@ -23,7 +23,7 @@ records:
 | `suite` | The enclosing JUnit `<testsuite>` name, when there is one. |
 | `source` | The file it was read from. |
 | `properties` | Any other properties, verbatim — among them `rr.file`, the source file of the test code, which `JUnitWriter`, `CheckPlan` and `rr case --file` write ({ref}`junit-properties`). |
-| `file`, `line` | The test source, workspace-relative (`rr.file`, else the testcase's `file` attribute, with any `*.runfiles/<workspace>/` or `bazel-out/<cfg>/bin/` prefix removed), and its `line` attribute (0 if unknown). |
+| `file`, `line` | The test source, workspace-relative (`rr.file`, else the testcase's `file` attribute, normalized — `./x`, `x//y`, `a/../b` collapse — with any `*.runfiles/<workspace>/`, `bazel-out/<cfg>/bin/` or `$BUILD_WORKSPACE_DIRECTORY/` prefix removed), and its `line` attribute (0 if unknown). |
 | `suite_declared` | Ids an enclosing suite (or parent case) named. They are *not* the case's: see below. |
 
 `TestCase.scope` is `target` for a result about the whole target run

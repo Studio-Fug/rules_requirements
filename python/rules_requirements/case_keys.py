@@ -212,8 +212,9 @@ def key_of(case: TestCase, main_repo: str | None = None) -> CaseKey:
 
 
 def file_of(case: TestCase) -> str:
-    """The test source a case came from (``rr.file``), workspace-relative; "" if unknown."""
-    return case.file or workspace_relative(case.properties.get(FILE_PROPERTY, ""))
+    """The test source a case came from (``rr.file``), workspace-relative and
+    in its one spelling (:func:`workspace_relative`); "" if unknown."""
+    return workspace_relative(case.file or case.properties.get(FILE_PROPERTY, ""))
 
 
 class RunDims(NamedTuple):

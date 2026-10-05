@@ -111,6 +111,27 @@ def test_workspace_relative_file():
     assert file_of(TestCase("t", "passed")) == ""
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    ["pi/h/fx_bench.py", "./pi/h/fx_bench.py", "pi/h//fx_bench.py", "pi/h/../h/fx_bench.py", "pi\\h\\fx_bench.py",
+     "/home/ci/splanc/pi/h/fx_bench.py", "/home/ci/splanc//./pi/h/fx_bench.py"],
+)  # fmt: skip
+def test_workspace_relative_gives_one_spelling_per_source(spelling, monkeypatch):
+    """One source file, one code identity (same-code detection compares it)."""
+    monkeypatch.setenv("BUILD_WORKSPACE_DIRECTORY", "/home/ci/splanc/")
+    assert workspace_relative(spelling) == "pi/h/fx_bench.py"
+    assert file_of(TestCase("t", "passed", file=spelling)) == "pi/h/fx_bench.py"
+    assert file_of(TestCase("t", "passed", properties={"rr.file": spelling})) == "pi/h/fx_bench.py"
+
+
+def test_workspace_relative_keeps_what_it_cannot_place(monkeypatch):
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    assert workspace_relative("/home/ci/splanc/./pi/h/fx_bench.py") == "/home/ci/splanc/pi/h/fx_bench.py"
+    assert workspace_relative("//abs/x.py") == "/abs/x.py"
+    assert workspace_relative("../other/x.py") == "../other/x.py"
+    assert workspace_relative("./") == workspace_relative("") == workspace_relative("  ") == ""
+
+
 _BAZEL_GENERATED = """<?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
   <testsuite name="{suite}" tests="1" failures="0" errors="0">

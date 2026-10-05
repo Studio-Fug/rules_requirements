@@ -588,8 +588,10 @@ def attribute(
        ``unknown-id``: neither owns anything.
     4. Owned keys of one test code (the same source file and path, or one
        ``config.variants`` group and path) in different targets with
-       different owners are quarantined ``same-code-multiple-owners``;
-       equal paths with different owners and no source file to compare are
+       different owners are quarantined ``same-code-multiple-owners``. A
+       source file is compared in its canonical spelling, and an absolute
+       path matches the relative path it ends with. Equal paths with
+       different owners whose source files are unknown or differ are
        ``same-path-multiple-owners``.
     5. Members: each entity's owned keys; a pseudo-member per selector that
        matched nothing (``missing`` if the target ran, ``not-run`` if not,
@@ -814,14 +816,16 @@ class _Attributor:
 
     def same_code(self) -> None:
         groups: list[tuple[list[CaseKey], str]] = []
-        by_code: dict[tuple[str, str], list[CaseKey]] = {}
+        with_file: dict[str, list[CaseKey]] = {}
         for key in self.owner:
-            source = self.cases[key].file
-            if source:
-                by_code.setdefault((source, key.path), []).append(key)
-        for (source, _), keys in by_code.items():
-            if len({k.target for k in keys}) > 1 and len({self.owner[k] for k in keys}) > 1:
-                groups.append((keys, f"the same source file {source}"))
+            if self.cases[key].file:
+                with_file.setdefault(key.path, []).append(key)
+        for keys in with_file.values():
+            for same in _same_source(keys, lambda k: self.cases[k].file):
+                if len({k.target for k in same}) > 1 and len({self.owner[k] for k in same}) > 1:
+                    files = sorted({self.cases[k].file for k in same}, key=natural_key)
+                    spelled = f" (spelled {', '.join(files[1:])})" if len(files) > 1 else ""
+                    groups.append((same, f"the same source file {files[0]}{spelled}"))
         for group in self.c.variant_groups():
             by_path: dict[str, list[CaseKey]] = {}
             for target in group:
@@ -858,14 +862,20 @@ class _Attributor:
             if key.path != SYNTHETIC_PATH:
                 owned_paths.setdefault(key.path, []).append(key)
         for path, keys in owned_paths.items():
+            # Left after the quarantines above: equal paths with different
+            # owners whose source is unknown, or whose recorded sources differ
+            # (which may still be one file, spelled from two roots).
             owners_ = sorted({self.owner[k] for k in keys}, key=natural_key)
-            if len(owners_) > 1 and any(not self.cases[k].file for k in keys):
-                listed = ", ".join(f"{k} ({self.owner[k]})" for k in sorted(keys, key=_key_order))
+            if len(owners_) > 1:
+                listed = ", ".join(
+                    f"{k} ({self.owner[k]}, {self.cases[k].file or 'source unknown'})"
+                    for k in sorted(keys, key=_key_order)
+                )
                 self.issue(
                     "same-path-multiple-owners",
                     f"case path {path!r} is owned by {', '.join(owners_)} in different targets: {listed}; if it "
-                    "is one test's code, declare the targets in config.variants (or record rr.file) so it "
-                    "cannot verify two requirements",
+                    "is one test's code, declare the targets in config.variants (or record one rr.file for it) "
+                    "so it cannot verify two requirements",
                     entities=tuple(owners_),
                 )
 
@@ -1093,6 +1103,43 @@ class _Attributor:
     def _rank(self, level: str) -> int:
         rank = self.c.rank(level)
         return -1 if rank is None else rank
+
+
+def _is_absolute(path: str) -> bool:
+    return path.startswith("/") or (len(path) > 2 and path[1] == ":" and path[2] == "/")
+
+
+def _one_source(a: str, b: str) -> bool:
+    """Whether two recorded (canonical) source paths are one file: equal, or
+    one absolute and ending in ``/`` plus the other, relative, one (a
+    producer that ran outside the workspace root records the absolute path)."""
+    if a == b:
+        return True
+    if _is_absolute(a) == _is_absolute(b):
+        return False
+    absolute, relative = (a, b) if _is_absolute(a) else (b, a)
+    return not relative.startswith("../") and absolute.endswith("/" + relative)
+
+
+def _same_source(keys: Sequence[CaseKey], file_of: Callable[[CaseKey], str]) -> list[list[CaseKey]]:
+    """``keys`` (one case path) grouped by source file: the connected
+    components of :func:`_one_source` over their files."""
+    files = dedupe([file_of(k) for k in keys])
+    parent = {f: f for f in files}
+
+    def root(f: str) -> str:
+        while parent[f] != f:
+            f = parent[f]
+        return f
+
+    for i, a in enumerate(files):
+        for b in files[i + 1 :]:
+            if _one_source(a, b):
+                parent[root(b)] = root(a)
+    groups: dict[str, list[CaseKey]] = {}
+    for key in keys:
+        groups.setdefault(root(file_of(key)), []).append(key)
+    return list(groups.values())
 
 
 def _claim_matches(claim: Claim, path: str) -> bool:

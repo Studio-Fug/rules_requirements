@@ -840,6 +840,51 @@ def test_P23_same_test_code_in_two_targets(tmp_path):
     assert build_matrix(one, ev).status("REQ-1") == VERIFIED
 
 
+@pytest.mark.parametrize(
+    "second",
+    ["./pi/h/fx_bench.py", "pi/h//fx_bench.py", "pi/h/../h/fx_bench.py", "/home/ci/splanc/pi/h/fx_bench.py"],
+)
+@pytest.mark.parametrize("via", ["property", "attribute"])
+def test_P23_same_code_however_its_file_is_spelled(tmp_path, monkeypatch, second, via):
+    """``./x``, ``x//y``, ``a/../b`` or the absolute path (a HITL harness started
+    outside the workspace root records it) are the same source file."""
+    monkeypatch.delenv("BUILD_WORKSPACE_DIRECTORY", raising=False)
+    reqs = (
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //h:fx_bench, cases: ['fx.e2e::run']}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //h:fx_bench_jit, cases: ['fx.e2e::run']}]}\n"
+    )
+
+    def case(target, file):
+        kw = {"properties": {"rr.file": file}} if via == "property" else {"file": file}
+        return tc("run", classname="fx.e2e", target=target, **kw)
+
+    mx = build_matrix(model_at(tmp_path, reqs), evidence(case("//h:fx_bench", "pi/h/fx_bench.py"),
+                                                          case("//h:fx_bench_jit", second)))  # fmt: skip
+    att = mx.attribution
+    assert quarantines(att) == {
+        "//h:fx_bench#fx.e2e::run": (SAME_CODE, ("REQ-1",)),
+        "//h:fx_bench_jit#fx.e2e::run": (SAME_CODE, ("REQ-2",)),
+    }
+    assert mx.status("REQ-1") == mx.status("REQ-2") == INVALID and not att.owner
+
+
+def test_P23_differing_files_at_one_path_still_warn(tmp_path):
+    """Two recorded files that do not resolve to one (another checkout's
+    absolute path, say) may still be one source: same-path-multiple-owners."""
+    reqs = (
+        "  - {id: REQ-1, title: a, satisfies: [UN-1], verified_by: [{target: //h:a, cases: ['*']}]}\n"
+        "  - {id: REQ-2, title: b, satisfies: [UN-1], verified_by: [{target: //h:b, cases: ['*']}]}\n"
+    )
+    ev = evidence(
+        tc("run", target="//h:a", properties={"rr.file": "pi/h/fx_bench.py"}),
+        tc("run", target="//h:b", properties={"rr.file": "/other/checkout/pi/h/fx_bench_copy.py"}),
+    )
+    att = build_matrix(model_at(tmp_path, reqs), ev).attribution
+    assert not att.quarantined and owners(att) == {"//h:a#c::run": "REQ-1", "//h:b#c::run": "REQ-2"}
+    (warning,) = issues(att, "same-path-multiple-owners")
+    assert warning.entities == ("REQ-1", "REQ-2") and "/other/checkout/pi/h/fx_bench_copy.py" in warning.message
+
+
 # --------------------------------------------------------------------------- #
 # P24-P31: rollups, the lock, editors, annotations, configuration, the API   #
 # --------------------------------------------------------------------------- #
