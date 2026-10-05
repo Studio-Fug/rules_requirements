@@ -519,4 +519,5 @@ notice:
   still reads, writes and works in `dataclasses.replace(case,
   requirements=...)`, but `dataclasses.asdict()` names the field `declared`,
   and passing both `declared=` and `requirements=` to the constructor is a
-  `TypeError` (two sets of ids for one case: neither may silently win).
+  `TypeError` (two sets of ids for one case: neither may silently win), even
+  `declared=()` or another case's `declared`.

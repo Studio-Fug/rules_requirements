@@ -441,8 +441,15 @@ def test_declared_is_a_field_and_requirements_a_deprecated_alias():
         TestCase("n", "passed", declared=("R-1",), requirements=("R-2",))
     with pytest.raises(TypeError, match="not both"):
         TestCase("n", "passed", declared=["R-1"], requirements=["R-1"])
-    with pytest.warns(DeprecationWarning):  # an empty declared= is no second set
-        assert TestCase("n", "passed", declared=(), requirements=("R-2",)).declared == ("R-2",)
+    with pytest.raises(TypeError, match="not both"):  # an explicit empty declared= is still a second set
+        TestCase("n", "passed", declared=(), requirements=("R-2",))
+    # Another case's declared beside the alias: refused, not silently overridden
+    # (it used to read as replace()'s own declared, dropping R-1).
+    a = TestCase("x", "passed", declared=("R-1",))
+    with pytest.raises(TypeError, match="not both"):
+        TestCase("y", "passed", declared=a.declared, requirements=["R-2"])
+    with pytest.raises(TypeError, match="not both"):  # replace() with both given explicitly
+        dataclasses.replace(a, declared=("R-3",), requirements=["R-2"])
     with pytest.warns(DeprecationWarning, match="use TestCase.declared"):
         replaced = dataclasses.replace(legacy, requirements=("R-6", "R-7"))
     assert replaced.declared == ("R-6", "R-7") and legacy.declared == ("R-4",)
